@@ -1,0 +1,8 @@
+data/cache/
+data/processed/
+data/archive/
+data/state.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.superpowers/

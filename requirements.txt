@@ -1,0 +1,8 @@
+pandas==2.2.1
+numpy==1.26.4
+scipy==1.14.1
+pulp==2.9.0
+pyarrow==18.1.0
+requests==2.31.0
+PyYAML>=6.0
+pytest>=8.0

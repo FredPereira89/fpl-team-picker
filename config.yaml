@@ -1,0 +1,23 @@
+budget: 100.0
+horizon_gw: 5
+risk:
+  profile: balanced
+  ownership_weight: 0.0
+news:
+  weight: 0.5
+  max_age_hours: 48
+model:
+  form_half_life_gw: 3
+  form_max_weight: 0.6
+  shrinkage_minutes: 900
+optimizer:
+  max_paid_hits: 2
+  hit_cost: 4
+  bench_weight: [0.15, 0.10, 0.05, 0.02]
+odds:
+  provider: null
+data:
+  cache_ttl_hours: 6
+  cache_ttl_matchday_hours: 1
+entry_id: null
+free_transfers: 1
