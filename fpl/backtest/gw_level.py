@@ -49,13 +49,30 @@ def captaincy_hit_rate(pred_by_gw: dict[int, pd.Series],
 
 
 def trust_gate(model: dict, naive: dict, fpl_xp: dict) -> dict:
-    """Model is trusted only if per-position rank correlation beats BOTH baselines."""
+    """Model is trusted only if per-position rank correlation beats BOTH baselines,
+    for every position that model, naive, and fpl_xp all cover. A position
+    missing from any of the three inputs is an automatic failure, not a
+    silent pass -- incomplete data must never produce a false "trusted"."""
+    model_pos = model["spearman_by_position"]
+    naive_pos = naive["spearman_by_position"]
+    fpl_pos = fpl_xp["spearman_by_position"]
+    all_positions = set(model_pos) | set(naive_pos) | set(fpl_pos)
+
     failures = []
-    for pos, rho in model["spearman_by_position"].items():
-        if rho <= naive["spearman_by_position"].get(pos, -1):
+    for pos in sorted(all_positions):
+        if pos not in model_pos:
+            failures.append(f"{pos}: no model evaluation available for this position")
+            continue
+        rho = model_pos[pos]
+        if pos not in naive_pos:
+            failures.append(f"{pos}: naive baseline missing, cannot confirm model beats it")
+        elif rho <= naive_pos[pos]:
             failures.append(f"{pos}: rank correlation {rho:.3f} does not beat naive baseline")
-        if rho <= fpl_xp["spearman_by_position"].get(pos, -1):
+        if pos not in fpl_pos:
+            failures.append(f"{pos}: FPL xP baseline missing, cannot confirm model beats it")
+        elif rho <= fpl_pos[pos]:
             failures.append(f"{pos}: rank correlation {rho:.3f} does not beat FPL's own xP")
+
     trusted = not failures
     summary = ("Model beats both baselines in every position — recommendations can be "
                "trusted at face value." if trusted else

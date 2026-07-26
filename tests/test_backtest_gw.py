@@ -60,3 +60,21 @@ def test_trust_gate_fails_and_names_the_position():
     assert out["trusted"] is False
     assert any("DEF" in f for f in out["failures"])
     assert "DEF" in out["summary"]
+
+
+def test_trust_gate_fails_when_baseline_missing_for_a_position():
+    model = {"spearman_by_position": {"MID": 0.6, "DEF": 0.5, "FWD": 0.55, "GKP": 0.05}}
+    naive = {"spearman_by_position": {"MID": 0.3, "DEF": 0.2, "FWD": 0.25}}  # no GKP
+    fpl = {"spearman_by_position": {"MID": 0.4, "DEF": 0.3, "FWD": 0.35}}    # no GKP
+    out = trust_gate(model, naive, fpl)
+    assert out["trusted"] is False
+    assert any("GKP" in f for f in out["failures"])
+
+
+def test_trust_gate_fails_when_model_missing_a_position_baselines_have():
+    model = {"spearman_by_position": {"MID": 0.6, "DEF": 0.5, "FWD": 0.55}}  # no GKP
+    naive = {"spearman_by_position": {"MID": 0.3, "DEF": 0.2, "FWD": 0.25, "GKP": 0.1}}
+    fpl = {"spearman_by_position": {"MID": 0.4, "DEF": 0.3, "FWD": 0.35, "GKP": 0.1}}
+    out = trust_gate(model, naive, fpl)
+    assert out["trusted"] is False
+    assert any("GKP" in f for f in out["failures"])
