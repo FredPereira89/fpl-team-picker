@@ -70,3 +70,19 @@ def test_entry_picks_url_shape(tmp_path):
     c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s)
     assert c.entry_picks(123, 1) == {"picks": []}
     assert s.calls == [url]
+
+
+def test_forbids_my_team_exact_case(tmp_path):
+    s = FakeSession({})
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s)
+    with pytest.raises(ValueError, match="refusing to call authenticated endpoint"):
+        c._get("entry/1/my-team/", "entry-myteam")
+    assert len(s.calls) == 0  # No network call made
+
+
+def test_forbids_my_team_case_variant(tmp_path):
+    s = FakeSession({})
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s)
+    with pytest.raises(ValueError, match="refusing to call authenticated endpoint"):
+        c._get("entry/1/My-Team/", "entry-myteam")
+    assert len(s.calls) == 0  # No network call made

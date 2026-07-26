@@ -33,7 +33,7 @@ class FplClient:
         if cached is not None:
             return cached
         url = BASE + path
-        if any(f in url for f in FORBIDDEN):
+        if any(f in url.lower() for f in FORBIDDEN):
             raise ValueError(f"refusing to call authenticated endpoint: {url}")
         try:
             self._throttle()
