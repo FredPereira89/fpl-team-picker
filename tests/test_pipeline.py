@@ -122,3 +122,14 @@ def test_mode_two_bank_reflects_pre_transfer_squad_value(tmp_path):
     # Fixture is chosen so the optimizer actually changes squad value --
     # otherwise the old (buggy) pass-through formula would coincidentally match.
     assert value_before != rec.squad_value
+
+
+def test_mode_falls_back_honestly_when_no_current_squad_available(tmp_path):
+    """Regression: requesting mode=2 with no current_squad (the CLI never
+    fetches one today) must report BOTH mode and trust as reflecting the
+    Mode 1 rebuild that actually ran, not the requested mode=2 label with
+    the trust caveat silently dropped."""
+    rec, _ = run(Config(), mode=2, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.mode == 1
+    assert rec.trust != ""
+    assert rec.transfers is None

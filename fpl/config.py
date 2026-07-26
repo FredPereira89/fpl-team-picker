@@ -4,6 +4,11 @@ from pathlib import Path
 import yaml
 
 VALID_PROFILES = {"balanced", "template", "differential"}
+# Accepted by the schema (forward-compatible), but the optimizer never reads
+# ownership_weight yet -- so these two would silently behave identically to
+# "balanced" rather than actually tilting picks. Reject them until they're
+# wired into the MILP objective, so the config never quietly no-ops.
+NOT_YET_IMPLEMENTED_PROFILES = {"template", "differential"}
 FT_CAP = 5
 
 
@@ -60,6 +65,12 @@ def load_config(path: Path) -> Config:
 
     if cfg.risk_profile not in VALID_PROFILES:
         raise ValueError(f"risk.profile must be one of {sorted(VALID_PROFILES)}, got {cfg.risk_profile!r}")
+    if cfg.risk_profile in NOT_YET_IMPLEMENTED_PROFILES:
+        raise ValueError(
+            f"risk.profile={cfg.risk_profile!r} is accepted by the schema but not yet "
+            f"wired into the optimizer -- ownership_weight has no effect yet. "
+            f"Use 'balanced' for now."
+        )
     if not 0 <= cfg.free_transfers <= FT_CAP:
         raise ValueError(f"free_transfers must be 0..{FT_CAP}, got {cfg.free_transfers}")
     if cfg.budget <= 0:

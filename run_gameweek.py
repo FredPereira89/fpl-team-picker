@@ -34,20 +34,20 @@ def main() -> int:
     if args.no_refresh:
         cfg.cache_ttl_hours = 24 * 365
 
-    mode = args.mode
-    if mode == 2 and cfg.entry_id is None:
-        # Mode 2 needs a saved squad to transfer from, fetched via entry_id.
-        # Nothing wires that fetch up yet, so silently falling through to a
-        # full rebuild under a "Mode 2" label would misrepresent what
-        # actually ran. Say so and fall back openly instead.
+    if args.mode == 2:
+        # Mode 2 needs the user's current squad, fetched via
+        # entry/{id}/event/{gw}/picks/ -- that fetch isn't wired up in this
+        # CLI yet (setting entry_id alone doesn't change that), so this
+        # always falls back to a Mode 1 rebuild. pipeline.run() reports the
+        # fallback honestly on its own (actual_mode), but tell the user
+        # upfront too rather than let them discover it only in the report.
         print(
-            "Mode 2 (weekly transfers) needs a saved squad and team ID. "
-            "Set entry_id in config.yaml once you've saved your Mode 1 squad "
-            "on the FPL site. Falling back to Mode 1 (full squad build) for now.\n"
+            "Mode 2 (weekly transfers) isn't wired up in this CLI yet -- it needs "
+            "your current squad, which requires fetching entry/{id}/picks/ (not yet "
+            "implemented). Falling back to Mode 1 (full squad build) for now.\n"
         )
-        mode = 1
 
-    rec, xp = run(cfg, mode=mode, from_event=args.gw, root=ROOT / "data")
+    rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=ROOT / "data")
     print(render(rec, xp))
     return 0
 

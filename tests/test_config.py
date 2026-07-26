@@ -45,3 +45,11 @@ def test_rejects_unknown_risk_profile(tmp_path):
     p.write_text("risk: {profile: reckless}\n")
     with pytest.raises(ValueError, match="risk.profile"):
         load_config(p)
+
+
+def test_rejects_not_yet_implemented_risk_profiles(tmp_path):
+    for profile in ("template", "differential"):
+        p = tmp_path / "config.yaml"
+        p.write_text(f"risk: {{profile: {profile}}}\n")
+        with pytest.raises(ValueError, match="not yet"):
+            load_config(p)

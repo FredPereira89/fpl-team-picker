@@ -46,11 +46,18 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     minutes = minutes_model(players, cfg, news=news)
     xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
 
+    # actual_mode reflects which branch genuinely ran, not the caller's
+    # request -- Mode 2 needs a current_squad to transfer from, and nothing
+    # in this codebase fetches one yet, so a mode=2 call with no
+    # current_squad must be labelled and reported as the Mode 1 rebuild it
+    # actually is, never silently mislabelled as a transfer recommendation.
     transfers = None
     if mode == 2 and current_squad:
+        actual_mode = 2
         best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
     else:
+        actual_mode = 1
         squad = optimize_squad(xp, cfg)
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
 
@@ -67,7 +74,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         "see the FPL site",
     )
 
-    if mode == 2 and current_squad:
+    if actual_mode == 2:
         # Bank must reflect proceeds from the CURRENT squad, not the new one --
         # optimize_transfers spends bank + value(current_squad), so recompute
         # against the pre-transfer value rather than passing the caller's
@@ -78,11 +85,11 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         bank_after = round(cfg.budget - value, 1)
 
     rec = Recommendation(
-        gw=from_event, deadline=deadline, mode=mode, lineup=lineup,
+        gw=from_event, deadline=deadline, mode=actual_mode, lineup=lineup,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         bank=bank_after,
         squad_value=value, stale=getattr(client, "stale", False),
         trust="Backtest not yet run - treat projections as provisional."
-              if mode == 1 else "",
+              if actual_mode == 1 else "",
     )
     return rec, xp
