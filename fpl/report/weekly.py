@@ -54,10 +54,20 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     out.append("")
 
     cap, vice = df.loc[lu.captain], df.loc[lu.vice]
+    cap_xp, vice_xp = float(cap["xp_next1"]), float(vice["xp_next1"])
+    if cap_xp > vice_xp:
+        comparison = (f"has the highest projected return in the squad "
+                     f"({cap_xp:.1f} xP vs {vice_xp:.1f} for {vice['web_name']})")
+    elif cap_xp == vice_xp:
+        comparison = (f"is tied for the highest projected return in the squad "
+                     f"({cap_xp:.1f} xP, matching {vice['web_name']})")
+    else:
+        comparison = (f"is the selected captain (projected {cap_xp:.1f} xP); "
+                     f"{vice['web_name']} projects slightly higher at {vice_xp:.1f} xP "
+                     f"but was picked as vice")
     out += [
         f"### Captain: {cap['web_name']} (C)  |  Vice: {vice['web_name']} (VC)",
-        f"Recommended because {cap['web_name']} has the highest projected return in the "
-        f"squad ({cap['xp_next1']:.1f} xP vs {vice['xp_next1']:.1f} for {vice['web_name']}).",
+        f"Recommended because {cap['web_name']} {comparison}.",
         "",
     ]
 

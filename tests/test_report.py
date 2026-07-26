@@ -112,3 +112,23 @@ def test_hit_cost_disclosed_when_taken():
                         gross_xp=60.0, net_xp=56.0, baseline_xp=55.0, gain=1.0)
     out = render(_rec(transfers=plan), XP)
     assert "-4" in out or "−4" in out
+
+
+def test_captain_comparison_is_honest_when_vice_has_higher_xp():
+    """The finding: the old code unconditionally claimed captain 'has the
+    highest projected return', even if untrue. Build a lineup where vice
+    actually projects higher than captain and confirm the rendered text
+    does not falsely claim the captain is highest."""
+    xp = XP.copy()
+    xp.loc[xp.player_id == 8, "xp_next1"] = 5.0   # captain
+    xp.loc[xp.player_id == 13, "xp_next1"] = 7.0  # vice -- higher than captain
+    out = render(_rec(), xp)
+    block = out.split("### Captain")[1].split("###")[0]
+    assert "has the highest projected return" not in block
+
+
+def test_captain_comparison_is_honest_when_tied():
+    out = render(_rec(), XP)  # base fixture has captain and vice tied at 4.0
+    block = out.split("### Captain")[1].split("###")[0]
+    assert "has the highest projected return" not in block
+    assert "tied" in block.lower()
