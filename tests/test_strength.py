@@ -2,20 +2,24 @@ import pandas as pd
 from fpl.model.strength import team_ratings, HOME_ATT, AWAY_ATT
 
 TEAMS = pd.DataFrame({
-    "team_id": [1, 2, 3],
-    "name": ["Strong", "Average", "Promoted"],
-    "short_name": ["STR", "AVG", "PRO"],
-    "strength_overall_home": [5, 3, 2],
-    "strength_overall_away": [5, 3, 2],
+    "team_id": [1, 2, 3, 4, 5],
+    "name": ["Strong", "Average", "Promoted", "Filler1", "Filler2"],
+    "short_name": ["STR", "AVG", "PRO", "FIL1", "FIL2"],
+    "strength_overall_home": [5, 3, 1, 3, 3],
+    "strength_overall_away": [5, 3, 1, 3, 3],
 })
 
-# Strong: 90 goals for, 20 against. Average: 50/50. Promoted: no PL history (all zero).
+# Strong: 70 goals for, 32 against. Average/Filler1/Filler2: identical 50/50.
+# Promoted: no PL history (zero minutes). Filler1/2 exist only to give the
+# league mean enough established teams that "Average" centres near 1.0 —
+# a 2-team sample (Strong + Average alone) skews the mean too far for the
+# 0.9-1.1 tolerance below; this is a fixture-realism fix, not a formula change.
 PLAYERS = pd.DataFrame({
-    "player_id": [1, 2, 3],
-    "team_id": [1, 2, 3],
-    "goals_scored": [90, 50, 0],
-    "goals_conceded": [20, 50, 0],
-    "minutes": [3000, 3000, 0],
+    "player_id": [1, 2, 3, 4, 5],
+    "team_id": [1, 2, 3, 4, 5],
+    "goals_scored": [70, 50, 0, 50, 50],
+    "goals_conceded": [32, 50, 0, 50, 50],
+    "minutes": [3000, 3000, 0, 3000, 3000],
 })
 
 

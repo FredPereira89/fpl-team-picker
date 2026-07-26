@@ -28,15 +28,14 @@ def team_ratings(players: pd.DataFrame, teams: pd.DataFrame, odds_provider=None)
     ).fillna({"gf": 0, "ga": 0, "mins": 0})
 
     established = df["mins"] >= MIN_MINUTES
-    mean_gf = df["gf"].mean() if len(df) > 0 else 1.0
-    mean_ga = df["ga"].mean() if len(df) > 0 else 1.0
+    mean_gf = df.loc[established, "gf"].mean() if established.any() else 1.0
+    mean_ga = df.loc[established, "ga"].mean() if established.any() else 1.0
 
     att, dfn, conf = [], [], []
     for _, row in df.iterrows():
         if row["mins"] >= MIN_MINUTES and mean_gf > 0 and mean_ga > 0:
-            a = row["gf"] / mean_gf
-            att.append(a)
-            dfn.append(2.0 - a)  # symmetric: attack+defence~2.0 (centred on 1.0 each)
+            att.append(row["gf"] / mean_gf)
+            dfn.append(row["ga"] / mean_ga)
             conf.append("high")
         else:
             overall = (row["strength_overall_home"] + row["strength_overall_away"]) / 2
