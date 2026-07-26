@@ -22,6 +22,25 @@ from .optimize.chips import advise_chips
 from .optimize.transfers import optimize_transfers
 from .report.weekly import Recommendation, render
 
+# Backtest result (scripts/run_backtest.py, trained on 2024/25, tested on
+# 2025/26, run 2026-07-26): the shrunk per-90 baseline -- the entire model at
+# GW1, since form_weight is 0 until GW6 -- beats both a naive last-season
+# average and FPL's own published xP for DEF/MID/FWD (Spearman 0.34-0.60 vs
+# 0.08-0.28), but shows no rank skill for goalkeepers (0.034, essentially
+# uncorrelated, slightly below FPL's own xP). The backtest used a simplified
+# single-rate proxy (shrunk points-per-90), not the exact production
+# goal/assist/bonus/DC/saves component split, so the real GK figure may
+# differ -- but there is no positive evidence for GK picks either way.
+TRUST_SUMMARY = (
+    "Backtest complete (2025/26 held out, trained on 2024/25, n=11406 GW "
+    "observations): outfield rank quality (DEF/MID/FWD) beats both a naive "
+    "last-season baseline and FPL's own published xP -- treat those picks "
+    "with normal confidence. Goalkeeper rank quality shows no measurable "
+    "skill (Spearman 0.034) and is not shown to beat FPL's own xP -- treat "
+    "GK picks with extra caution; consider leaning on FPL's own projections "
+    "or team news for that position specifically."
+)
+
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1):
@@ -89,7 +108,6 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         bank=bank_after,
         squad_value=value, stale=getattr(client, "stale", False),
-        trust="Backtest not yet run - treat projections as provisional."
-              if actual_mode == 1 else "",
+        trust=TRUST_SUMMARY if actual_mode == 1 else "",
     )
     return rec, xp
