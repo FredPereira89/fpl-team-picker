@@ -61,3 +61,33 @@ def test_is_matchday_false_on_empty_day():
 
 def test_is_matchday_ignores_null_kickoffs():
     assert is_matchday([{"kickoff_time": None}], NOW) is False
+
+
+def test_naive_datetime_treated_as_utc_in_is_matchday():
+    """Bug 1: naive datetime should be treated as UTC, not local system time."""
+    naive_now = datetime(2026, 8, 21, 0, 30)  # intended as UTC, no tzinfo
+    fx = [{"kickoff_time": "2026-08-21T22:00:00Z"}]
+    # Should be True because it's the same date in UTC
+    assert is_matchday(fx, naive_now) is True
+
+
+def test_naive_datetime_treated_as_utc_in_put_and_get_fresh(tmp_path):
+    """Bug 1: naive datetime in put/get_fresh should be treated as UTC, not local time."""
+    c = Cache(tmp_path)
+    # Use naive datetime intended as UTC
+    naive_put_time = datetime(2026, 8, 21, 10, 0)  # no tzinfo, intended as UTC
+    c.put("test-data", {"value": 42}, now=naive_put_time)
+
+    # Use naive datetime intended as UTC for get_fresh check
+    naive_check_time = datetime(2026, 8, 21, 11, 0)  # 1 hour later
+    result = c.get_fresh("test-data", ttl_hours=2, now=naive_check_time)
+    assert result == {"value": 42}
+
+
+def test_slug_with_underscore_works_with_newest(tmp_path):
+    """Bug 2: slug containing underscore should work correctly with newest()."""
+    c = Cache(tmp_path)
+    c.put("element_summary", {"x": 1}, now=NOW)
+    payload, ts = c.newest("element_summary")
+    assert payload == {"x": 1}
+    assert ts.tzinfo is not None
