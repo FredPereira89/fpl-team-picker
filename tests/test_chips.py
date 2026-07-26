@@ -76,3 +76,13 @@ def test_reason_always_explains_the_tradeoff():
     a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
                      _counts(), TEAM_BY_PLAYER, 1, [])
     assert len(a.reason) > 20
+
+
+def test_fallback_is_honest_when_a_triggered_chip_is_already_used():
+    """Bench qualifies for Bench Boost, but it's already been used -- the
+    fallback reason must say so, not falsely claim the bench is weak."""
+    a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
+                     _counts(), TEAM_BY_PLAYER, 1, ["benchboost"])
+    assert a.chip is None
+    assert "already used" in a.reason
+    assert "too weak" not in a.reason
