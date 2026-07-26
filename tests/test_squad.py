@@ -93,7 +93,7 @@ def test_known_optimum_on_small_pool():
     picked = pool[pool.player_id.isin(s.player_ids)]
     # every pick is affordable at 4.0 x 15 = 60 <= 100, so it maximises premiums
     # subject to 3-per-club and the 2/5/5/3 split
-    assert (picked.xp_next5 == 50.0).sum() >= 8
+    assert (picked.xp_next5 == 50.0).sum() == 15
 
 
 def test_banned_players_are_excluded():
