@@ -13,7 +13,7 @@ model:
 optimizer:
   max_paid_hits: 2
   hit_cost: 4
-  bench_weight: [0.15, 0.10, 0.05, 0.02]
+  bench_weight: [0.20, 0.15, 0.05, 0.02]
 odds:
   provider: null
 data:
