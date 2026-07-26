@@ -67,10 +67,20 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         "see the FPL site",
     )
 
+    if mode == 2 and current_squad:
+        # Bank must reflect proceeds from the CURRENT squad, not the new one --
+        # optimize_transfers spends bank + value(current_squad), so recompute
+        # against the pre-transfer value rather than passing the caller's
+        # pre-transfer bank straight through unchanged.
+        value_before = round(sum(prices[i] for i in current_squad), 1)
+        bank_after = round(bank + value_before - value, 1)
+    else:
+        bank_after = round(cfg.budget - value, 1)
+
     rec = Recommendation(
         gw=from_event, deadline=deadline, mode=mode, lineup=lineup,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
-        bank=round(cfg.budget - value, 1) if mode == 1 else bank,
+        bank=bank_after,
         squad_value=value, stale=getattr(client, "stale", False),
         trust="Backtest not yet run - treat projections as provisional."
               if mode == 1 else "",

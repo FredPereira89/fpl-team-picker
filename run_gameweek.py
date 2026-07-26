@@ -34,7 +34,20 @@ def main() -> int:
     if args.no_refresh:
         cfg.cache_ttl_hours = 24 * 365
 
-    rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=ROOT / "data")
+    mode = args.mode
+    if mode == 2 and cfg.entry_id is None:
+        # Mode 2 needs a saved squad to transfer from, fetched via entry_id.
+        # Nothing wires that fetch up yet, so silently falling through to a
+        # full rebuild under a "Mode 2" label would misrepresent what
+        # actually ran. Say so and fall back openly instead.
+        print(
+            "Mode 2 (weekly transfers) needs a saved squad and team ID. "
+            "Set entry_id in config.yaml once you've saved your Mode 1 squad "
+            "on the FPL site. Falling back to Mode 1 (full squad build) for now.\n"
+        )
+        mode = 1
+
+    rec, xp = run(cfg, mode=mode, from_event=args.gw, root=ROOT / "data")
     print(render(rec, xp))
     return 0
 

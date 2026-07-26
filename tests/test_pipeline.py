@@ -80,7 +80,9 @@ def test_returns_contract_frame(tmp_path):
 
 def test_pipeline_imports_no_mcp_or_archive():
     """The headless path must not depend on MCP, skills, or the backtest archive."""
-    src = Path("fpl/pipeline.py").read_text() + Path("run_gameweek.py").read_text()
+    project_root = Path(__file__).resolve().parent.parent
+    src = ((project_root / "fpl" / "pipeline.py").read_text()
+           + (project_root / "run_gameweek.py").read_text())
     for banned in ["mcp", "fantasy_pl", "fpl_mcp", "archive", "Skill"]:
         assert banned not in src, f"weekly path must not reference {banned!r}"
 
@@ -91,3 +93,32 @@ def test_stale_flag_propagates_to_report(tmp_path):
 
     rec, _ = run(Config(), mode=1, from_event=1, root=tmp_path, client=StaleClient())
     assert rec.stale is True
+
+
+def test_mode_two_bank_reflects_pre_transfer_squad_value(tmp_path):
+    """Regression: bank must be recomputed from the CURRENT squad's value,
+    not passed through unchanged -- otherwise a squad whose value changes
+    after transfers reports a bank that doesn't reconcile against budget."""
+    from fpl.data.normalize import normalize_players
+    players = normalize_players(BOOTSTRAP)
+    need = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    current, club_count = [], {}
+    cheap = players[players.player_id % 5 == 0].sort_values("player_id")
+    for _, row in cheap.iterrows():
+        pos, team_id, pid = row["position"], int(row["team_id"]), int(row["player_id"])
+        if need.get(pos, 0) > 0 and club_count.get(team_id, 0) < 3:
+            current.append(pid)
+            need[pos] -= 1
+            club_count[team_id] = club_count.get(team_id, 0) + 1
+        if all(v == 0 for v in need.values()):
+            break
+
+    rec, xp = run(Config(max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
+                  client=FakeClient(), current_squad=current, bank=5.0, free_transfers=2)
+    prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
+    value_before = round(sum(prices[i] for i in current), 1)
+    expected_bank = round(5.0 + value_before - rec.squad_value, 1)
+    assert abs(rec.bank - expected_bank) < 1e-6
+    # Fixture is chosen so the optimizer actually changes squad value --
+    # otherwise the old (buggy) pass-through formula would coincidentally match.
+    assert value_before != rec.squad_value
