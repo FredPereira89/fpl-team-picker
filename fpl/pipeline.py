@@ -1,0 +1,78 @@
+"""End-to-end weekly pipeline: data -> model -> optimize -> report.
+
+Pure Python. No MCP, no skills, no third-party historical dataset - so a
+headless cron invocation works by construction.
+"""
+from pathlib import Path
+import pandas as pd
+
+from .config import Config
+from .data.cache import Cache
+from .data.client import FplClient
+from .data.normalize import normalize_players, normalize_teams, normalize_fixtures
+from .data.store import save_table
+from .model.strength import team_ratings
+from .model.minutes import minutes_model
+from .model.scoring import per90_rates
+from .model.fixtures import team_fixture_frame, fixture_counts
+from .model.xp import build_xp
+from .optimize.squad import optimize_squad
+from .optimize.lineup import build_lineup
+from .optimize.chips import advise_chips
+from .optimize.transfers import optimize_transfers
+from .report.weekly import Recommendation, render
+
+
+def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
+        news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1):
+    root = Path(root)
+    client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours)
+
+    bootstrap = client.bootstrap()
+    raw_fixtures = client.fixtures()
+    players = normalize_players(bootstrap)
+    teams = normalize_teams(bootstrap)
+    fixtures = normalize_fixtures(raw_fixtures)
+
+    processed = root / "processed"
+    save_table(players, "players", processed)
+    save_table(teams, "teams", processed)
+    save_table(fixtures, "fixtures", processed)
+
+    ratings = team_ratings(players, teams)
+    tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw)
+    counts = fixture_counts(fixtures, list(teams["team_id"]), from_event, cfg.horizon_gw)
+    rates = per90_rates(players, cfg)
+    minutes = minutes_model(players, cfg, news=news)
+    xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
+
+    transfers = None
+    if mode == 2 and current_squad:
+        best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg)
+        squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
+    else:
+        squad = optimize_squad(xp, cfg)
+        squad_ids, starting_ids = squad.player_ids, squad.starting_ids
+
+    from .optimize.squad import Squad
+    lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
+
+    team_by_player = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
+    chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event, [])
+
+    prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
+    value = round(sum(prices[i] for i in squad_ids), 1)
+    deadline = next(
+        (e["deadline_time"] for e in bootstrap.get("events", []) if e["id"] == from_event),
+        "see the FPL site",
+    )
+
+    rec = Recommendation(
+        gw=from_event, deadline=deadline, mode=mode, lineup=lineup,
+        squad_ids=squad_ids, transfers=transfers, chip=chip,
+        bank=round(cfg.budget - value, 1) if mode == 1 else bank,
+        squad_value=value, stale=getattr(client, "stale", False),
+        trust="Backtest not yet run - treat projections as provisional."
+              if mode == 1 else "",
+    )
+    return rec, xp
