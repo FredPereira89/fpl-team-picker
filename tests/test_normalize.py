@@ -24,7 +24,8 @@ BOOTSTRAP = {
          "assists": 10, "clean_sheets": 12, "goals_conceded": 16, "saves": 0,
          "bonus": 18, "bps": 570, "yellow_cards": 2, "red_cards": 0, "own_goals": 0,
          "expected_goals": "7.57", "expected_assists": "7.16",
-         "expected_goals_conceded": "15.57", "selected_by_percent": "11.2"},
+         "expected_goals_conceded": "15.57", "selected_by_percent": "11.2",
+         "defensive_contribution": 184},
         {"id": 99, "web_name": "Crock", "team": 7, "element_type": 2, "now_cost": 45,
          "status": "i", "news": "Knee injury - expected back 05 Sep",
          "chance_of_playing_next_round": 0,
@@ -32,7 +33,8 @@ BOOTSTRAP = {
          "assists": 1, "clean_sheets": 4, "goals_conceded": 12, "saves": 0,
          "bonus": 2, "bps": 180, "yellow_cards": 1, "red_cards": 0, "own_goals": 0,
          "expected_goals": "0.40", "expected_assists": "0.90",
-         "expected_goals_conceded": "13.10", "selected_by_percent": "0.4"},
+         "expected_goals_conceded": "13.10", "selected_by_percent": "0.4",
+         "defensive_contribution": 25},
     ],
 }
 
@@ -104,3 +106,13 @@ def test_store_roundtrip(tmp_path):
     out = load_table("players", tmp_path)
     assert len(out) == len(df)
     assert out.loc[out.player_id == 12, "price"].iloc[0] == 9.5
+
+
+def test_defensive_contribution_extracted_for_current_season():
+    """Regression: normalize_players must carry defensive_contribution through
+    (needed by model/scoring.py's per90_rates dc90 rate) -- the bootstrap
+    elements payload includes it as a real current-season stat.
+    """
+    df = normalize_players(BOOTSTRAP)
+    assert df.loc[df.player_id == 12, "defensive_contribution"].iloc[0] == 184
+    assert df.loc[df.player_id == 99, "defensive_contribution"].iloc[0] == 25

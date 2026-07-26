@@ -6,9 +6,10 @@ FLOAT_COLS = ["expected_goals", "expected_assists", "expected_goals_conceded"]
 PLAYER_INT_COLS = [
     "minutes", "starts", "total_points", "goals_scored", "assists", "clean_sheets",
     "goals_conceded", "saves", "bonus", "bps", "yellow_cards", "red_cards", "own_goals",
+    "defensive_contribution",
 ]
 PAST_COLS = PLAYER_INT_COLS + [
-    "defensive_contribution", "clearances_blocks_interceptions", "tackles", "recoveries",
+    "clearances_blocks_interceptions", "tackles", "recoveries",
 ]
 
 
