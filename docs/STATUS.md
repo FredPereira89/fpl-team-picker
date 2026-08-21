@@ -89,7 +89,15 @@ blind spot, not a bug we introduced — the model cannot see the Arsenal injury 
 
 ## Next session
 
-1. Re-check Arsenal team news before the deadline (Saliba/Timber status → Calafiori premise).
+1. **Note for future GWs: Tzolis.** Christos Tzolis signed for Arsenal (£34m from Club Brugge,
+   replacing Trossard) in July 2026 — not Nottingham Forest. FPL price £6.5m (MID). Ownership
+   climbed fast pre-GW1 (~2% early Aug → 20-24%+ by deadline day per Crowd FPL/Beat FPL), on the
+   back of a strong pre-season (1G 2A). GW1 squad was already locked when this came up (deadline
+   day, API unreachable from this session), so no action was taken — flagged here in case he's
+   still a live differential/consideration for a future transfer. Would push Arsenal to the
+   3-player cap alongside Raya + Calafiori. Re-run the actual model once data access works before
+   acting on this — don't chase ownership on its own.
+2. Re-check Arsenal team news before the deadline (Saliba/Timber status → Calafiori premise).
 2. After GW1 completes, `entry/1461088/event/1/picks/` goes live — run
    `python run_gameweek.py --mode 2 --gw 2` and it will resolve the real squad automatically.
 3. Consider making the Calafiori-style minutes override a first-class feature rather than a
