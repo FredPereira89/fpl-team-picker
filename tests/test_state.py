@@ -52,16 +52,11 @@ def test_bench_boost_does_not_preserve_the_balance():
 
 
 def test_reconcile_matches_when_history_agrees():
-    # Corrected fixture: 0 transfers in events 1-2 (FT rolls 1->2->3 across
-    # the season), then 2 transfers in event 3 (1 free + 1 paid hit),
-    # leaving exactly 2 for the next event. The brief's original fixture
-    # used event_transfers=1 for event 3, which under the correct
-    # advance_ft formula (min(5, max(0, FT - used) + 1), applied
-    # iteratively across all 3 events starting from the universal FT=1
-    # season seed) actually yields ft=3, not 2 -- a genuine arithmetic
-    # bug in the original test data, verified by hand execution before
-    # dispatch. This fixture is hand-verified to produce ft==2, matched==True.
-    state = State(free_transfers=2, last_event=3, chips_used=[])
+    # GW1 is squad selection, not an FT-accruing week -- it's skipped, so
+    # the season starts at FT=1 entering GW2. 0 transfers in event 2 rolls
+    # it to 2 entering GW3; then 2 transfers in event 3 (1 free + 1 paid
+    # hit) spends both, leaving exactly 1 entering GW4.
+    state = State(free_transfers=1, last_event=3, chips_used=[])
     history = {"current": [
         {"event": 1, "event_transfers": 0},
         {"event": 2, "event_transfers": 0},
@@ -69,7 +64,17 @@ def test_reconcile_matches_when_history_agrees():
     ]}
     ft, matched = reconcile(state, history)
     assert matched is True
-    assert ft == 2
+    assert ft == 1
+
+
+def test_reconcile_gw1_does_not_accrue_a_phantom_transfer():
+    # Only GW1 recorded (0 transfers, which is just the initial squad
+    # build). Entering GW2 must be FT=1, not 2 -- GW1 has no FT concept.
+    state = State(free_transfers=1, last_event=1, chips_used=[])
+    history = {"current": [{"event": 1, "event_transfers": 0}]}
+    ft, matched = reconcile(state, history)
+    assert matched is True
+    assert ft == 1
 
 
 def test_reconcile_reports_drift_and_prefers_derived_value():

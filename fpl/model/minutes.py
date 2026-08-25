@@ -16,10 +16,26 @@ def _price_prior(price: float, position: str) -> float:
     return float(min(0.85, max(0.15, (price - floor) / 6.0 + 0.25)))
 
 
-def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None) -> pd.DataFrame:
+def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None,
+                   games_played: int | None = None) -> pd.DataFrame:
+    """`players["starts"]`/`minutes` are FPL's own season-cumulative fields.
+
+    Before a season's first ball is kicked they still hold the *prior*
+    season's full total, so dividing by a full TEAM_GAMES is correct pre-
+    season. Once the tracked season is under way those same fields reset and
+    only accumulate the *current* season's results, so the rate must be
+    taken over games actually played so far -- dividing by a fixed 38 there
+    would crush a nailed GW1 starter's rate to ~1/38 and wreck in-season
+    p_start. Callers must pass `games_played` (games completed so far this
+    season) once any have been played; omitting it defaults to the
+    full-season/pre-season divisor.
+    """
     news = news or {}
     k = float(cfg.shrinkage_minutes)
-    pos_mean = (players["starts"] / TEAM_GAMES).mean()
+    in_season = bool(games_played)
+    divisor = float(games_played) if in_season else TEAM_GAMES
+    pos_mean = (players["starts"] / divisor).mean()
+    sample_period = "this season" if in_season else "last season"
 
     rows = []
     for _, p in players.iterrows():
@@ -35,11 +51,11 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
                 f"start probability inferred from price (£{p['price']}m)"
             )
         else:
-            raw = float(p["starts"]) / TEAM_GAMES
+            raw = float(p["starts"]) / divisor
             p_start = (minutes * raw + k * pos_mean) / (minutes + k)
             if minutes < 900:
                 confidence = "medium"
-                flags.append(f"Small sample: {int(minutes)} minutes last season")
+                flags.append(f"Small sample: {int(minutes)} minutes {sample_period}")
 
         status = str(p["status"])
         if status in UNAVAILABLE:

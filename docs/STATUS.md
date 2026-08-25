@@ -53,6 +53,57 @@ blind spot, not a bug we introduced — the model cannot see the Arsenal injury 
 
 ## Session log
 
+### 2026-08-25 (2) — GW2 transfer recommendation, two model bugs found & fixed
+
+Ran `python run_gameweek.py --mode 2 --gw 2` for the first time (first live Mode 2 run
+of the season). The raw output was badly broken — recommended selling **Haaland**, and
+captaining a player with 0 minutes all season. Traced and fixed two real bugs before
+trusting any of it, both with regression tests (`fpl/state.py`, `fpl/model/minutes.py`,
+`tests/test_state.py`, `tests/test_cli.py`, `tests/test_minutes.py`; 186 tests green):
+
+1. **Free-transfer double-count (`fpl/state.py::reconcile`).** GW1 is squad selection,
+   not an FT-accruing gameweek (verified against the official rule: "once the first
+   Gameweek deadline has passed, managers are given ONE free transfer for each
+   Gameweek" — i.e. GW2 starts at 1 FT, not 2). `reconcile` was rolling GW1's 0
+   transfers into the accrual like any other week, handing 2 FT for GW2 instead of 1,
+   which let the optimizer search a 4th transfer it wasn't entitled to. Fixed by
+   skipping event 1 in the roll-over loop.
+2. **`minutes_model` divided by a fixed 38-game season no matter what (`fpl/model/minutes.py`).**
+   Pre-season, `players["starts"]`/`minutes` from `bootstrap-static` hold *last* season's
+   full total (confirmed — that's where the GW1 Calafiori prior came from), so dividing
+   by TEAM_GAMES=38 is correct there. Once the season kicks off those same fields reset
+   to *this* season's box scores only. Post-GW1, every nailed starter had `starts=1`,
+   and 1/38 shrunk to p_start≈0.01 — Haaland, Guéhi and João Pedro (all 90 minutes, all
+   big GW1 returns) were computed as bigger rotation risks than the untouched bench.
+   Fixed by passing `games_played=from_event-1` into `minutes_model` and dividing by
+   games actually played this season once any have been; added `games_played` param,
+   defaults to the old 38-game behaviour when omitted (Mode 1 / pre-season unaffected).
+
+**Remaining known gap (not fixed, flagged instead):** the pipeline never calls
+`element-summary`/`history_past`, so a player with 0 minutes *this season so far* is
+indistinguishable to the model from a player with no PL history at all — both fall
+through to the same price-only prior. This inflated **Gyökeres, Martinelli, and
+Marmoush/Aït-Nouri** in the transfer search: all four had 0 GW1 minutes, and the model
+reads that as "high uncertainty, price says he's good" rather than "actually benched."
+Verified by web search: **Gyökeres was an unused sub for Arsenal behind Havertz** in
+GW1 (Community Shield too — some fan speculation about his future), and **Marmoush and
+Aït-Nouri both came off Man City's bench**. Recommending Gyökeres as captain off a pure
+price prior, with no minutes evidence at all, is not something to follow blind.
+
+**Corrected recommendation for GW2** (1 FT, £0.0m bank going in):
+- Full model output (includes the Gyökeres leg): 3 transfers for an 8-point hit —
+  Kadıoğlu → Gyökeres, João Pedro → Kayode, Virgil → De Cuyper — net +24.8 xP over 5 GW.
+  Kayode (BRE, £4.5m) and De Cuyper (BHA, £4.5m) both genuinely started GW1 and
+  returned well (13 and 17 pts) — those two legs are well-supported.
+- **Safer alternative, excluding the four zero-minute price-prior names**: just
+  **Virgil → De Cuyper**, the single free transfer, net +10.07 xP, no hit. Adding
+  Kadıoğlu → Kayode as a second (paid) move is reasonable too (Kadıoğlu is flagged
+  75% chance of playing — a real doubt, not a model artifact) but selling João Pedro
+  (11 pts, nailed) for Gyökeres (0 pts, benched) on a pure price prior is the one leg
+  to skip until he's actually starting for Arsenal.
+- If bringing Gyökeres in anyway as a differential, do **not** captain him off this
+  model run — captain Haaland or another proven nailed starter instead.
+
 ### 2026-08-25 — GW1 retrospective
 
 GW1 fixtures all finished (event `data_checked` still false — minor bonus-point revisions

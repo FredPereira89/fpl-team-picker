@@ -62,7 +62,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw)
     counts = fixture_counts(fixtures, list(teams["team_id"]), from_event, cfg.horizon_gw)
     rates = per90_rates(players, cfg)
-    minutes = minutes_model(players, cfg, news=news)
+    minutes = minutes_model(players, cfg, news=news, games_played=max(0, from_event - 1))
     xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
 
     # actual_mode reflects which branch genuinely ran, not the caller's

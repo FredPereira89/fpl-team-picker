@@ -74,3 +74,44 @@ def test_news_weight_zero_ignores_news():
     base = minutes_model(PLAYERS, cfg).set_index("player_id").loc[2, "p_start"]
     out = minutes_model(PLAYERS, cfg, news=news).set_index("player_id").loc[2, "p_start"]
     assert abs(out - base) < 1e-9
+
+
+IN_SEASON_PLAYERS = pd.DataFrame({
+    "player_id": [1, 2],
+    "web_name": ["NailedGW1Starter", "BenchedGW1"],
+    "position": ["FWD", "FWD"],
+    "team_id": [1, 1],
+    "price": [14.0, 7.5],
+    "status": ["a", "a"],
+    "chance_of_playing": [None, None],
+    "news": ["", ""],
+    "available": [True, True],
+    # season-cumulative fields reset once the season kicks off, so after GW1
+    # a nailed starter shows starts=1/minutes=90, not a 38-game total. Player
+    # 2 came on as a late substitute (appeared, did not start) -- nonzero
+    # minutes so it still exercises the in-season divisor, not the separate
+    # zero-minutes/price-prior branch.
+    "minutes": [90, 10],
+    "starts": [1, 0],
+})
+
+
+def test_in_season_gw1_starter_is_not_crushed_by_full_season_divisor():
+    # Without games_played, dividing 1 start by TEAM_GAMES=38 would wrongly
+    # treat a player who started and played every minute of GW1 as a
+    # near-total rotation risk. Passing games_played=1 (one GW completed)
+    # must recover a high p_start instead.
+    cfg = Config(shrinkage_minutes=900, news_weight=0.5)
+    out = minutes_model(IN_SEASON_PLAYERS, cfg, games_played=1).set_index("player_id")
+    # Still shrunk heavily toward the population mean after just one GW of
+    # in-season evidence (k=900 vs. 90 minutes) -- the point is this must
+    # land far above the ~0.01 the old fixed-38-games divisor produced, and
+    # clearly above the player who didn't feature at all.
+    assert out.loc[1, "p_start"] > 0.5
+    assert out.loc[1, "p_start"] > out.loc[2, "p_start"]
+
+
+def test_in_season_flag_says_this_season_not_last():
+    cfg = Config(shrinkage_minutes=900, news_weight=0.5)
+    out = minutes_model(IN_SEASON_PLAYERS, cfg, games_played=1).set_index("player_id")
+    assert any("this season" in f for f in out.loc[1, "flags"])

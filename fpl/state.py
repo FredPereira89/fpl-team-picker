@@ -44,10 +44,25 @@ def advance_ft(state: State, transfers_made: int, chip: str | None = None) -> in
 
 
 def reconcile(state: State, entry_history: dict) -> tuple[int, bool]:
-    """Derive the FT balance from the API's per-event transfer counts."""
+    """Derive the FT balance from the API's per-event transfer counts.
+
+    GW1 has no free-transfer concept -- squad changes before the season's
+    first deadline are unlimited and free, and FT accrual only starts once
+    that deadline has passed (confirmed against the official rules: "Once
+    the first Gameweek deadline of the season has passed, managers are
+    given ONE free transfer for each Gameweek"). The free_transfers=1
+    baseline below already represents that starting balance for GW2, so
+    event 1 must be skipped rather than folded into the roll-over -- treating
+    it like a normal accruing week silently credits a phantom extra
+    transfer every season.
+    """
     derived = State(free_transfers=1, last_event=0, chips_used=[])
     for event in entry_history.get("current", []):
+        eid = int(event.get("event", derived.last_event))
+        if eid <= 1:
+            derived.last_event = eid
+            continue
         derived.free_transfers = advance_ft(derived, int(event.get("event_transfers", 0)))
-        derived.last_event = int(event.get("event", derived.last_event))
+        derived.last_event = eid
     matched = derived.free_transfers == state.free_transfers
     return derived.free_transfers, matched
