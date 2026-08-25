@@ -16,6 +16,9 @@ Running log of what's been decided and done. Read this first when resuming work.
   - Man City and Chelsea both at the 3-player cap — no room to add from either.
 - Scores 248.88 on the model's 5-GW objective vs a 249.04 unconstrained optimum
   (**gap 0.16**) once the Calafiori minutes override below is applied. GW1 xP 60.48.
+- **GW1 is now finished (result recorded 2026-08-25): actual score 54 pts** vs the 60.48
+  predicted (−6.48, −10.7%), driven mainly by Haaland's captain blank. See session log below
+  for the full breakdown.
 
 ### ⚠ Open assumption: Calafiori minutes override
 
@@ -49,6 +52,43 @@ blind spot, not a bug we introduced — the model cannot see the Arsenal injury 
   last season's team ratings.
 
 ## Session log
+
+### 2026-08-25 — GW1 retrospective
+
+GW1 fixtures all finished (event `data_checked` still false — minor bonus-point revisions
+possible but unlikely to move much). Pulled `entry/1461088/history/` and
+`entry/1461088/event/1/picks/` plus `bootstrap-static` for the actual per-player lines.
+
+- **Final score: 54 points** (0 transfers, 0 hits, no chip, bench scored 0 so no autosub
+  regret). GW1 average was 50, so +4 above average. Highest score in the game was 131.
+- **Overall rank 3,208,418 / 8,903,411 (top 36%)** after GW1.
+- Predicted (model, pre-deadline) **60.48** vs actual **54.0** → **−6.48 (−10.7%)**, well
+  within normal week-to-week model variance and almost entirely explained by the captain pick.
+
+Per-player actuals (XI only, mult × pts):
+| Player | Min | Return | Pts |
+|---|---|---|---|
+| João Pedro (FWD) | 90 | 1 goal, 1 assist | **11** |
+| Guéhi (DEF) | 90 | 1 goal (no CS, conceded) | **10** |
+| Calafiori (DEF) | 80 | 1 assist, clean sheet | **9** |
+| Raya (GKP) | 90 | clean sheet, 1 save | 6 |
+| Tarkowski (DEF) | 90 | clean sheet | 6 |
+| Schade (MID) | 90 | clean sheet (attacker, no bonus) | 3 |
+| Haaland (FWD, **C**) | 90 | blank | **2 → 4** (captained) |
+| Virgil (DEF) | 90 | blank, yellow card | 2 |
+| Semenyo (MID) | 90 | blank | 2 |
+| Enzo (MID) | 25 | subbed off early, blank | 1 |
+| Thiago (FWD, VC) | 82 | **missed a penalty** (2 appearance − 2 miss) | 0 |
+
+- **Calafiori minutes override validated.** The 0.80 `p_start` override (vs. the model's own
+  0.48 prior) called it right: he started, played 80 minutes, got a clean sheet + assist for 9
+  points. Good evidence the Saliba/Timber-injury reasoning was sound, at least for week 1.
+- **Captaincy was the biggest drag.** Haaland (most-captained player in the game, so no rank
+  damage relative to the template) blanked at 2 base points — a top scorer with an off week
+  everyone shares in. Thiago (VC) would also have blanked as captain (missed penalty voided his
+  appearance points).
+- Bench (Dubravka, Kadıoğlu, Hughes, D.Essugo) all played 0 minutes — nothing missed there.
+- Squad value unchanged at exactly £100.0m, £0.0m bank — no price rises/falls banked yet.
 
 ### 2026-08-20
 - Refreshed data again (deadline ~29h out). Re-scored after user made two transfers.
