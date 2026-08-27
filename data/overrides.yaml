@@ -1,0 +1,29 @@
+# Team-news minutes overrides.
+#
+# Each entry nudges one player's p_start, blended into the model's own prior at
+# `news.weight` from config.yaml (currently 0.5, so an override of 0.80 against a
+# model prior of 0.48 yields an effective 0.64).
+#
+# These exist because `minutes_model` is per-player, not a team-level minutes
+# allocation: it zeroes an injured player's own p_start but never hands those
+# minutes to whoever deputises. That blind spot is invisible to the model and can
+# only be corrected here.
+#
+# Every entry needs a `source`. Give an `until_gw` so it expires rather than
+# quietly outliving the news behind it.
+
+overrides:
+  - player_id: 8
+    name: Calafiori (ARS)
+    p_start_override: 0.80
+    note: >-
+      Saliba (back) and J.Timber (groin) both status=i, 0% chance, unknown
+      return - removing 58 starts of competition the model cannot see. Calafiori
+      then started GW1 (80 mins, 9 pts) while Hincapie, the other candidate for
+      the spot, got 9 minutes. His own 2025/26 record (22 starts / 1697 mins)
+      gives the model a prior of 0.48; break-even against the best replacement
+      is ~0.57, so this correction is what keeps him in the squad.
+    source: >-
+      FPL bootstrap-static status/news for Saliba + J.Timber and event/1/live
+      minutes for Calafiori + Hincapie, both checked 2026-08-26.
+    until_gw: 6

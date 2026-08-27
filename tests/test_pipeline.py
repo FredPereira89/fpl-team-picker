@@ -148,3 +148,27 @@ def test_mode_falls_back_honestly_when_no_current_squad_available(tmp_path):
     assert rec.mode == 1
     assert rec.trust != ""
     assert rec.transfers is None
+
+
+def test_news_override_reaches_the_minutes_model(tmp_path):
+    """A p_start override handed to run() must actually move that player's xP.
+
+    minutes_model's own override handling is unit-tested, but nothing checked
+    that the pipeline forwards `news` at all -- so a broken wire here would be
+    invisible: the run still succeeds and just silently ignores the correction.
+    """
+    cfg = Config(budget=100.0)
+    _, base = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    _, cut = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient(),
+                 news={5: {"p_start_override": 0.0, "note": "benched",
+                           "source": "test"}})
+
+    def xp_of(frame, pid):
+        return float(frame.loc[frame["player_id"] == pid].iloc[0]["xp_next5"])
+
+    def p_start_of(frame, pid):
+        return float(frame.loc[frame["player_id"] == pid].iloc[0]["p_start"])
+
+    assert p_start_of(cut, 5) < p_start_of(base, 5)
+    assert xp_of(cut, 5) < xp_of(base, 5)
+    assert xp_of(cut, 6) == xp_of(base, 6), "other players must be untouched"

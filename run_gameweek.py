@@ -64,9 +64,14 @@ def main() -> int:
         if done == 1 or done == total or done % 100 == 0:
             print(f"Fetching player history... {done}/{total}", flush=True)
 
+    news = load_overrides(args.overrides, args.gw)
+    for pid, o in news.items():
+        print(f"Override: player {pid} p_start -> {o['p_start_override']} "
+              f"(blended at news.weight={cfg.news_weight}) — {o['note']}")
+
     rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
                   current_squad=current_squad, bank=bank, free_transfers=free_transfers,
-                  progress=progress)
+                  news=news, progress=progress)
     print(render(rec, xp))
 
     if args.mode == 2 and current_squad is not None:
