@@ -2,7 +2,7 @@
 
 Running log of what's been decided and done. Read this first when resuming work.
 
-## Current state (as of 2026-08-20)
+## Current state (as of 2026-08-26)
 
 - Season 2026/27, GW1 deadline **Fri 21 Aug 2026 17:30 UTC**.
 - `entry_id: 1461088` (Frederico Pereira, "Haaland&Grosso") set in `config.yaml`.
@@ -20,38 +20,107 @@ Running log of what's been decided and done. Read this first when resuming work.
   predicted (−6.48, −10.7%), driven mainly by Haaland's captain blank. See session log below
   for the full breakdown.
 
-### ⚠ Open assumption: Calafiori minutes override
+### GW2 (deadline Fri 28 Aug 2026 17:30 UTC)
 
-The model's own prior gives Calafiori `p_start = 0.48` (from 22 starts / 1697 mins in 2024/25).
-We are deliberately overriding this to **0.80** because Saliba (back) and J.Timber (groin) are
-both `status=i`, 0% chance, unknown return — removing 58 starts of competition.
+- **1 free transfer.** GW1 banks none — FPL grants the first FT only *after* the GW1
+  deadline. The tool used to claim 2 here; that was a bug, fixed 2026-08-26.
+- Squad unchanged from GW1, £100.0m value, £0.0m bank, no price movement anywhere yet.
+- **Recommendation: hold, make no transfer, bank the FT for GW3.** The only positive
+  move the model finds is Raya → Leno at **+1.55 xP over 5 GWs** (+0.31/week), and it is a
+  *goalkeeper* move — the one position the backtest measured at Spearman 0.034, i.e. no
+  demonstrated ranking skill. That gain sits inside the noise of a component the model
+  cannot rank. Hold baseline 236.57 net xP vs 238.12 for the swap; every 2- and
+  3-transfer option is negative after the hit.
+- XI unchanged (4-3-3): Raya; Virgil, Guéhi, Calafiori, Tarkowski; Semenyo, Enzo, Schade;
+  Haaland (C), Thiago (VC), João Pedro. Bench: Dubravka, D.Essugo, Kadıoğlu, Hughes.
+- Kadıoğlu is doubtful (75%, unspecified) but is a bench player — no action needed.
+
+### Calafiori minutes override — now a real feature, premise re-verified
+
+No longer a scratch-script hack: overrides are declarative in `data/overrides.yaml`, loaded
+by `fpl/data/overrides.py`, passed through `run_gameweek.py --overrides`. Each entry requires
+a `source` and takes an inclusive `until_gw` so it expires instead of quietly outliving the
+news behind it. (This was standing "next session" item 3.)
 
 **`minutes_model` sets an injured player's own p_start to 0 but does NOT redistribute those
 minutes to teammates.** It is per-player, not a team-level allocation. This is a structural
-blind spot, not a bug we introduced — the model cannot see the Arsenal injury situation at all.
+blind spot the model cannot see, and it is the whole reason the override mechanism exists.
 
-- **Break-even is `p_start = 0.696`.** Above it Calafiori beats Tarkowski; below it he does not.
-- At 0.48 he is xp5 14.34 (model wants him sold). At 0.80 he is 21.50 — beats Tarkowski by
-  +2.92 and even beats Gabriel (20.64) at £2.5m less.
-- **Revisit when Saliba or Timber is passed fit.** If either returns the premise weakens.
-  Also note Hincapie (£5.5m, 20 starts, xp5 12.03) is genuine competition for the spot, and
-  part of Calafiori's low start count is his own injury history, which their absence doesn't fix.
+- **Premise re-verified 2026-08-26: Saliba (back) and J.Timber (groin) are both still
+  `status=i`, 0% chance, unknown return.**
+- **Validated by events: Calafiori started GW1** (80 mins, clean sheet + assist, 9 pts) while
+  Hincapie — the other candidate for the spot — played 9 minutes.
+- Model's own prior is still 0.48 (his 2025/26 record: 22 starts / 1697 mins).
+- **Break-even re-measured at ~0.57** against the best available replacement. The older 0.696
+  figure was specifically against Tarkowski and no longer describes the live comparison.
+- At `news.weight: 0.5`, an override of 0.80 yields an **effective 0.64** — clear of the
+  break-even, so the conservative default blend is sufficient and `news.weight` was left alone.
+  Swept 0.48 → 0.90 to confirm where the recommendation flips.
+- Set to expire `until_gw: 6`. **Revisit if Saliba or Timber is passed fit.**
 
 ### Other standing notes
 
-- `data/state.json` (FT balance / chips used) does not exist yet — Mode 2 hasn't recorded a
-  gameweek. It gets created on the first `--mode 2` run after GW1 completes.
+- `data/state.json` (FT balance / chips used) is written by each `--mode 2` run. It is
+  gitignored, and `reconcile` re-derives the FT count from `entry/{id}/history/` every run
+  anyway, so the file only drives the drift warning — deleting it is safe.
+- **Form blending is dead code.** `blend_form` / `form_weight` in `model/scoring.py` exist and
+  are unit-tested, but nothing in `pipeline.run` calls them. The model is therefore 100%
+  last-season baseline and **cannot see 2026/27 form at all**. Biggest remaining gap now that
+  the baseline source is fixed.
 - **Mode 2 cannot see the squad before a deadline.** `entry/{id}/event/1/picks/` returns
   **HTTP 404** until the deadline passes; `entry/` and `entry/history/` work but carry no picks.
   Verified 2026-08-20. This is why pre-deadline work relies on screenshots. Auth-gated
   `my-team/` is banned by the spec and was not used.
 - Backtest (`13afabd`): outfield (DEF/MID/FWD) rank quality beats naive baseline and FPL's own
   xP; goalkeeper rank quality is unproven (Spearman 0.034) — treat GK picks with extra caution.
-  Raya at £6.0m rests on that unvalidated component.
+  Raya at £6.0m rests on that unvalidated component. This is also what drives the GW2 call to
+  *not* do Raya → Leno.
 - 5-GW clean-sheet projections are directional, not precise, past ~GW2 — they are built from
   last season's team ratings.
 
 ## Session log
+
+### 2026-08-26 — three bugs, and GW2
+
+The first live Mode 2 run of the season was badly broken: it wanted 4 transfers on a −8 hit,
+recommended **selling Haaland**, and reported a £10.7m bank against a £100.0m squad. Three
+distinct bugs, each found by checking output rather than trusting it.
+
+1. **Season-rollover baseline bug (the big one).** `normalize_players` read the model's
+   baseline counting stats straight from `bootstrap-static`, which reports **current-season
+   cumulative** totals. The FPL API reset those at the 2026/27 rollover — league-wide minutes
+   went from **602,348** in the 2026-08-20 snapshot to **19,671** on 2026-08-26. But
+   `minutes_model` and `per90_rates` both treat that column as a *full season* (`starts/38`,
+   shrinkage k=900). So every established player collapsed to a ~90-minute sample and shrank
+   to the positional mean, while anyone who *didn't* feature in GW1 scored **better** by
+   falling through to the price prior — hence "sell Haaland, buy Marmoush".
+   Fixed by re-sourcing the baseline from `element-summary` `history_past`, which is stable
+   all season: new `apply_season_baseline` + `latest_season`, plus
+   `FplClient.element_summaries` (30-day TTL — `history_past` for a finished season is
+   immutable). Wired unconditionally into `pipeline.run`; pre-season the two sources agree so
+   it is a no-op then, avoiding a brittle "has the season started" flag. Cold-cache cost is
+   ~10 min for 614 players at the client's deliberate 1 req/s limit; warm runs are seconds,
+   and progress is now printed. — `c0bc6bf`
+2. **Free-transfer off-by-one.** `state.reconcile` seeded the pre-GW1 balance at 1 FT then
+   accrued another after GW1, reporting **2 FTs for GW2**. FPL grants the first FT only
+   *after* the GW1 deadline (bootstrap `game_settings` confirms the shape: 1 base +
+   `max_extra_free_transfers: 4` = FT_CAP 5), so GW2 has exactly 1. Seeded at 0 instead.
+   This one cost real points — it was silently authorising a transfer that actually costs −4.
+   Two existing tests encoded the wrong behaviour (`# unused FT rolls 1 -> 2`). — `786b768`
+3. **`news` never reached the model from the CLI.** An edit to `run_gameweek.py` silently
+   failed to land, so the override loaded, printed, and did nothing — the run still
+   succeeded, which is exactly why it was invisible. Caught by noticing the recommendation
+   was byte-identical with and without the override. Added
+   `test_news_override_reaches_the_minutes_model` at the pipeline layer; `minutes_model`'s own
+   override handling was already unit-tested and the untested gap was the wire above it.
+
+Also: made the minutes override a first-class feature (see section above), re-verified the
+Calafiori premise against live data, and re-measured its break-even at ~0.57.
+
+Suite 189 → 200 passing; each of the four commits verified green independently.
+
+**GW2 call: hold and bank the FT.** See "Current state" above for the reasoning.
+
 
 ### 2026-08-25 — GW1 retrospective
 
@@ -129,19 +198,17 @@ Per-player actuals (XI only, mult × pts):
 
 ## Next session
 
-1. **Note for future GWs: Tzolis.** Christos Tzolis signed for Arsenal (£34m from Club Brugge,
-   replacing Trossard) in July 2026 — not Nottingham Forest. FPL price £6.5m (MID). Ownership
-   climbed fast pre-GW1 (~2% early Aug → 20-24%+ by deadline day per Crowd FPL/Beat FPL), on the
-   back of a strong pre-season (1G 2A). GW1 squad was already locked when this came up (deadline
-   day, API unreachable from this session), so no action was taken — flagged here in case he's
-   still a live differential/consideration for a future transfer. Would push Arsenal to the
-   3-player cap alongside Raya + Calafiori. Re-run the actual model once data access works before
-   acting on this — don't chase ownership on its own.
-2. Re-check Arsenal team news before the deadline (Saliba/Timber status → Calafiori premise).
-2. After GW1 completes, `entry/1461088/event/1/picks/` goes live — run
-   `python run_gameweek.py --mode 2 --gw 2` and it will resolve the real squad automatically.
-3. Consider making the Calafiori-style minutes override a first-class feature rather than a
-   scratch-script hack: `minutes_model` already accepts a `news` dict with `p_start_override`,
-   and `config.yaml` has `news.weight: 0.5` — but nothing populates it. A small
-   `data/overrides.yaml` read into `pipeline.run(news=...)` would make team-news corrections
-   reproducible instead of ad hoc.
+1. **Evaluate Tzolis properly now that the model works.** Christos Tzolis signed for Arsenal
+   (£34m from Club Brugge, replacing Trossard) in July 2026 — *not* Nottingham Forest. FPL
+   price £6.5m (MID). Ownership climbed fast pre-GW1 (~2% early Aug → 20–24%+ by deadline day
+   per Crowd FPL/Beat FPL) on a strong pre-season (1G 2A). He was flagged on GW1 deadline day
+   when the squad was already locked and the API was unreachable. **The model can now actually
+   score him** — the data access and the baseline bug that blocked this are both fixed. Would
+   push Arsenal to the 3-player cap alongside Raya + Calafiori. Don't chase ownership on its own.
+2. Re-check Arsenal team news before the GW2 deadline (Saliba/Timber → Calafiori premise,
+   currently overridden to 0.80 and expiring at GW6).
+3. **Wire up form blending.** `blend_form` / `form_weight` are tested but uncalled, so the
+   model still cannot see any 2026/27 form. This is the biggest remaining modelling gap —
+   and it grows every gameweek.
+4. Consider whether the GK component is worth using at all given Spearman 0.034, or whether
+   GK picks should just defer to FPL's own xP / team news.
