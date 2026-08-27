@@ -11,6 +11,7 @@ from fpl.cli import resolve_current_squad, record_transfers
 from fpl.config import load_config
 from fpl.data.cache import Cache
 from fpl.data.client import FplClient
+from fpl.data.overrides import load_overrides
 from fpl.pipeline import run
 from fpl.report.weekly import render
 
@@ -31,6 +32,8 @@ def main() -> int:
     ap.add_argument("--gw", type=int, default=1, help="gameweek to optimise for")
     ap.add_argument("--no-refresh", action="store_true", help="use cached data only")
     ap.add_argument("--config", type=Path, default=ROOT / "config.yaml")
+    ap.add_argument("--overrides", type=Path, default=ROOT / "data" / "overrides.yaml",
+                    help="team-news p_start overrides (see fpl/data/overrides.py)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -55,8 +58,15 @@ def main() -> int:
                 print(f"Note: {msg}")
             current_squad, bank, free_transfers = live.current_squad, live.bank, live.free_transfers
 
+    def progress(done: int, total: int) -> None:
+        # Player history is fetched one request per second on a cold cache, so a
+        # first run takes minutes. Say so rather than looking hung.
+        if done == 1 or done == total or done % 100 == 0:
+            print(f"Fetching player history... {done}/{total}", flush=True)
+
     rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
-                  current_squad=current_squad, bank=bank, free_transfers=free_transfers)
+                  current_squad=current_squad, bank=bank, free_transfers=free_transfers,
+                  progress=progress)
     print(render(rec, xp))
 
     if args.mode == 2 and current_squad is not None:

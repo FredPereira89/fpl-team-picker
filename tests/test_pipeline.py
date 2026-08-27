@@ -55,6 +55,21 @@ class FakeClient:
     def fixtures(self):
         return FIXTURES
 
+    def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+        """Echo each element's totals back as a completed season.
+
+        The BOOTSTRAP fixture above is written as a full season of history --
+        which is what bootstrap-static actually shows pre-season. The pipeline now
+        re-sources that baseline from element-summary history_past, so the fake
+        client has to serve the same numbers there for the fixture to keep its
+        meaning.
+        """
+        by_id = {e["id"]: e for e in BOOTSTRAP["elements"]}
+        return {
+            int(pid): {"history_past": [dict(by_id[int(pid)], season_name="2025/26")]}
+            for pid in player_ids if int(pid) in by_id
+        }
+
 
 def test_mode_one_produces_a_valid_recommendation(tmp_path):
     rec, xp = run(Config(budget=100.0), mode=1, from_event=1, root=tmp_path,

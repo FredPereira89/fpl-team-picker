@@ -9,7 +9,8 @@ import pandas as pd
 from .config import Config
 from .data.cache import Cache
 from .data.client import FplClient
-from .data.normalize import normalize_players, normalize_teams, normalize_fixtures
+from .data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
+                             history_past_frame, apply_season_baseline, latest_season)
 from .data.store import save_table
 from .model.strength import team_ratings
 from .model.minutes import minutes_model
@@ -43,7 +44,8 @@ TRUST_SUMMARY = (
 
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
-        news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1):
+        news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1,
+        progress=None):
     root = Path(root)
     client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours)
 
@@ -52,6 +54,20 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     players = normalize_players(bootstrap)
     teams = normalize_teams(bootstrap)
     fixtures = normalize_fixtures(raw_fixtures)
+
+    # bootstrap-static's counting stats are CURRENT-season cumulative and get
+    # reset to zero at the season rollover, but the model reads them as a full
+    # season of history (per90_rates shrinks with k=900 minutes; minutes_model
+    # divides starts by 38). Before GW1 those totals still show last season and
+    # the model works; from GW1 they show a handful of games and every
+    # established player collapses to a tiny sample. Re-source the baseline from
+    # element-summary history_past, which is stable all season. Pre-season this
+    # is a no-op -- the two agree -- so it runs unconditionally rather than on a
+    # brittle "has the season started" test.
+    summaries = client.element_summaries(players["player_id"].tolist(), progress=progress)
+    past = history_past_frame(summaries)
+    baseline_season = latest_season(past)
+    players = apply_season_baseline(players, past, baseline_season)
 
     processed = root / "processed"
     save_table(players, "players", processed)

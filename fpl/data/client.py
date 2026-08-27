@@ -10,6 +10,8 @@ from .cache import Cache
 BASE = "https://fantasy.premierleague.com/api/"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; fpl-team-picker/1.0)"}
 FORBIDDEN = ("my-team",)
+# `history_past` for a completed season is immutable, so these can cache hard.
+HISTORY_TTL_H = 24 * 30
 
 
 class FplClient:
@@ -28,8 +30,9 @@ class FplClient:
                 time.sleep(self.rate_limit_s - delta)
             self._last_call = time.monotonic()
 
-    def _get(self, path: str, slug: str):
-        cached = self.cache.get_fresh(slug, self.ttl_hours)
+    def _get(self, path: str, slug: str, ttl_hours: float | None = None):
+        ttl = self.ttl_hours if ttl_hours is None else ttl_hours
+        cached = self.cache.get_fresh(slug, ttl)
         if cached is not None:
             return cached
         url = BASE + path
@@ -56,8 +59,29 @@ class FplClient:
     def fixtures(self) -> list[dict]:
         return self._get("fixtures/", "fixtures")
 
-    def element_summary(self, player_id: int) -> dict:
-        return self._get(f"element-summary/{player_id}/", f"element-summary-{player_id}")
+    def element_summary(self, player_id: int, ttl_hours: float | None = None) -> dict:
+        return self._get(f"element-summary/{player_id}/", f"element-summary-{player_id}",
+                         ttl_hours=ttl_hours)
+
+    def element_summaries(self, player_ids, ttl_hours: float = HISTORY_TTL_H,
+                          progress=None) -> dict[int, dict]:
+        """Fetch many element-summaries, tolerating individual failures.
+
+        Defaults to a long TTL because the only field the weekly pipeline reads
+        from these is `history_past`, which never changes once a season is over.
+        A player whose summary can't be fetched is simply omitted; downstream
+        that zeroes their baseline and routes them to the price prior.
+        """
+        out: dict[int, dict] = {}
+        ids = list(player_ids)
+        for i, pid in enumerate(ids):
+            try:
+                out[int(pid)] = self.element_summary(int(pid), ttl_hours=ttl_hours)
+            except Exception:
+                self.stale = True
+            if progress:
+                progress(i + 1, len(ids))
+        return out
 
     def entry(self, entry_id: int) -> dict:
         return self._get(f"entry/{entry_id}/", f"entry-{entry_id}")

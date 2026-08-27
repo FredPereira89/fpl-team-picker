@@ -40,6 +40,58 @@ def normalize_players(bootstrap: dict) -> pd.DataFrame:
     return df[cols].reset_index(drop=True)
 
 
+# The counting stats the model reads as a full-season baseline. bootstrap-static
+# reports these as CURRENT-season cumulative totals, which the FPL API resets to
+# zero at each season rollover -- so from GW1 onward they must be sourced from a
+# completed season instead. Everything outside this list (price, status, news,
+# team, position, ownership) describes today and still comes from bootstrap.
+BASELINE_COLS = PLAYER_INT_COLS + FLOAT_COLS
+
+
+def latest_season(past: pd.DataFrame) -> str | None:
+    """Most recently completed season in a `history_past_frame`, or None if empty.
+
+    Season names sort correctly as strings ("2024/25" < "2025/26").
+    """
+    if past is None or len(past) == 0:
+        return None
+    names = sorted(str(s) for s in past["season_name"].unique())
+    return names[-1] if names else None
+
+
+def apply_season_baseline(players: pd.DataFrame, past: pd.DataFrame,
+                          season: str | None = None) -> pd.DataFrame:
+    """Swap season-to-date bootstrap totals for a completed season's totals.
+
+    `fpl.model.scoring.per90_rates` and `fpl.model.minutes.minutes_model` both
+    assume `players` carries a full season of history (they shrink toward a
+    positional mean with k=900 minutes and divide `starts` by 38). That holds
+    pre-season, when bootstrap still shows last season's totals, and breaks the
+    moment GW1 kicks off: every established player collapses to a ~90-minute
+    sample while players who did not feature look better via the price prior.
+
+    A player with no row for `season` is zeroed, which routes them to the
+    price prior in `minutes_model` -- the correct treatment for a newcomer.
+    """
+    out = players.copy()
+    season = season or latest_season(past)
+    src = None
+    if season is not None:
+        rows = past[past["season_name"].astype(str) == str(season)]
+        if len(rows):
+            src = rows.drop_duplicates("player_id").set_index("player_id")
+
+    for c in BASELINE_COLS:
+        if src is not None and c in src.columns:
+            vals = out["player_id"].map(src[c])
+        else:
+            vals = pd.Series(index=out.index, dtype="float64")
+        vals = pd.to_numeric(vals, errors="coerce").fillna(0)
+        out[c] = vals.astype(int) if c in PLAYER_INT_COLS else vals.astype(float)
+
+    return out[list(players.columns)].reset_index(drop=True)
+
+
 def normalize_fixtures(fixtures: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(fixtures).rename(columns={"id": "fixture_id"})
     cols = ["fixture_id", "event", "team_h", "team_a", "team_h_difficulty",
