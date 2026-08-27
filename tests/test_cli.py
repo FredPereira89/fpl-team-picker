@@ -2,7 +2,7 @@ import json
 import pytest
 from fpl.cli import resolve_current_squad, record_transfers
 from fpl.config import Config
-from fpl.state import load_state, State
+from fpl.state import load_state, save_state, State
 
 
 class FakeClient:
@@ -104,3 +104,22 @@ def test_record_transfers_tracks_chip_usage(tmp_path):
     s = load_state(state_path, Config())
     assert s.chips_used == ["wildcard"]
     assert s.free_transfers == 2  # wildcard preserves balance, still accrues
+
+
+# --- P6: purchase prices (2026-08-27 audit) ---
+
+def test_recording_a_gameweek_keeps_the_price_paid_for_each_player(tmp_path):
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    record_transfers(path, cfg, gw=2, transfers_made=1, chip=None,
+                     purchase_prices={101: 5.5, 303: 7.0})
+    assert load_state(path, cfg).purchase_prices == {101: 5.5, 303: 7.0}
+
+
+def test_resolved_squad_carries_the_recorded_purchase_prices(tmp_path):
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=42, free_transfers=1)
+    save_state(State(free_transfers=1, last_event=1, chips_used=[],
+                     purchase_prices={1: 4.5}), path)
+    live, _ = resolve_current_squad(cfg, gw=2, state_path=path, client=FakeClient(picks=PICKS, history=HISTORY_NO_TRANSFERS))
+    assert live.purchase_prices == {1: 4.5}

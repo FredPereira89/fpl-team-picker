@@ -17,6 +17,10 @@ class State:
     free_transfers: int = 1
     last_event: int = 0
     chips_used: list[str] = field(default_factory=list)
+    # What was PAID for each owned player. FPL sells at purchase price plus half
+    # the rise, and no public endpoint reports the purchase price, so the only
+    # way to budget a transfer honestly is to remember it here.
+    purchase_prices: dict[int, float] = field(default_factory=dict)
 
 
 def load_state(path: Path, cfg) -> State:
@@ -28,6 +32,10 @@ def load_state(path: Path, cfg) -> State:
         free_transfers=int(raw.get("free_transfers", cfg.free_transfers)),
         last_event=int(raw.get("last_event", 0)),
         chips_used=list(raw.get("chips_used", [])),
+        # JSON object keys are always strings; the rest of the codebase keys
+        # players by int, so convert on the way back in.
+        purchase_prices={int(k): float(v)
+                         for k, v in (raw.get("purchase_prices") or {}).items()},
     )
 
 

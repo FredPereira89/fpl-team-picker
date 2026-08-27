@@ -21,7 +21,7 @@ from .model.xp import build_xp
 from .optimize.squad import optimize_squad
 from .optimize.lineup import build_lineup
 from .optimize.chips import advise_chips
-from .optimize.transfers import optimize_transfers
+from .optimize.transfers import optimize_transfers, selling_price
 from .report.weekly import Recommendation, render
 
 # Backtest result (scripts/run_backtest.py, trained on 2024/25, tested on
@@ -48,7 +48,7 @@ TRUST_SUMMARY = (
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1,
-        progress=None):
+        progress=None, purchase_prices: dict[int, float] | None = None):
     root = Path(root)
     client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours)
 
@@ -100,13 +100,23 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # in this codebase fetches one yet, so a mode=2 call with no
     # current_squad must be labelled and reported as the Mode 1 rebuild it
     # actually is, never silently mislabelled as a transfer recommendation.
+    prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
     transfers = None
+    selling = {}
     if mode == 2 and current_squad:
         actual_mode = 2
+        # What FPL would actually pay for each owned player. Falls back to market
+        # price for anyone whose purchase price was never recorded, which is the
+        # honest default -- it can only overstate, never understate, the budget.
+        selling = {
+            int(i): selling_price((purchase_prices or {}).get(int(i), prices[int(i)]),
+                                  prices[int(i)])
+            for i in current_squad
+        }
         # xp_horizon, not xp_next5: the solver should discount gains it may
         # never collect, while the report still shows the honest raw total.
         best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
-                                            xp_col=HORIZON_COL)
+                                            xp_col=HORIZON_COL, selling_prices=selling)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
     else:
         actual_mode = 1
@@ -119,7 +129,6 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     team_by_player = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
     chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event, [])
 
-    prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
     value = round(sum(prices[i] for i in squad_ids), 1)
     deadline = next(
         (e["deadline_time"] for e in bootstrap.get("events", []) if e["id"] == from_event),
@@ -128,11 +137,13 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
 
     if actual_mode == 2:
         # Bank must reflect proceeds from the CURRENT squad, not the new one --
-        # optimize_transfers spends bank + value(current_squad), so recompute
-        # against the pre-transfer value rather than passing the caller's
-        # pre-transfer bank straight through unchanged.
-        value_before = round(sum(prices[i] for i in current_squad), 1)
-        bank_after = round(bank + value_before - value, 1)
+        # and those proceeds are SELLING prices, not market prices: a player who
+        # has risen 0.3 returns 0.1 of it, not 0.3. Money is only moved by the
+        # players who actually changed hands, so retained players cancel out.
+        sold = [i for i in current_squad if i not in set(squad_ids)]
+        bought = [i for i in squad_ids if i not in set(current_squad)]
+        bank_after = round(bank + sum(selling[i] for i in sold)
+                           - sum(prices[i] for i in bought), 1)
     else:
         bank_after = round(cfg.budget - value, 1)
 

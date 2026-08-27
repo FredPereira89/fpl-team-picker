@@ -6,7 +6,7 @@ free_transfers) to pipeline.run(mode=2, ...). Returns None (with a reason)
 whenever a live squad can't be resolved, so the caller falls back to the
 honest Mode 1 rebuild instead of guessing at a squad.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .state import load_state, save_state, reconcile, advance_ft, State
@@ -18,6 +18,7 @@ class LiveSquad:
     bank: float
     free_transfers: int
     warnings: list[str]
+    purchase_prices: dict[int, float] = field(default_factory=dict)
 
 
 def resolve_current_squad(cfg, gw: int, state_path: Path, client):
@@ -54,11 +55,23 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
             f"{free_transfers} from local tracking."
         )
 
-    return LiveSquad(current_squad, bank, free_transfers, warnings), []
+    missing = [p for p in current_squad if p not in state.purchase_prices]
+    if state.purchase_prices and missing:
+        warnings.append(
+            f"{len(missing)} of your 15 have no recorded purchase price -- those are "
+            f"budgeted at market value, which overstates what they would sell for if "
+            f"they have risen."
+        )
+
+    return LiveSquad(current_squad, bank, free_transfers, warnings,
+                     state.purchase_prices), []
 
 
-def record_transfers(state_path: Path, cfg, gw: int, transfers_made: int, chip: str | None) -> None:
+def record_transfers(state_path: Path, cfg, gw: int, transfers_made: int,
+                     chip: str | None,
+                     purchase_prices: dict[int, float] | None = None) -> None:
     state = load_state(state_path, cfg)
     new_ft = advance_ft(state, transfers_made, chip)
     chips_used = state.chips_used + ([chip] if chip and chip not in state.chips_used else [])
-    save_state(State(new_ft, gw, chips_used), state_path)
+    prices = state.purchase_prices if purchase_prices is None else purchase_prices
+    save_state(State(new_ft, gw, chips_used, dict(prices)), state_path)

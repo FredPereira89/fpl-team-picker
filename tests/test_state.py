@@ -111,3 +111,20 @@ def test_reconcile_spends_the_free_transfer_in_gw2():
     ]}
     ft, _ = reconcile(State(), history)
     assert ft == 1
+
+
+# --- P6: purchase prices (2026-08-27 audit) ---
+
+def test_purchase_prices_survive_a_save_load_cycle(tmp_path):
+    """Selling value needs the price PAID, and no public endpoint reports it —
+    if state.json loses it, the transfer budget silently reverts to market value.
+    """
+    path = tmp_path / "state.json"
+    save_state(State(free_transfers=2, last_event=3, chips_used=[],
+                     purchase_prices={101: 5.5, 202: 12.0}), path)
+    back = load_state(path, Config())
+    assert back.purchase_prices == {101: 5.5, 202: 12.0}
+
+
+def test_purchase_prices_default_to_empty_for_a_squad_never_recorded(tmp_path):
+    assert load_state(tmp_path / "missing.json", Config()).purchase_prices == {}

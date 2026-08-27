@@ -45,6 +45,7 @@ def main() -> int:
     current_squad = None
     bank = 0.0
     free_transfers = cfg.free_transfers
+    purchase_prices: dict[int, float] = {}
 
     if args.mode == 2:
         client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours)
@@ -57,6 +58,7 @@ def main() -> int:
             for msg in live.warnings:
                 print(f"Note: {msg}")
             current_squad, bank, free_transfers = live.current_squad, live.bank, live.free_transfers
+            purchase_prices = live.purchase_prices
 
     def progress(done: int, total: int) -> None:
         # Player history is fetched one request per second on a cold cache, so a
@@ -71,13 +73,20 @@ def main() -> int:
 
     rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
                   current_squad=current_squad, bank=bank, free_transfers=free_transfers,
-                  news=news, progress=progress)
+                  news=news, progress=progress, purchase_prices=purchase_prices)
     print(render(rec, xp))
 
     if args.mode == 2 and current_squad is not None:
         chip = rec.chip.chip if rec.chip else None
         transfers_made = rec.transfers.n_transfers if rec.transfers else 0
-        record_transfers(data_root / "state.json", cfg, args.gw, transfers_made, chip)
+        # Carry each retained player's original purchase price forward; a player
+        # bought this week was bought at today's price. Without this the selling
+        # value resets to market value every run and the budget drifts high again.
+        now = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
+        updated = {int(pid): float(purchase_prices.get(int(pid), now[int(pid)]))
+                   for pid in rec.squad_ids}
+        record_transfers(data_root / "state.json", cfg, args.gw, transfers_made, chip,
+                         purchase_prices=updated)
 
     return 0
 

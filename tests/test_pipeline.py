@@ -1,5 +1,6 @@
 from pathlib import Path
 import pandas as pd
+import pytest
 from fpl.config import Config
 from fpl.pipeline import run
 from fpl.report.weekly import Recommendation
@@ -237,6 +238,42 @@ def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tm
     rec_i, xp_i = run(impatient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
 
     assert _points_available_this_week(rec_i, xp_i) > _points_available_this_week(rec_p, xp_p)
+
+
+def _legal_squad_from_bootstrap():
+    from fpl.data.normalize import normalize_players
+    players = normalize_players(BOOTSTRAP)
+    need = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    current, club_count = [], {}
+    cheap = players[players.player_id % 5 == 0].sort_values("player_id")
+    for _, row in cheap.iterrows():
+        pos, team_id, pid = row["position"], int(row["team_id"]), int(row["player_id"])
+        if need.get(pos, 0) > 0 and club_count.get(team_id, 0) < 3:
+            current.append(pid)
+            need[pos] -= 1
+            club_count[team_id] = club_count.get(team_id, 0) + 1
+        if all(v == 0 for v in need.values()):
+            break
+    return current, players
+
+
+def test_mode_two_bank_credits_selling_value_not_market_value(tmp_path):
+    """Sold players return purchase price plus half their rise. Crediting the
+    full market price invents money the squad never had."""
+    from fpl.optimize.transfers import selling_price
+    current, players = _legal_squad_from_bootstrap()
+    price = dict(zip(players.player_id.astype(int), players.price.astype(float)))
+    # every player bought 0.4 below today's price -> sells 0.2 below it
+    purchase = {pid: round(price[pid] - 0.4, 1) for pid in current}
+
+    rec, xp = run(Config(max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
+                  client=FakeClient(), current_squad=current, bank=5.0,
+                  free_transfers=2, purchase_prices=purchase)
+
+    assert rec.transfers is not None and rec.transfers.n_transfers > 0
+    proceeds = sum(selling_price(purchase[i], price[i]) for i in rec.transfers.out_ids)
+    spent = sum(price[i] for i in rec.transfers.in_ids)
+    assert rec.bank == pytest.approx(round(5.0 + proceeds - spent, 1), abs=0.051)
 
 
 # --- P3: the model can finally see the current season (2026-08-27 audit) ---
