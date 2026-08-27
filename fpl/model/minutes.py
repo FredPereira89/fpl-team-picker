@@ -7,6 +7,11 @@ P_SUB_APPEAR = 0.35  # chance a non-starter appears at all
 TEAM_GAMES = 38
 UNAVAILABLE = {"i", "s", "u"}
 DOUBTFUL = "d"
+# A player needs roughly a third of a season before his own start rate is worth
+# more than the positional prior. Below this he still counts as a small sample
+# for the confidence flag, and he is excluded from the prior he is shrunk toward.
+ESTABLISHED_MINUTES = 900.0
+FALLBACK_PRIOR = 0.35  # used only when no player in the pool has any minutes
 
 
 def _price_prior(price: float, position: str) -> float:
@@ -16,10 +21,33 @@ def _price_prior(price: float, position: str) -> float:
     return float(min(0.85, max(0.15, (price - floor) / 6.0 + 0.25)))
 
 
+def start_priors(players: pd.DataFrame) -> tuple[pd.Series, float]:
+    """Positional start rates, estimated from established players only.
+
+    Averaging `starts / 38` over the whole pool includes the several hundred
+    players who never featured, which drags the prior toward zero and, through
+    the shrinkage below, caps what any starter can be assigned. Only players
+    past ESTABLISHED_MINUTES carry information about what a starting role
+    looks like, so only they define the prior.
+    """
+    est = players[players["minutes"].astype(float) >= ESTABLISHED_MINUTES]
+    if len(est) == 0:
+        est = players[players["minutes"].astype(float) > 0]
+    if len(est) == 0:
+        return pd.Series(dtype="float64"), FALLBACK_PRIOR
+    rates = est["starts"].astype(float) / TEAM_GAMES
+    return rates.groupby(est["position"]).mean(), float(rates.mean())
+
+
 def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None) -> pd.DataFrame:
     news = news or {}
-    k = float(cfg.shrinkage_minutes)
-    pos_mean = (players["starts"] / TEAM_GAMES).mean()
+    # Starts are binomial over a fixed 38-game season, so the natural shrinkage
+    # is a beta-binomial measured in GAMES, not the minutes-weighted blend used
+    # for per-90 rates. Shrinking on minutes (k=900) mixed the two scales and
+    # left an ever-present starter at ~0.85 -- the model could not express
+    # "nailed on", which is the distinction transfers and captaincy turn on.
+    k_games = float(cfg.start_prior_games)
+    pos_prior, overall_prior = start_priors(players)
 
     rows = []
     for _, p in players.iterrows():
@@ -35,9 +63,9 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
                 f"start probability inferred from price (£{p['price']}m)"
             )
         else:
-            raw = float(p["starts"]) / TEAM_GAMES
-            p_start = (minutes * raw + k * pos_mean) / (minutes + k)
-            if minutes < 900:
+            prior = float(pos_prior.get(p["position"], overall_prior))
+            p_start = (float(p["starts"]) + k_games * prior) / (TEAM_GAMES + k_games)
+            if minutes < ESTABLISHED_MINUTES:
                 confidence = "medium"
                 flags.append(f"Small sample: {int(minutes)} minutes last season")
 

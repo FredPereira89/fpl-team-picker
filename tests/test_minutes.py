@@ -1,3 +1,4 @@
+import pytest
 import pandas as pd
 from fpl.config import Config
 from fpl.model.minutes import minutes_model, M_START, M_SUB
@@ -74,3 +75,40 @@ def test_news_weight_zero_ignores_news():
     base = minutes_model(PLAYERS, cfg).set_index("player_id").loc[2, "p_start"]
     out = minutes_model(PLAYERS, cfg, news=news).set_index("player_id").loc[2, "p_start"]
     assert abs(out - base) < 1e-9
+
+
+# --- P1: beta-binomial start probability (2026-08-27 audit) ---
+# The old minutes-weighted shrinkage capped p_start at ~0.85 pool-wide and pulled
+# every established starter toward a mean taken over players who never played.
+
+# 30 reserves who never played, built from the existing new-signing row so the
+# concatenation below keeps identical dtypes.
+ZERO_MINUTE_BENCH = pd.concat([PLAYERS.iloc[[4]]] * 30, ignore_index=True).assign(
+    player_id=list(range(10, 40)),
+    web_name=[f"Reserve{i}" for i in range(30)],
+    team_id=9,
+    price=4.5,
+)
+
+
+def test_ever_present_starter_is_treated_as_nailed():
+    """36 of 38 starts must read as near-certain, not as a coin-flip-plus."""
+    df = minutes_model(PLAYERS, CFG).set_index("player_id")
+    assert df.loc[1, "p_start"] > 0.90
+
+
+def test_players_who_never_played_do_not_drag_down_the_prior():
+    """The positional prior is estimated from established players only, so a pool
+    padded with 30 zero-minute reserves must not move a starter's p_start."""
+    alone = minutes_model(PLAYERS, CFG).set_index("player_id")
+    padded = minutes_model(pd.concat([PLAYERS, ZERO_MINUTE_BENCH], ignore_index=True),
+                           CFG).set_index("player_id")
+    assert padded.loc[1, "p_start"] == pytest.approx(alone.loc[1, "p_start"], abs=0.02)
+
+
+def test_start_prior_games_controls_how_far_the_estimate_shrinks():
+    """A weaker prior leaves an established starter closer to his own start rate."""
+    weak = minutes_model(PLAYERS, Config(start_prior_games=1.0)).set_index("player_id")
+    strong = minutes_model(PLAYERS, Config(start_prior_games=20.0)).set_index("player_id")
+    raw = 36 / 38
+    assert abs(weak.loc[1, "p_start"] - raw) < abs(strong.loc[1, "p_start"] - raw)
