@@ -22,18 +22,49 @@ Running log of what's been decided and done. Read this first when resuming work.
 
 ### GW2 (deadline Fri 28 Aug 2026 17:30 UTC)
 
-- **1 free transfer.** GW1 banks none — FPL grants the first FT only *after* the GW1
-  deadline. The tool used to claim 2 here; that was a bug, fixed 2026-08-26.
-- Squad unchanged from GW1, £100.0m value, £0.0m bank, no price movement anywhere yet.
-- **Recommendation: hold, make no transfer, bank the FT for GW3.** The only positive
-  move the model finds is Raya → Leno at **+1.55 xP over 5 GWs** (+0.31/week), and it is a
-  *goalkeeper* move — the one position the backtest measured at Spearman 0.034, i.e. no
-  demonstrated ranking skill. That gain sits inside the noise of a component the model
-  cannot rank. Hold baseline 236.57 net xP vs 238.12 for the swap; every 2- and
-  3-transfer option is negative after the hit.
-- XI unchanged (4-3-3): Raya; Virgil, Guéhi, Calafiori, Tarkowski; Semenyo, Enzo, Schade;
+- **Transfer made by the user 2026-08-27: Enzo (CHE) → Tzolis (ARS), £7.0m → £6.5m.**
+  Uses the single free transfer, no hit. **0 FT remaining**; any further move costs −4.
+- Squad is legal: 2/5/5/3, Arsenal now at the 3-player cap (Raya, Calafiori, Tzolis),
+  Man City also at 3. Chelsea drops to 2, freeing a slot there.
+- Bank £0.5m. Current market value £99.7m.
+- **First price moves of the season, both rises, both ours: Calafiori £5.5 → £5.6 and
+  João Pedro £7.5 → £7.6** (as of the 2026-08-27 snapshot). Selling value is unchanged
+  either way — a rise has to reach +0.2 before it is worth +0.1 on sale.
+- **Recommendation: hold. Start Tzolis. Do not pay −4 to undo the transfer.**
+  XI (4-3-3): Raya; Virgil, Guéhi, Calafiori, Tarkowski; Semenyo, Schade, Tzolis;
   Haaland (C), Thiago (VC), João Pedro. Bench: Dubravka, D.Essugo, Kadıoğlu, Hughes.
-- Kadıoğlu is doubtful (75%, unspecified) but is a bench player — no action needed.
+- The superseded pre-transfer advice was to hold and bank the FT; the only move the model
+  liked was Raya → Leno at +1.55 xP/5GW, rejected because GK is the position the backtest
+  measured at Spearman 0.034.
+
+### ⚠ The model cannot value Tzolis, and says so misleadingly
+
+With 0 FT left the optimizer recommends **Tzolis → Enzo on a −4 hit**. That recommendation
+should not be followed, because the comparison behind it is not real.
+
+Tzolis signed from Club Brugge in July 2026, so he has **no 2025/26 Premier League row**.
+`apply_season_baseline` therefore zeroes him, which is right for scoring rates but produces
+two separate distortions:
+
+1. **Minutes.** He falls through to the price prior (0.58) and gets flagged "no Premier League
+   minutes on record" — flatly wrong: he started GW1, played 75 minutes, scored 6, and is
+   25.9% owned. Fixed with an override at 0.85 (`data/overrides.yaml`), which puts him in the XI.
+2. **Scoring rates — not fixable by any override.** xG90, xA90, bonus90 and DC90 are all
+   shrunk to the *positional mean*. The model has no idea whether he is good; it only knows he
+   plays. **Its xP for him is a floor, not an estimate.**
+
+So the headline numbers — Tzolis 14.20 vs Enzo 23.35 over 5 GWs on the raw prior, or 17.0-ish
+with the minutes override — compare Enzo's real measured output against a league-average
+placeholder. The true gap is smaller and unknown in sign. Enzo also brings a real risk the
+model *does* see and price: he lasted 25 minutes in GW1.
+
+Sweep for the record (effective p_start after the 0.5 news blend, then GW2 / 5GW xP):
+raw 0.58 → 2.66 / 14.20; override 0.80 → 0.69 eff → 3.08 / 16.42; 0.90 → 0.74 → 3.27 / 17.48;
+1.00 → 0.79 → 3.48 / 18.56. He starts the XI at 0.85 and above.
+
+**This is the general new-signing blind spot**, not a Tzolis quirk: any player without a
+prior-season PL row is invisible to the rate model and will be systematically undervalued
+until enough 2026/27 data accumulates — which needs form blending wired up (see next session).
 
 ### Calafiori minutes override — now a real feature, premise re-verified
 
@@ -198,13 +229,9 @@ Per-player actuals (XI only, mult × pts):
 
 ## Next session
 
-1. **Evaluate Tzolis properly now that the model works.** Christos Tzolis signed for Arsenal
-   (£34m from Club Brugge, replacing Trossard) in July 2026 — *not* Nottingham Forest. FPL
-   price £6.5m (MID). Ownership climbed fast pre-GW1 (~2% early Aug → 20–24%+ by deadline day
-   per Crowd FPL/Beat FPL) on a strong pre-season (1G 2A). He was flagged on GW1 deadline day
-   when the squad was already locked and the API was unreachable. **The model can now actually
-   score him** — the data access and the baseline bug that blocked this are both fixed. Would
-   push Arsenal to the 3-player cap alongside Raya + Calafiori. Don't chase ownership on its own.
+1. **Tzolis is now owned** (bought GW2, replacing Enzo). Outstanding question is not whether
+   to buy but whether the model can ever score him properly — see the blind-spot section above.
+   Re-check after a few GWs of 2026/27 data accumulate. His minutes override expires at GW6.
 2. Re-check Arsenal team news before the GW2 deadline (Saliba/Timber → Calafiori premise,
    currently overridden to 0.80 and expiring at GW6).
 3. **Wire up form blending.** `blend_form` / `form_weight` are tested but uncalled, so the

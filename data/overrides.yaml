@@ -27,3 +27,19 @@ overrides:
       FPL bootstrap-static status/news for Saliba + J.Timber and event/1/live
       minutes for Calafiori + Hincapie, both checked 2026-08-26.
     until_gw: 6
+
+  - player_id: 557
+    name: Tzolis (ARS)
+    p_start_override: 0.85
+    note: >-
+      Signed from Club Brugge in July 2026 (GBP34m, replacing Trossard), so he has
+      no 2025/26 Premier League row and the baseline zeroes him - the model falls
+      back to the price prior and reports "no Premier League minutes on record".
+      That is wrong about his minutes: he started GW1, played 75 and scored 6, and
+      is 25.9% owned. NOTE this override fixes MINUTES ONLY. His scoring rates are
+      still shrunk to the positional mean, so the model cannot judge how good he
+      is - only that he plays. Treat its xP for him as a floor, not an estimate.
+    source: >-
+      FPL event/1/live (75 mins, 6 pts, 1 start) and bootstrap-static
+      selected_by_percent for player 557, checked 2026-08-27.
+    until_gw: 6
