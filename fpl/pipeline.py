@@ -12,7 +12,7 @@ from .data.client import FplClient
 from .data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
                              history_past_frame, apply_season_baseline, latest_season)
 from .data.store import save_table
-from .model.strength import team_ratings
+from .model.strength import team_ratings, league_goals_per_team_match
 from .model.minutes import minutes_model
 from .model.scoring import per90_rates
 from .model.fixtures import team_fixture_frame, fixture_counts
@@ -75,7 +75,12 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     save_table(fixtures, "fixtures", processed)
 
     ratings = team_ratings(players, teams)
-    tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw)
+    # team_ratings returns ratios centred on 1.0; the fixture model needs a real
+    # goals-per-match rate to turn them into expected goals conceded, or every
+    # clean-sheet probability comes out ~0.44 against a true rate near 0.27.
+    league_gc = league_goals_per_team_match(players)
+    tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw,
+                             league_gc=league_gc)
     counts = fixture_counts(fixtures, list(teams["team_id"]), from_event, cfg.horizon_gw)
     rates = per90_rates(players, cfg)
     minutes = minutes_model(players, cfg, news=news)

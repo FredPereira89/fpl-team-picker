@@ -10,6 +10,31 @@ import pandas as pd
 HOME_ATT = 1.10
 AWAY_ATT = 0.90
 MIN_MINUTES = 1  # a team with zero recorded minutes has no PL history
+# Premier League goals conceded per team per match. Used when the baseline
+# season carries no usable history at all.
+DEFAULT_LEAGUE_GC = 1.35
+
+
+def league_goals_per_team_match(players: pd.DataFrame, min_minutes: float = 900.0,
+                                default: float = DEFAULT_LEAGUE_GC) -> float:
+    """League-average goals conceded per team-match, from a baseline season.
+
+    `att` and `dfn` below are ratios to the league mean and so centre on 1.0.
+    They are not goal counts, and `model.fixtures` needs a real rate to turn
+    them into one -- without it, expected goals conceded comes out near 1.0
+    and exp(-1.0) puts the average clean sheet at 0.44 against a true rate
+    near 0.27, over-rewarding every goalkeeper and defender in the pool.
+
+    Measured per 90 rather than as a team total over 38: FPL records goals
+    conceded only while a player is on the pitch, and no player features in
+    every match, so season totals divided by 38 undercount by ~10%.
+    """
+    df = players[players["minutes"].astype(float) >= float(min_minutes)]
+    if len(df) == 0:
+        return float(default)
+    per90 = df["goals_conceded"].astype(float) / (df["minutes"].astype(float) / 90.0)
+    rate = float(per90.mean())
+    return rate if rate > 0 else float(default)
 
 
 def _prior_from_overall(strength: float) -> float:

@@ -172,3 +172,35 @@ def test_news_override_reaches_the_minutes_model(tmp_path):
     assert p_start_of(cut, 5) < p_start_of(base, 5)
     assert xp_of(cut, 5) < xp_of(base, 5)
     assert xp_of(cut, 6) == xp_of(base, 6), "other players must be untouched"
+
+
+def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
+    """Doubling every team's goals conceded in the baseline season must make
+    clean sheets rarer, and so make defenders worth less.
+
+    All teams move together, so the att/dfn ratios are unchanged and the only
+    thing that can move is the league goal rate the pipeline estimates.
+    """
+    import copy
+    leaky = copy.deepcopy(BOOTSTRAP)
+    for e in leaky["elements"]:
+        e["goals_conceded"] = e["goals_conceded"] * 2
+
+    class LeakyClient(FakeClient):
+        def bootstrap(self):
+            return leaky
+
+        def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+            by_id = {e["id"]: e for e in leaky["elements"]}
+            return {
+                int(pid): {"history_past": [dict(by_id[int(pid)], season_name="2025/26")]}
+                for pid in player_ids if int(pid) in by_id
+            }
+
+    cfg = Config(budget=100.0, horizon_gw=3)
+    _, base_xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    _, leaky_xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=LeakyClient())
+
+    base_def = base_xp[base_xp.position == "DEF"].xp_next1.mean()
+    leaky_def = leaky_xp[leaky_xp.position == "DEF"].xp_next1.mean()
+    assert leaky_def < base_def

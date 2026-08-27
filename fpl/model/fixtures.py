@@ -1,11 +1,20 @@
 """Per-fixture difficulty, clean-sheet probability, and DGW/BGW detection."""
 import numpy as np
 import pandas as pd
-from .strength import HOME_ATT, AWAY_ATT
+from .strength import HOME_ATT, AWAY_ATT, DEFAULT_LEAGUE_GC
 
 
 def team_fixture_frame(fixtures: pd.DataFrame, ratings: pd.DataFrame,
-                       from_event: int, horizon: int) -> pd.DataFrame:
+                       from_event: int, horizon: int,
+                       league_gc: float = DEFAULT_LEAGUE_GC) -> pd.DataFrame:
+    """Per-team fixture rows for the horizon.
+
+    `league_gc` converts the dimensionless `dfn`/`att` ratios into expected
+    goals conceded. Without it, xgc centres on 1.0 and p_cs on 0.44 against a
+    real clean-sheet rate near 0.27 (see strength.league_goals_per_team_match).
+    `att_mult` deliberately stays a pure ratio -- it multiplies per-90 scoring
+    rates that already carry their own units.
+    """
     events = range(from_event, from_event + horizon)
     fx = fixtures[fixtures["event"].isin(events)]
     r = ratings.set_index("team_id")
@@ -19,7 +28,8 @@ def team_fixture_frame(fixtures: pd.DataFrame, ratings: pd.DataFrame,
             if team_id not in r.index or opp_id not in r.index:
                 continue
             venue = HOME_ATT if is_home else AWAY_ATT
-            xgc = float(r.loc[team_id, "dfn"]) * float(r.loc[opp_id, "att"]) / venue
+            xgc = (float(league_gc) * float(r.loc[team_id, "dfn"])
+                   * float(r.loc[opp_id, "att"]) / venue)
             rows.append({
                 "team_id": int(team_id),
                 "event": int(f["event"]),

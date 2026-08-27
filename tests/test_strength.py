@@ -1,5 +1,7 @@
+import pytest
 import pandas as pd
-from fpl.model.strength import team_ratings, HOME_ATT, AWAY_ATT
+from fpl.model.strength import (team_ratings, league_goals_per_team_match,
+                                HOME_ATT, AWAY_ATT, DEFAULT_LEAGUE_GC)
 
 TEAMS = pd.DataFrame({
     "team_id": [1, 2, 3, 4, 5],
@@ -63,3 +65,36 @@ def test_odds_provider_overrides_promoted_rating():
 def test_home_away_constants_are_symmetric_about_one():
     assert HOME_ATT > 1.0 > AWAY_ATT
     assert round((HOME_ATT + AWAY_ATT) / 2, 6) == 1.0
+
+
+# --- P2: goals-conceded scale (2026-08-27 audit) ---
+
+def test_league_goals_per_team_match_uses_per_90_not_season_totals():
+    """A first-choice keeper who missed games still concedes at the team's rate.
+
+    Dividing a team's season total by 38 undercounts, because no single player
+    is on the pitch for all 38 matches.
+    """
+    players = pd.DataFrame({
+        "player_id": [1, 2],
+        "position": ["GKP", "GKP"],
+        "minutes": [2700.0, 2700.0],   # 30 matches
+        "goals_conceded": [45, 36],    # 1.5 and 1.2 per 90
+    })
+    assert league_goals_per_team_match(players, min_minutes=900) == pytest.approx(1.35)
+
+
+def test_league_goals_per_team_match_ignores_small_samples():
+    players = pd.DataFrame({
+        "player_id": [1, 2],
+        "position": ["GKP", "DEF"],
+        "minutes": [2700.0, 90.0],
+        "goals_conceded": [45, 5],  # 5.0 per 90 from a single match
+    })
+    assert league_goals_per_team_match(players, min_minutes=900) == pytest.approx(1.5)
+
+
+def test_league_goals_per_team_match_falls_back_when_no_history():
+    empty = pd.DataFrame({"player_id": [], "position": [], "minutes": [],
+                          "goals_conceded": []})
+    assert league_goals_per_team_match(empty) == DEFAULT_LEAGUE_GC

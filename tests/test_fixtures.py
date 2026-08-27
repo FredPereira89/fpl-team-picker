@@ -1,6 +1,8 @@
 import math
 import pandas as pd
+import pytest
 from fpl.model.fixtures import team_fixture_frame, fixture_counts
+from fpl.model.strength import HOME_ATT
 
 RATINGS = pd.DataFrame({
     "team_id": [1, 2, 3],
@@ -70,3 +72,32 @@ def test_fixture_counts_detects_blank_gameweek():
 def test_fixture_counts_covers_every_team_event_pair():
     counts = fixture_counts(FIX, [1, 2, 3], from_event=1, horizon=3)
     assert len(counts) == 9  # 3 teams x 3 events
+
+
+# --- P2: expected goals conceded on a real goals scale (2026-08-27 audit) ---
+
+def test_expected_goals_conceded_is_scaled_to_a_league_goal_rate():
+    """Evenly-matched teams concede the league rate, adjusted only for venue."""
+    even = pd.DataFrame({"team_id": [1, 2, 3], "att": [1.0, 1.0, 1.0],
+                         "dfn": [1.0, 1.0, 1.0], "confidence": ["high"] * 3})
+    df = team_fixture_frame(FIX, even, from_event=1, horizon=3, league_gc=1.35)
+    home = df[(df.fixture_id == 101) & (df.team_id == 1)].iloc[0]
+    assert home.xgc == pytest.approx(1.35 / HOME_ATT)
+
+
+def test_average_clean_sheet_probability_matches_the_real_league_rate():
+    """Roughly a quarter to a third of team-matches end in a clean sheet."""
+    even = pd.DataFrame({"team_id": [1, 2, 3], "att": [1.0, 1.0, 1.0],
+                         "dfn": [1.0, 1.0, 1.0], "confidence": ["high"] * 3})
+    df = team_fixture_frame(FIX, even, from_event=1, horizon=3, league_gc=1.35)
+    assert 0.22 < df.p_cs.mean() < 0.36
+
+
+def test_attack_multiplier_is_not_scaled_by_the_goal_rate():
+    """att_mult multiplies per-90 rates that are already absolute, so it stays
+    a ratio -- only the concession side needed a scale."""
+    even = pd.DataFrame({"team_id": [1, 2, 3], "att": [1.0, 1.0, 1.0],
+                         "dfn": [1.0, 1.0, 1.0], "confidence": ["high"] * 3})
+    df = team_fixture_frame(FIX, even, from_event=1, horizon=3, league_gc=1.35)
+    home = df[(df.fixture_id == 101) & (df.team_id == 1)].iloc[0]
+    assert home.att_mult == pytest.approx(HOME_ATT)
