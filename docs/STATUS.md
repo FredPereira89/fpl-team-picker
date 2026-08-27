@@ -94,22 +94,55 @@ blind spot the model cannot see, and it is the whole reason the override mechani
 - `data/state.json` (FT balance / chips used) is written by each `--mode 2` run. It is
   gitignored, and `reconcile` re-derives the FT count from `entry/{id}/history/` every run
   anyway, so the file only drives the drift warning — deleting it is safe.
-- **Form blending is dead code.** `blend_form` / `form_weight` in `model/scoring.py` exist and
-  are unit-tested, but nothing in `pipeline.run` calls them. The model is therefore 100%
-  last-season baseline and **cannot see 2026/27 form at all**. Biggest remaining gap now that
-  the baseline source is fixed.
+- ~~**Form blending is dead code.**~~ **Fixed 2026-08-27** — `pipeline.run` now builds a
+  `history_current_frame` and passes it to both `blended_rates` and `minutes_model`. The
+  model sees 2026/27 form, and a player with no prior-season row is rated on his actual
+  starts this season instead of on his price forever. See `handoff.md`.
 - **Mode 2 cannot see the squad before a deadline.** `entry/{id}/event/1/picks/` returns
   **HTTP 404** until the deadline passes; `entry/` and `entry/history/` work but carry no picks.
   Verified 2026-08-20. This is why pre-deadline work relies on screenshots. Auth-gated
   `my-team/` is banned by the spec and was not used.
-- Backtest (`13afabd`): outfield (DEF/MID/FWD) rank quality beats naive baseline and FPL's own
-  xP; goalkeeper rank quality is unproven (Spearman 0.034) — treat GK picks with extra caution.
-  Raya at £6.0m rests on that unvalidated component. This is also what drives the GW2 call to
-  *not* do Raya → Leno.
+- ~~Backtest (`13afabd`) — goalkeeper rank quality is unproven (Spearman 0.034).~~
+  **Superseded 2026-08-27.** That backtest measured a simplified points-per-90 proxy, not the
+  production model. Scored against real GW1 returns, the production model ranks goalkeepers at
+  **Spearman 0.524** — its second-best position. The GK caution (and the GW2 call to avoid
+  Raya → Leno on those grounds) rested on a number that was never measured on the real model.
+  Separately, the model WAS over-predicting keepers by +0.70 pts/GW through a clean-sheet
+  scale bug, now fixed. Every run records its forecast to `data/predictions/`; run
+  `python scripts/score_gameweek.py --gw N` after a gameweek to re-measure this properly.
 - 5-GW clean-sheet projections are directional, not precise, past ~GW2 — they are built from
   last season's team ratings.
 
 ## Session log
+
+### 2026-08-27 — model audit and seven fixes
+
+Scored the model out of sample against real GW1 returns (n=595, predictions rebuilt from the
+cached pre-deadline snapshot). Finding: **`p_start` alone (Spearman 0.465) ranked players
+better than the full xP model (0.413)** — the scoring layer was degrading the minutes signal,
+and FPL's own `ep_next` (0.466) beat us. Seven fixes, test-first, 200 → 260 tests:
+
+- **P1 minutes** — `p_start` re-shrunk as a beta-binomial on starts (prior from established
+  players only). The old form capped the whole pool at 0.855 and expected 208.7 starters
+  against a true 220.
+- **P2 clean sheets** — `xgc` was a ratio centred on 1.0 being fed to `exp(-xgc)`, so the
+  average clean sheet came out at 0.44 against a real 0.27. Now scaled by a league goal rate.
+- **P3 current-season form** — the dead `blend_form` path is wired up; new signings are rated
+  on their own starts. (Closes the Tzolis blind spot.)
+- **P4 set pieces** — penalty/corner/free-kick takers are credited, scaled so an established
+  taker is not credited twice for penalties already inside his xG90.
+- **P5a captaincy and decay** — both MILPs now value the armband; the horizon is discounted
+  (`model.horizon_decay`, default 0.85) with `xp_next5` kept undiscounted for display.
+- **P6 selling price** — transfers budget at purchase price plus half the rise, tracked in
+  `data/state.json`, instead of market value.
+- **P8 prediction ledger** — every run writes `data/predictions/gw{n}.parquet`;
+  `scripts/score_gameweek.py` scores it and the report quotes the real measurement.
+
+Measured on GW1: Spearman **0.413 → 0.474**, MAE 1.642 → 1.595, GK bias +0.70 → +0.60,
+forwards 0.282 → 0.412. One gameweek is one sample — confirm against GW2.
+
+Deliberately not done: rebuilding bonus under the 2026/27 BPS table (a rewrite of
+`model/bps.py`), and the full multi-period MILP. Both are in `handoff.md`.
 
 ### 2026-08-26 — three bugs, and GW2
 
