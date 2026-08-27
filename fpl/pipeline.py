@@ -18,6 +18,7 @@ from .model.minutes import minutes_model
 from .model.scoring import blended_rates
 from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
+from .backtest.ledger import save_predictions, load_scored_summary
 from .optimize.squad import optimize_squad
 from .optimize.lineup import build_lineup
 from .optimize.chips import advise_chips
@@ -44,6 +45,16 @@ TRUST_SUMMARY = (
     "GK picks with extra caution; consider leaning on FPL's own projections "
     "or team news for that position specifically."
 )
+
+
+def trust_text(root: Path) -> str:
+    """What to tell the user about how far to trust the recommendation.
+
+    A real scored gameweek always beats TRUST_SUMMARY, which describes a
+    backtest of a simplified points-per-90 proxy rather than the production
+    model -- and whose goalkeeper verdict the GW1 audit contradicted.
+    """
+    return load_scored_summary(root) or TRUST_SUMMARY
 
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
@@ -94,6 +105,11 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     rates = blended_rates(players, current, cfg)
     minutes = minutes_model(players, cfg, news=news, current=current)
     xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
+
+    # Record the forecast before acting on it. Scoring it later (fpl.backtest.
+    # ledger, scripts/score_gameweek.py) is the only thing that measures the
+    # production model rather than a proxy of it.
+    save_predictions(xp, from_event, root)
 
     # actual_mode reflects which branch genuinely ran, not the caller's
     # request -- Mode 2 needs a current_squad to transfer from, and nothing
@@ -152,6 +168,6 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         bank=bank_after,
         squad_value=value, stale=getattr(client, "stale", False),
-        trust=TRUST_SUMMARY if actual_mode == 1 else "",
+        trust=trust_text(root) if actual_mode == 1 else "",
     )
     return rec, xp

@@ -207,37 +207,26 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
     assert leaky_def < base_def
 
 
-# --- P5a: the optimizer maximises the discounted horizon (2026-08-27 audit) ---
+def test_every_run_records_its_forecast_for_later_scoring(tmp_path):
+    """Nothing else in the pipeline persists the xP frame, so without this the
+    week's forecast is gone before the gameweek it predicts is played."""
+    from fpl.backtest.ledger import load_predictions
+    cfg = Config(budget=100.0, horizon_gw=3)
+    _, xp = run(cfg, mode=1, from_event=4, root=tmp_path, client=FakeClient())
 
-SKEWED_FIXTURES = FIXTURES + [
-    # teams 1 and 2 play twice in event 1; teams 7 and 8 play twice in event 5
-    {"id": 900, "event": 1, "team_h": 1, "team_a": 2, "team_h_difficulty": 3,
-     "team_a_difficulty": 3, "kickoff_time": "2026-08-21T19:00:00Z", "finished": False},
-    {"id": 901, "event": 5, "team_h": 7, "team_a": 8, "team_h_difficulty": 3,
-     "team_a_difficulty": 3, "kickoff_time": "2026-09-21T19:00:00Z", "finished": False},
-]
-
-
-class SkewedClient(FakeClient):
-    def fixtures(self):
-        return SKEWED_FIXTURES
+    ledger = load_predictions(gw=4, root=tmp_path)
+    assert (ledger["gw"] == 4).all()
+    assert sorted(ledger.player_id) == sorted(xp.player_id)
 
 
-def _points_available_this_week(rec, xp):
-    return float(xp[xp.player_id.isin(rec.squad_ids)].xp_next1.sum())
-
-
-def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tmp_path):
-    """A double gameweek five weeks out is worth less than one this week — the
-    squad can be changed before then. Without a discount the solver treats them
-    as identical."""
-    patient = Config(budget=100.0, horizon_gw=5, horizon_decay=1.0)
-    impatient = Config(budget=100.0, horizon_gw=5, horizon_decay=0.3)
-
-    rec_p, xp_p = run(patient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
-    rec_i, xp_i = run(impatient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
-
-    assert _points_available_this_week(rec_i, xp_i) > _points_available_this_week(rec_p, xp_p)
+def test_trust_text_prefers_a_real_measurement_over_the_hard_coded_note(tmp_path):
+    """The static TRUST_SUMMARY quotes a backtest of a simplified proxy. Once a
+    real gameweek has been scored, that measurement is what the user should see."""
+    from fpl.backtest.ledger import save_scored_summary
+    save_scored_summary("GW1 scored: rank quality +0.472 overall.", root=tmp_path)
+    cfg = Config(budget=100.0, horizon_gw=3)
+    rec, _ = run(cfg, mode=1, from_event=2, root=tmp_path, client=FakeClient())
+    assert rec.trust == "GW1 scored: rank quality +0.472 overall."
 
 
 def _legal_squad_from_bootstrap():
@@ -274,6 +263,39 @@ def test_mode_two_bank_credits_selling_value_not_market_value(tmp_path):
     proceeds = sum(selling_price(purchase[i], price[i]) for i in rec.transfers.out_ids)
     spent = sum(price[i] for i in rec.transfers.in_ids)
     assert rec.bank == pytest.approx(round(5.0 + proceeds - spent, 1), abs=0.051)
+
+
+# --- P5a: the optimizer maximises the discounted horizon (2026-08-27 audit) ---
+
+SKEWED_FIXTURES = FIXTURES + [
+    # teams 1 and 2 play twice in event 1; teams 7 and 8 play twice in event 5
+    {"id": 900, "event": 1, "team_h": 1, "team_a": 2, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-08-21T19:00:00Z", "finished": False},
+    {"id": 901, "event": 5, "team_h": 7, "team_a": 8, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-09-21T19:00:00Z", "finished": False},
+]
+
+
+class SkewedClient(FakeClient):
+    def fixtures(self):
+        return SKEWED_FIXTURES
+
+
+def _points_available_this_week(rec, xp):
+    return float(xp[xp.player_id.isin(rec.squad_ids)].xp_next1.sum())
+
+
+def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tmp_path):
+    """A double gameweek five weeks out is worth less than one this week — the
+    squad can be changed before then. Without a discount the solver treats them
+    as identical."""
+    patient = Config(budget=100.0, horizon_gw=5, horizon_decay=1.0)
+    impatient = Config(budget=100.0, horizon_gw=5, horizon_decay=0.3)
+
+    rec_p, xp_p = run(patient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+    rec_i, xp_i = run(impatient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+
+    assert _points_available_this_week(rec_i, xp_i) > _points_available_this_week(rec_p, xp_p)
 
 
 # --- P3: the model can finally see the current season (2026-08-27 audit) ---
