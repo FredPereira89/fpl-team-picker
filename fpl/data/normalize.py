@@ -3,6 +3,11 @@ import pandas as pd
 
 AVAILABLE = "a"
 FLOAT_COLS = ["expected_goals", "expected_assists", "expected_goals_conceded"]
+# Who takes the set pieces, as published by FPL. Null for everyone not on the
+# list, and 1 for the first-choice taker. Left nullable on purpose: filling the
+# gap with 0 would sort every non-taker ahead of the designated one.
+SET_PIECE_COLS = ["penalties_order", "corners_and_indirect_freekicks_order",
+                  "direct_freekicks_order"]
 PLAYER_INT_COLS = [
     "minutes", "starts", "total_points", "goals_scored", "assists", "clean_sheets",
     "goals_conceded", "saves", "bonus", "bps", "yellow_cards", "red_cards", "own_goals",
@@ -34,9 +39,12 @@ def normalize_players(bootstrap: dict) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     for c in PLAYER_INT_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    for c in SET_PIECE_COLS:
+        # Absent from older cached snapshots; that reads the same as "not a taker".
+        df[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else float("nan")
     cols = ["player_id", "web_name", "team_id", "team", "position", "price", "status",
             "available", "news", "chance_of_playing"] + PLAYER_INT_COLS + FLOAT_COLS + \
-           ["selected_by_percent"]
+           SET_PIECE_COLS + ["selected_by_percent"]
     return df[cols].reset_index(drop=True)
 
 

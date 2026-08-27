@@ -1,7 +1,9 @@
 import math
 import pandas as pd
 from fpl.config import Config
-from fpl.model.scoring import per90_rates, ew_mean, form_weight, blend_form
+import pytest
+from fpl.model.scoring import (per90_rates, apply_set_piece_roles,
+                                ew_mean, form_weight, blend_form)
 
 CFG = Config(shrinkage_minutes=900, form_half_life_gw=3, form_max_weight=0.6)
 
@@ -92,3 +94,58 @@ def test_blend_form_returns_pure_baseline_at_gw1():
 def test_blend_form_moves_toward_form_as_season_progresses():
     out = blend_form(baseline=5.0, form_value=10.0, gws_played=6, cfg=CFG)
     assert math.isclose(out, 5.0 * 0.4 + 10.0 * 0.6, rel_tol=1e-9)
+
+
+# --- P4: set-piece roles (2026-08-27 audit) ---
+
+TAKERS = pd.DataFrame({
+    "player_id": [1, 2, 3, 4],
+    "position": ["MID"] * 4,
+    "minutes": [3000, 0, 3000, 3000],
+    "penalties_order": [1, 1, 2, None],
+    "corners_and_indirect_freekicks_order": [None, None, None, 1],
+    "direct_freekicks_order": [None, None, None, None],
+})
+FLAT_RATES = pd.DataFrame({
+    "player_id": [1, 2, 3, 4],
+    "xg90": [0.3, 0.3, 0.3, 0.3],
+    "xa90": [0.2, 0.2, 0.2, 0.2],
+    "bonus90": [0.0] * 4, "dc90": [0.0] * 4,
+    "saves90": [0.0] * 4, "cards90": [0.0] * 4,
+})
+
+
+def test_designated_penalty_taker_is_credited_with_expected_goals():
+    out = apply_set_piece_roles(FLAT_RATES, TAKERS, CFG).set_index("player_id")
+    assert out.loc[1, "xg90"] > 0.3
+
+
+def test_a_player_off_the_list_is_credited_with_nothing():
+    out = apply_set_piece_roles(FLAT_RATES, TAKERS, CFG).set_index("player_id")
+    assert out.loc[4, "xg90"] == pytest.approx(0.3)
+
+
+def test_corner_taker_is_credited_with_assists_not_goals():
+    out = apply_set_piece_roles(FLAT_RATES, TAKERS, CFG).set_index("player_id")
+    assert out.loc[4, "xa90"] > 0.2
+
+
+def test_an_established_taker_is_credited_less_than_a_newcomer():
+    """A full season of measured xG already contains the penalties he took, so
+    crediting him again would count them twice. The premium fills in only the
+    part of an estimate that is prior rather than evidence."""
+    out = apply_set_piece_roles(FLAT_RATES, TAKERS, CFG).set_index("player_id")
+    assert out.loc[2, "xg90"] > out.loc[1, "xg90"]
+
+
+def test_the_backup_taker_is_credited_less_than_the_first_choice():
+    out = apply_set_piece_roles(FLAT_RATES, TAKERS, CFG).set_index("player_id")
+    assert out.loc[1, "xg90"] > out.loc[3, "xg90"] > 0.3
+
+
+def test_missing_set_piece_columns_are_treated_as_no_duty():
+    """Older cached snapshots predate these fields."""
+    bare = TAKERS.drop(columns=["penalties_order", "corners_and_indirect_freekicks_order",
+                                "direct_freekicks_order"])
+    out = apply_set_piece_roles(FLAT_RATES, bare, CFG).set_index("player_id")
+    assert out.loc[1, "xg90"] == pytest.approx(0.3)

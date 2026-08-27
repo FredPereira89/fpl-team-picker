@@ -1,3 +1,4 @@
+import pytest
 import pandas as pd
 from fpl.data.normalize import (
     normalize_teams, normalize_players, normalize_fixtures, history_past_frame,
@@ -25,7 +26,8 @@ BOOTSTRAP = {
          "bonus": 18, "bps": 570, "yellow_cards": 2, "red_cards": 0, "own_goals": 0,
          "expected_goals": "7.57", "expected_assists": "7.16",
          "expected_goals_conceded": "15.57", "selected_by_percent": "11.2",
-         "defensive_contribution": 184},
+         "defensive_contribution": 184, "penalties_order": 1,
+         "corners_and_indirect_freekicks_order": 1, "direct_freekicks_order": 2},
         {"id": 99, "web_name": "Crock", "team": 7, "element_type": 2, "now_cost": 45,
          "status": "i", "news": "Knee injury - expected back 05 Sep",
          "chance_of_playing_next_round": 0,
@@ -34,7 +36,8 @@ BOOTSTRAP = {
          "bonus": 2, "bps": 180, "yellow_cards": 1, "red_cards": 0, "own_goals": 0,
          "expected_goals": "0.40", "expected_assists": "0.90",
          "expected_goals_conceded": "13.10", "selected_by_percent": "0.4",
-         "defensive_contribution": 25},
+         "defensive_contribution": 25, "penalties_order": None,
+         "corners_and_indirect_freekicks_order": None, "direct_freekicks_order": None},
     ],
 }
 
@@ -116,3 +119,21 @@ def test_defensive_contribution_extracted_for_current_season():
     df = normalize_players(BOOTSTRAP)
     assert df.loc[df.player_id == 12, "defensive_contribution"].iloc[0] == 184
     assert df.loc[df.player_id == 99, "defensive_contribution"].iloc[0] == 25
+
+
+# --- P4: set-piece roles (2026-08-27 audit) ---
+
+def test_normalized_players_carry_the_published_set_piece_roles():
+    """FPL publishes who takes the penalties. The model read none of these."""
+    df = normalize_players(BOOTSTRAP).set_index("player_id")
+    assert "penalties_order" in df.columns
+    assert "corners_and_indirect_freekicks_order" in df.columns
+    assert "direct_freekicks_order" in df.columns
+
+
+def test_a_player_with_no_set_piece_duty_is_not_treated_as_first_choice():
+    """FPL sends null for everyone who is not on the list; a 0 or a NaN that
+    silently sorts as 'first taker' would hand a premium to the whole league."""
+    df = normalize_players(BOOTSTRAP).set_index("player_id")
+    assert df["penalties_order"].isna().any()
+    assert (df["penalties_order"].dropna() >= 1).all()
