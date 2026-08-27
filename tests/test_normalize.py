@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from fpl.data.normalize import (
     normalize_teams, normalize_players, normalize_fixtures, history_past_frame,
+    history_current_frame,
 )
 from fpl.data.store import save_table, load_table
 
@@ -119,6 +120,55 @@ def test_defensive_contribution_extracted_for_current_season():
     df = normalize_players(BOOTSTRAP)
     assert df.loc[df.player_id == 12, "defensive_contribution"].iloc[0] == 184
     assert df.loc[df.player_id == 99, "defensive_contribution"].iloc[0] == 25
+
+
+# --- P3: current-season history (2026-08-27 audit) ---
+
+def _summary_with_history(rows):
+    return {"history": rows}
+
+
+CURRENT_ROWS = [
+    {"round": 1, "minutes": 90, "starts": 1, "goals_scored": 1, "assists": 0,
+     "bonus": 3, "defensive_contribution": 5, "saves": 0, "yellow_cards": 0,
+     "red_cards": 0, "expected_goals": "0.8", "expected_assists": "0.1",
+     "expected_goals_conceded": "1.2", "total_points": 12, "clean_sheets": 0,
+     "goals_conceded": 1, "bps": 30, "own_goals": 0},
+    {"round": 2, "minutes": 45, "starts": 0, "goals_scored": 0, "assists": 1,
+     "bonus": 0, "defensive_contribution": 2, "saves": 0, "yellow_cards": 1,
+     "red_cards": 0, "expected_goals": "0.2", "expected_assists": "0.4",
+     "expected_goals_conceded": "0.9", "total_points": 4, "clean_sheets": 0,
+     "goals_conceded": 2, "bps": 12, "own_goals": 0},
+]
+
+
+def test_current_season_totals_accumulate_across_played_gameweeks():
+    df = history_current_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=3)
+    row = df.set_index("player_id").loc[7]
+    assert row["minutes"] == 135
+    assert row["starts"] == 1
+    assert row["expected_goals"] == pytest.approx(1.0)
+    assert row["gws_played"] == 2
+
+
+def test_current_season_totals_exclude_the_gameweek_being_predicted():
+    """A run before the GW2 deadline must not see GW2 — those rows only exist
+    once the gameweek has started, and using them would leak the answer."""
+    df = history_current_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=2)
+    row = df.set_index("player_id").loc[7]
+    assert row["minutes"] == 90
+    assert row["gws_played"] == 1
+
+
+def test_current_season_frame_is_empty_before_a_ball_is_kicked():
+    df = history_current_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=1)
+    assert len(df) == 0
+    assert "gws_played" in df.columns
+
+
+def test_a_player_with_no_appearances_has_no_current_row():
+    df = history_current_frame({7: {"history": []}}, before_event=5)
+    assert len(df) == 0
 
 
 # --- P4: set-piece roles (2026-08-27 audit) ---

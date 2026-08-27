@@ -204,3 +204,36 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
     base_def = base_xp[base_xp.position == "DEF"].xp_next1.mean()
     leaky_def = leaky_xp[leaky_xp.position == "DEF"].xp_next1.mean()
     assert leaky_def < base_def
+
+
+# --- P3: the model can finally see the current season (2026-08-27 audit) ---
+
+class InFormClient(FakeClient):
+    """Player 20 has started and scored in every gameweek so far this season."""
+
+    def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+        out = FakeClient.element_summaries(self, player_ids, ttl_hours, progress)
+        for pid in out:
+            out[pid] = dict(out[pid], history=[
+                {"round": r, "minutes": 90, "starts": 1,
+                 "goals_scored": 2 if pid == 20 else 0, "assists": 0, "bonus": 3,
+                 "defensive_contribution": 0, "saves": 0, "yellow_cards": 0,
+                 "red_cards": 0, "own_goals": 0, "clean_sheets": 0,
+                 "goals_conceded": 1, "bps": 30, "total_points": 12,
+                 "expected_goals": "1.5" if pid == 20 else "0.0",
+                 "expected_assists": "0.0", "expected_goals_conceded": "1.0"}
+                for r in range(1, 5)
+            ])
+        return out
+
+
+def test_current_season_form_reaches_the_projection(tmp_path):
+    """blend_form existed and was unit-tested for a month while nothing called
+    it — the model ran on last season alone."""
+    cfg = Config(budget=100.0, horizon_gw=3)
+    _, cold = run(cfg, mode=1, from_event=5, root=tmp_path, client=FakeClient())
+    _, hot = run(cfg, mode=1, from_event=5, root=tmp_path, client=InFormClient())
+
+    cold_xp = float(cold.set_index("player_id").loc[20, "xp_next1"])
+    hot_xp = float(hot.set_index("player_id").loc[20, "xp_next1"])
+    assert hot_xp > cold_xp

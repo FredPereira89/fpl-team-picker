@@ -10,11 +10,12 @@ from .config import Config
 from .data.cache import Cache
 from .data.client import FplClient
 from .data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
-                             history_past_frame, apply_season_baseline, latest_season)
+                             history_past_frame, history_current_frame,
+                             apply_season_baseline, latest_season)
 from .data.store import save_table
 from .model.strength import team_ratings, league_goals_per_team_match
 from .model.minutes import minutes_model
-from .model.scoring import per90_rates
+from .model.scoring import blended_rates
 from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
 from .optimize.squad import optimize_squad
@@ -82,8 +83,14 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw,
                              league_gc=league_gc)
     counts = fixture_counts(fixtures, list(teams["team_id"]), from_event, cfg.horizon_gw)
-    rates = per90_rates(players, cfg)
-    minutes = minutes_model(players, cfg, news=news)
+    # Season-to-date output and starts, strictly before the gameweek being
+    # predicted. Until 2026-08-27 nothing read this: the model ran entirely on
+    # last season and could not see the current one, which is also why a summer
+    # signing with no prior Premier League row stayed pinned to the positional
+    # mean however he played.
+    current = history_current_frame(summaries, before_event=from_event)
+    rates = blended_rates(players, current, cfg)
+    minutes = minutes_model(players, cfg, news=news, current=current)
     xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
 
     # actual_mode reflects which branch genuinely ran, not the caller's

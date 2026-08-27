@@ -120,3 +120,32 @@ def history_past_frame(summaries: dict[int, dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["player_id", "season_name"] + PAST_COLS + FLOAT_COLS)
     return pd.DataFrame(rows).fillna(0).reset_index(drop=True)
+
+
+def history_current_frame(summaries: dict[int, dict], before_event: int) -> pd.DataFrame:
+    """Season-to-date totals per player, from element-summary `history`.
+
+    Only gameweeks STRICTLY BEFORE `before_event` are included: rows for the
+    gameweek being predicted appear once it kicks off, and counting them would
+    score the model against an answer it was handed.
+
+    `gws_played` counts distinct rounds on record, which is the number of
+    matches the player's club has played since he joined it -- not the number
+    he featured in. That is the right denominator for both how much weight
+    season-to-date form deserves and how many chances to start he has had.
+    """
+    rows = []
+    for pid, summary in (summaries or {}).items():
+        played = [h for h in summary.get("history", [])
+                  if int(h.get("round", 0)) < int(before_event)]
+        if not played:
+            continue
+        row = {"player_id": int(pid),
+               "gws_played": len({int(h["round"]) for h in played})}
+        for c in PLAYER_INT_COLS + FLOAT_COLS:
+            row[c] = sum(pd.to_numeric(h.get(c, 0), errors="coerce") or 0 for h in played)
+        rows.append(row)
+    cols = ["player_id", "gws_played"] + PLAYER_INT_COLS + FLOAT_COLS
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)[cols].reset_index(drop=True)

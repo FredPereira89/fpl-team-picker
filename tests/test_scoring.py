@@ -2,7 +2,7 @@ import math
 import pandas as pd
 from fpl.config import Config
 import pytest
-from fpl.model.scoring import (per90_rates, apply_set_piece_roles,
+from fpl.model.scoring import (per90_rates, blended_rates, apply_set_piece_roles,
                                 ew_mean, form_weight, blend_form)
 
 CFG = Config(shrinkage_minutes=900, form_half_life_gw=3, form_max_weight=0.6)
@@ -94,6 +94,66 @@ def test_blend_form_returns_pure_baseline_at_gw1():
 def test_blend_form_moves_toward_form_as_season_progresses():
     out = blend_form(baseline=5.0, form_value=10.0, gws_played=6, cfg=CFG)
     assert math.isclose(out, 5.0 * 0.4 + 10.0 * 0.6, rel_tol=1e-9)
+
+
+# --- P3: season-to-date form (2026-08-27 audit) ---
+# Until now blend_form and form_weight were tested but called by nothing:
+# the model ran on last season alone and could not see the current one.
+
+CURRENT = pd.DataFrame({
+    "player_id": [1, 2],
+    "gws_played": [6, 6],
+    "minutes": [540.0, 540.0],
+    "starts": [6, 6],
+    "expected_goals": [6.0, 0.0],    # 1.0 xG per 90 -- far above his baseline
+    "expected_assists": [0.0, 0.0],
+    "bonus": [0, 0],
+    "saves": [0, 0],
+    "yellow_cards": [0, 0],
+    "red_cards": [0, 0],
+    "defensive_contribution": [0, 0],
+})
+
+
+def test_form_pulls_a_rate_toward_this_seasons_output():
+    base = per90_rates(PLAYERS, CFG).set_index("player_id")
+    blended = blended_rates(PLAYERS, CURRENT, CFG).set_index("player_id")
+    assert blended.loc[1, "xg90"] > base.loc[1, "xg90"]
+    assert blended.loc[1, "xg90"] < 1.0  # but never all the way -- 6 GWs is not a season
+
+
+def test_form_leaves_players_with_no_current_data_untouched():
+    base = per90_rates(PLAYERS, CFG).set_index("player_id")
+    blended = blended_rates(PLAYERS, CURRENT, CFG).set_index("player_id")
+    assert blended.loc[3, "xg90"] == pytest.approx(base.loc[3, "xg90"])
+
+
+def test_before_the_season_starts_the_baseline_is_untouched():
+    base = per90_rates(PLAYERS, CFG).set_index("player_id")
+    empty = CURRENT.iloc[0:0]
+    blended = blended_rates(PLAYERS, empty, CFG).set_index("player_id")
+    for col in ["xg90", "xa90", "bonus90", "dc90", "saves90", "cards90"]:
+        assert blended[col].equals(base[col])
+
+
+def test_a_new_signing_is_rated_on_this_season_not_the_positional_mean():
+    """A player with no prior Premier League row has every baseline rate shrunk
+    to the positional mean. Season-to-date output is the only real evidence
+    about him, and until now the model could not use it."""
+    newcomer = pd.DataFrame([{
+        "player_id": 99, "position": "MID", "minutes": 0,
+        "expected_goals": 0.0, "expected_assists": 0.0, "bonus": 0, "saves": 0,
+        "yellow_cards": 0, "red_cards": 0, "defensive_contribution": 0,
+    }])
+    players = pd.concat([PLAYERS, newcomer], ignore_index=True)
+    current = pd.DataFrame([{
+        "player_id": 99, "gws_played": 6, "minutes": 540.0, "starts": 6,
+        "expected_goals": 6.0, "expected_assists": 0.0, "bonus": 0, "saves": 0,
+        "yellow_cards": 0, "red_cards": 0, "defensive_contribution": 0,
+    }])
+    base = per90_rates(players, CFG).set_index("player_id")
+    blended = blended_rates(players, current, CFG).set_index("player_id")
+    assert blended.loc[99, "xg90"] > base.loc[99, "xg90"]
 
 
 # --- P4: set-piece roles (2026-08-27 audit) ---

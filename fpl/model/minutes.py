@@ -39,7 +39,16 @@ def start_priors(players: pd.DataFrame) -> tuple[pd.Series, float]:
     return rates.groupby(est["position"]).mean(), float(rates.mean())
 
 
-def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None) -> pd.DataFrame:
+def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None,
+                  current: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Start probability, appearance probability and expected minutes.
+
+    `current` is this season's `history_current_frame`: starts and gameweeks on
+    record so far. Season-to-date starts are counted as ordinary binomial
+    evidence alongside last season's, which is what lets a summer signing stop
+    being priced off his transfer fee, and an ever-present who has lost his
+    place stop reading as nailed on.
+    """
     news = news or {}
     # Starts are binomial over a fixed 38-game season, so the natural shrinkage
     # is a beta-binomial measured in GAMES, not the minutes-weighted blend used
@@ -48,14 +57,28 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
     # "nailed on", which is the distinction transfers and captaincy turn on.
     k_games = float(cfg.start_prior_games)
     pos_prior, overall_prior = start_priors(players)
+    now = ({int(r["player_id"]): r for _, r in current.iterrows()}
+           if current is not None and len(current) else {})
 
     rows = []
     for _, p in players.iterrows():
         flags: list[str] = []
         confidence = "high"
         minutes = float(p["minutes"])
+        seen = now.get(int(p["player_id"]))
+        # Games his club has played since he joined it -- not games he featured
+        # in -- which is the number of chances to start he has actually had.
+        now_games = float(seen["gws_played"]) if seen is not None else 0.0
+        now_starts = float(seen["starts"]) if seen is not None else 0.0
+        past_games = float(TEAM_GAMES) if minutes > 0 else 0.0
 
-        if minutes <= 0:
+        # For a player with no Premier League history, price IS the prior --
+        # it is FPL's own estimate of his role. Season-to-date starts then
+        # update it like any other evidence, instead of being ignored in favour
+        # of a positional average he has no business being shrunk toward.
+        prior = (float(pos_prior.get(p["position"], overall_prior)) if past_games > 0
+                 else _price_prior(float(p["price"]), p["position"]))
+        if past_games + now_games <= 0:
             p_start = _price_prior(float(p["price"]), p["position"])
             confidence = "low"
             flags.append(
@@ -63,9 +86,15 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
                 f"start probability inferred from price (£{p['price']}m)"
             )
         else:
-            prior = float(pos_prior.get(p["position"], overall_prior))
-            p_start = (float(p["starts"]) + k_games * prior) / (TEAM_GAMES + k_games)
-            if minutes < ESTABLISHED_MINUTES:
+            p_start = ((float(p["starts"]) + now_starts + k_games * prior)
+                       / (past_games + now_games + k_games))
+            if minutes <= 0:
+                confidence = "medium" if now_games >= 3 else "low"
+                flags.append(
+                    f"No Premier League history — rated on {int(now_starts)} start(s) "
+                    f"in {int(now_games)} gameweek(s) this season"
+                )
+            elif minutes < ESTABLISHED_MINUTES:
                 confidence = "medium"
                 flags.append(f"Small sample: {int(minutes)} minutes last season")
 

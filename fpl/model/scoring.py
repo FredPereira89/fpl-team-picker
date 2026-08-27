@@ -34,6 +34,25 @@ def per90_rates(players: pd.DataFrame, cfg) -> pd.DataFrame:
     return pd.DataFrame(out).reset_index(drop=True)
 
 
+def current_per90(current: pd.DataFrame) -> pd.DataFrame:
+    """Season-to-date per-90 rates, unshrunk.
+
+    Deliberately not shrunk toward a positional mean: how much this season
+    counts is decided once, by form_weight, from how many gameweeks are on
+    record. Shrinking here as well would discount the same small sample twice.
+    """
+    df = current.copy()
+    df["_cards"] = df["yellow_cards"] + 3 * df["red_cards"]
+    mins = df["minutes"].astype(float)
+    out = {"player_id": df["player_id"].astype(int),
+           "gws_played": df["gws_played"].astype(int)}
+    for name, source in dict(RATE_SPECS, cards90="_cards").items():
+        out[name] = np.where(mins > 0, df[source].astype(float) / np.maximum(mins, 1) * 90.0, 0.0)
+    return pd.DataFrame(out).reset_index(drop=True)
+
+
+RATE_COLUMNS = list(RATE_SPECS) + ["cards90"]
+
 # What a designated taker is worth per 90, over and above open play. A club wins
 # roughly one penalty every eight matches and converts about four in five.
 PENALTY_XG90 = 0.10
@@ -87,6 +106,31 @@ def apply_set_piece_roles(rates: pd.DataFrame, players: pd.DataFrame, cfg) -> pd
         out.loc[idx, "xg90"] += unmeasured * (pens * PENALTY_XG90 + frees * FREEKICK_XG90)
         out.loc[idx, "xa90"] += unmeasured * corners * CORNER_XA90
     return out
+
+
+def blended_rates(players: pd.DataFrame, current: pd.DataFrame | None, cfg) -> pd.DataFrame:
+    """Last season's shrunk baseline, blended with season-to-date output.
+
+    Before 2026-08-27 this blend existed (blend_form / form_weight) but nothing
+    called it, so the model ran entirely on the previous season and could not
+    see the current one at all -- which is also why a summer signing with no
+    prior Premier League row was rated at the positional mean forever.
+    """
+    base = per90_rates(players, cfg)
+    if current is None or len(current) == 0:
+        return apply_set_piece_roles(base, players, cfg)
+
+    cur = current_per90(current).set_index("player_id")
+    out = base.copy()
+    for i, pid in enumerate(out["player_id"].astype(int)):
+        if pid not in cur.index:
+            continue
+        gws = int(cur.loc[pid, "gws_played"])
+        for col in RATE_COLUMNS:
+            out.loc[out.index[i], col] = blend_form(
+                float(base.loc[base.index[i], col]), float(cur.loc[pid, col]), gws, cfg
+            )
+    return apply_set_piece_roles(out, players, cfg)
 
 
 def ew_mean(values: list[float], half_life: float) -> float:

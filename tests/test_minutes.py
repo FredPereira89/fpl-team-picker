@@ -112,3 +112,36 @@ def test_start_prior_games_controls_how_far_the_estimate_shrinks():
     strong = minutes_model(PLAYERS, Config(start_prior_games=20.0)).set_index("player_id")
     raw = 36 / 38
     assert abs(weak.loc[1, "p_start"] - raw) < abs(strong.loc[1, "p_start"] - raw)
+
+
+# --- P3: season-to-date starts (2026-08-27 audit) ---
+
+CURRENT_STARTS = pd.DataFrame({
+    "player_id": [1, 2, 5],
+    "gws_played": [6, 6, 6],
+    "starts": [0, 6, 6],     # the nailed man benched, the rotation man nailed
+    "minutes": [30.0, 540.0, 540.0],
+})
+
+
+def test_this_seasons_starts_override_last_seasons_reputation():
+    """An ever-present who has not started a game this season is not nailed on
+    any more, and the model has to be able to see that."""
+    before = minutes_model(PLAYERS, CFG).set_index("player_id")
+    after = minutes_model(PLAYERS, CFG, current=CURRENT_STARTS).set_index("player_id")
+    assert after.loc[1, "p_start"] < before.loc[1, "p_start"]
+    assert after.loc[2, "p_start"] > before.loc[2, "p_start"]
+
+
+def test_a_new_signing_who_starts_stops_being_priced_off_his_transfer_fee():
+    """Player 5 has no Premier League history, so his start probability came
+    from his price alone — the blind spot that mispriced Tzolis."""
+    before = minutes_model(PLAYERS, CFG).set_index("player_id")
+    after = minutes_model(PLAYERS, CFG, current=CURRENT_STARTS).set_index("player_id")
+    assert after.loc[5, "p_start"] > before.loc[5, "p_start"]
+    assert not any("inferred from price" in f for f in after.loc[5, "flags"])
+
+
+def test_an_unavailable_player_is_still_zeroed_whatever_his_form():
+    after = minutes_model(PLAYERS, CFG, current=CURRENT_STARTS).set_index("player_id")
+    assert after.loc[3, "p_start"] == 0.0
