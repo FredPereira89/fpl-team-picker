@@ -24,6 +24,7 @@ class Config:
     form_max_weight: float = 0.6
     shrinkage_minutes: float = 900.0
     start_prior_games: float = 4.0
+    horizon_decay: float = 0.85
     max_paid_hits: int = 2
     hit_cost: int = 4
     bench_weight: list[float] = field(default_factory=lambda: [0.15, 0.10, 0.05, 0.02])
@@ -55,6 +56,7 @@ def load_config(path: Path) -> Config:
         form_max_weight=float(model.get("form_max_weight", d.form_max_weight)),
         shrinkage_minutes=float(model.get("shrinkage_minutes", d.shrinkage_minutes)),
         start_prior_games=float(model.get("start_prior_games", d.start_prior_games)),
+        horizon_decay=float(model.get("horizon_decay", d.horizon_decay)),
         max_paid_hits=int(opt.get("max_paid_hits", d.max_paid_hits)),
         hit_cost=int(opt.get("hit_cost", d.hit_cost)),
         bench_weight=list(opt.get("bench_weight", d.bench_weight)),
@@ -79,6 +81,11 @@ def load_config(path: Path) -> Config:
         raise ValueError(
             f"model.start_prior_games is the beta-binomial prior strength in team "
             f"games and must be positive, got {cfg.start_prior_games}"
+        )
+    if not 0 < cfg.horizon_decay <= 1:
+        raise ValueError(
+            f"model.horizon_decay discounts each further gameweek and must be in "
+            f"(0, 1] -- 1.0 means no discount, got {cfg.horizon_decay}"
         )
     if cfg.budget <= 0:
         raise ValueError(f"budget must be positive, got {cfg.budget}")

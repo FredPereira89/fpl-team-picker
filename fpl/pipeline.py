@@ -33,6 +33,8 @@ from .report.weekly import Recommendation, render
 # single-rate proxy (shrunk points-per-90), not the exact production
 # goal/assist/bonus/DC/saves component split, so the real GK figure may
 # differ -- but there is no positive evidence for GK picks either way.
+HORIZON_COL = "xp_horizon"
+
 TRUST_SUMMARY = (
     "Backtest complete (2025/26 held out, trained on 2024/25, n=11406 GW "
     "observations): outfield rank quality (DEF/MID/FWD) beats both a naive "
@@ -101,11 +103,14 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     transfers = None
     if mode == 2 and current_squad:
         actual_mode = 2
-        best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg)
+        # xp_horizon, not xp_next5: the solver should discount gains it may
+        # never collect, while the report still shows the honest raw total.
+        best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
+                                            xp_col=HORIZON_COL)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
     else:
         actual_mode = 1
-        squad = optimize_squad(xp, cfg)
+        squad = optimize_squad(xp, cfg, xp_col=HORIZON_COL)
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
 
     from .optimize.squad import Squad

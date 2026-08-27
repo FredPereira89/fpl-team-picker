@@ -206,6 +206,39 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
     assert leaky_def < base_def
 
 
+# --- P5a: the optimizer maximises the discounted horizon (2026-08-27 audit) ---
+
+SKEWED_FIXTURES = FIXTURES + [
+    # teams 1 and 2 play twice in event 1; teams 7 and 8 play twice in event 5
+    {"id": 900, "event": 1, "team_h": 1, "team_a": 2, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-08-21T19:00:00Z", "finished": False},
+    {"id": 901, "event": 5, "team_h": 7, "team_a": 8, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-09-21T19:00:00Z", "finished": False},
+]
+
+
+class SkewedClient(FakeClient):
+    def fixtures(self):
+        return SKEWED_FIXTURES
+
+
+def _points_available_this_week(rec, xp):
+    return float(xp[xp.player_id.isin(rec.squad_ids)].xp_next1.sum())
+
+
+def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tmp_path):
+    """A double gameweek five weeks out is worth less than one this week — the
+    squad can be changed before then. Without a discount the solver treats them
+    as identical."""
+    patient = Config(budget=100.0, horizon_gw=5, horizon_decay=1.0)
+    impatient = Config(budget=100.0, horizon_gw=5, horizon_decay=0.3)
+
+    rec_p, xp_p = run(patient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+    rec_i, xp_i = run(impatient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+
+    assert _points_available_this_week(rec_i, xp_i) > _points_available_this_week(rec_p, xp_p)
+
+
 # --- P3: the model can finally see the current season (2026-08-27 audit) ---
 
 class InFormClient(FakeClient):

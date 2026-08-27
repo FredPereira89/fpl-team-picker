@@ -38,9 +38,16 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col):
     prob = pulp.LpProblem("fpl_transfers", pulp.LpMaximize)
     squad = pulp.LpVariable.dicts("squad", ids, cat="Binary")
     start = pulp.LpVariable.dicts("start", ids, cat="Binary")
+    # Captaincy doubles one starter -- see optimize.squad for why it belongs in
+    # the objective rather than being applied after the fact.
+    cap = pulp.LpVariable.dicts("cap", ids, cat="Binary")
     prob += pulp.lpSum(
-        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) for i in ids
+        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) + xp[i] * cap[i]
+        for i in ids
     )
+    prob += pulp.lpSum(cap[i] for i in ids) == 1
+    for i in ids:
+        prob += cap[i] <= start[i]
     prob += pulp.lpSum(price[i] * squad[i] for i in ids) <= budget
     prob += pulp.lpSum(squad[i] for i in ids) == sum(SQUAD_SPLIT.values())
     prob += pulp.lpSum(start[i] for i in ids) == XI_SIZE
@@ -60,7 +67,8 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col):
         return None
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
-    return chosen, starters, sum(xp[i] for i in starters)
+    captain = next((i for i in ids if cap[i].value() > 0.5), None)
+    return chosen, starters, sum(xp[i] for i in starters) + (xp[captain] if captain else 0.0)
 
 
 def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: float,

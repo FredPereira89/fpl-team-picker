@@ -13,7 +13,7 @@ from .bps import expected_bonus
 
 CONTRACT_COLUMNS = [
     "player_id", "web_name", "team", "position", "price",
-    "xp_next1", "xp_next5", "p_start", "e_minutes", "confidence", "flags",
+    "xp_next1", "xp_next5", "xp_horizon", "p_start", "e_minutes", "confidence", "flags",
 ]
 
 GOAL_PTS = {"GKP": 6, "DEF": 6, "MID": 5, "FWD": 4}
@@ -60,6 +60,7 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
     r = rates.set_index("player_id")
     m = minutes.set_index("player_id")
     horizon_events = list(range(from_event, from_event + cfg.horizon_gw))
+    decay = float(getattr(cfg, "horizon_decay", 1.0))
 
     rows = []
     for _, p in players.iterrows():
@@ -88,7 +89,15 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
             "position": pos,
             "price": float(p["price"]),
             "xp_next1": round(per_event.get(from_event, 0.0), 4),
+            # xp_next5 is the honest total a human is shown. xp_horizon is the
+            # same points discounted by cfg.horizon_decay per gameweek and is
+            # what the optimizers maximise: a gain five weeks out is worth less
+            # than one this week, because the squad can be changed before then
+            # and the projection is far less certain.
             "xp_next5": round(sum(per_event.values()), 4),
+            "xp_horizon": round(sum(
+                v * decay ** (event - from_event) for event, v in per_event.items()
+            ), 4),
             "p_start": float(mins_row["p_start"]),
             "e_minutes": float(mins_row["e_minutes"]),
             "confidence": mins_row["confidence"],

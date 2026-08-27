@@ -11,6 +11,7 @@ model:
   form_max_weight: 0.6
   shrinkage_minutes: 900
   start_prior_games: 4.0
+  horizon_decay: 0.85
 optimizer:
   max_paid_hits: 2
   hit_cost: 4

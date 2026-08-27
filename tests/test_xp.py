@@ -119,3 +119,31 @@ def test_dc_threshold_is_a_probability():
     for rate in (0.0, 5.0, 20.0):
         p = p_dc_threshold(rate, 90.0, "MID")
         assert 0.0 <= p <= 1.0
+
+
+# --- P5a: horizon decay (2026-08-27 audit) ---
+
+def test_horizon_score_discounts_later_gameweeks():
+    """A gain five weeks out is not worth the same as one this week: the squad
+    can be changed before then, and the projection is far less certain."""
+    cfg = Config(horizon_gw=5, horizon_decay=0.5)
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    # Alpha plays once per event with identical fixtures, so each event's xP is equal
+    per_event = df.loc[1, "xp_next1"]
+    expected = per_event * sum(0.5 ** n for n in range(5))
+    assert df.loc[1, "xp_horizon"] == pytest.approx(expected, abs=1e-3)
+
+
+def test_undiscounted_total_is_still_reported_for_the_user():
+    """xp_next5 is what the report shows a human. It must stay a real
+    points total, not a discounted score that only the solver understands."""
+    cfg = Config(horizon_gw=5, horizon_decay=0.5)
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    assert df.loc[1, "xp_next5"] == pytest.approx(df.loc[1, "xp_next1"] * 5, abs=1e-3)
+    assert df.loc[1, "xp_horizon"] < df.loc[1, "xp_next5"]
+
+
+def test_no_decay_leaves_the_horizon_score_equal_to_the_total():
+    cfg = Config(horizon_gw=5, horizon_decay=1.0)
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    assert df.loc[1, "xp_horizon"] == pytest.approx(df.loc[1, "xp_next5"], rel=1e-9)

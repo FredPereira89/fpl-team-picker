@@ -79,7 +79,10 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         for o, i in zip(t.out_ids, t.in_ids):
             out.append(f"{df.loc[o, 'web_name']} → {df.loc[i, 'web_name']}")
         hit = f" after a -{t.hit_cost} hit" if t.hit_cost else " (no hit — within your free transfers)"
-        out.append(f"Suggested net gain of {t.gain:.1f} xP over the next gameweeks{hit}.")
+        # The solver maximises a decayed horizon, so this figure is not a raw
+        # points total -- say so rather than letting it read as one.
+        out.append(f"Suggested net gain of {t.gain:.1f} xP across the horizon{hit} "
+                   f"(discounted — gains in later gameweeks count for less).")
     out.append("")
 
     out.append("### Chip watch")

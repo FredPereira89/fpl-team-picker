@@ -119,3 +119,24 @@ def test_optimises_on_requested_horizon_column():
     short = optimize_squad(POOL, CFG, xp_col="xp_next1")
     long = optimize_squad(POOL, CFG, xp_col="xp_next5")
     assert len(short.player_ids) == len(long.player_ids) == 15
+
+
+# --- P5a: captaincy in the objective (2026-08-27 audit) ---
+
+def test_reported_xp_counts_the_captain_twice():
+    """Captaincy is roughly a sixth of a gameweek score. Leaving it out of the
+    objective meant the solver had no reason to prefer a high ceiling."""
+    s = optimize_squad(POOL, CFG)
+    starters = POOL[POOL.player_id.isin(s.starting_ids)]
+    assert s.xp == pytest.approx(starters.xp_next5.sum() + starters.xp_next5.max(), abs=1e-3)
+
+
+def test_captain_is_a_starter():
+    s = optimize_squad(POOL, CFG)
+    assert s.captain_id in s.starting_ids
+
+
+def test_captain_is_the_best_starter_available():
+    s = optimize_squad(POOL, CFG)
+    starters = POOL[POOL.player_id.isin(s.starting_ids)].set_index("player_id")
+    assert starters.loc[s.captain_id, "xp_next5"] == starters.xp_next5.max()

@@ -132,3 +132,13 @@ def test_captain_comparison_is_honest_when_tied():
     block = out.split("### Captain")[1].split("###")[0]
     assert "has the highest projected return" not in block
     assert "tied" in block.lower()
+
+
+def test_transfer_gain_says_it_is_discounted():
+    """The solver now maximises a decayed horizon, so the gain it reports is
+    not a raw points total. Labelling it as one would overstate the move."""
+    plan = TransferPlan(out_ids=[3], in_ids=[4], n_transfers=1, hit_cost=0,
+                        squad_ids=list(range(1, 16)), starting_ids=LINEUP.xi,
+                        gross_xp=60.0, net_xp=60.0, baseline_xp=57.5, gain=2.5)
+    text = render(_rec(transfers=plan), XP)
+    assert "discounted" in text.lower()

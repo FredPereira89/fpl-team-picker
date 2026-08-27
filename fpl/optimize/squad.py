@@ -21,6 +21,7 @@ class Squad:
     starting_ids: list[int]
     total_cost: float
     xp: float
+    captain_id: int | None = None
 
 
 def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
@@ -37,10 +38,21 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
     squad = pulp.LpVariable.dicts("squad", ids, cat="Binary")
     start = pulp.LpVariable.dicts("start", ids, cat="Binary")
+    # The captain scores twice. Leaving this out of the objective made the
+    # solver indifferent between a squad with one high ceiling and a squad of
+    # equal total spread flat -- and captaincy is roughly a sixth of a
+    # gameweek's score. Over a multi-gameweek horizon this treats the armband
+    # as staying on one player, which understates the option to move it, but
+    # valuing a ceiling approximately beats not valuing it at all.
+    cap = pulp.LpVariable.dicts("cap", ids, cat="Binary")
 
     prob += pulp.lpSum(
-        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) for i in ids
+        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) + xp[i] * cap[i]
+        for i in ids
     )
+    prob += pulp.lpSum(cap[i] for i in ids) == 1
+    for i in ids:
+        prob += cap[i] <= start[i]
 
     prob += pulp.lpSum(price[i] * squad[i] for i in ids) <= cfg.budget
     prob += pulp.lpSum(squad[i] for i in ids) == sum(SQUAD_SPLIT.values())
@@ -69,9 +81,11 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
 
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
+    captain = next((i for i in ids if cap[i].value() > 0.5), None)
     return Squad(
         player_ids=chosen,
         starting_ids=starters,
         total_cost=round(sum(price[i] for i in chosen), 1),
-        xp=round(sum(xp[i] for i in starters), 3),
+        xp=round(sum(xp[i] for i in starters) + (xp[captain] if captain else 0.0), 3),
+        captain_id=captain,
     )
