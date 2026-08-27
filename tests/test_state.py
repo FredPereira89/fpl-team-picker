@@ -52,16 +52,11 @@ def test_bench_boost_does_not_preserve_the_balance():
 
 
 def test_reconcile_matches_when_history_agrees():
-    # Corrected fixture: 0 transfers in events 1-2 (FT rolls 1->2->3 across
-    # the season), then 2 transfers in event 3 (1 free + 1 paid hit),
-    # leaving exactly 2 for the next event. The brief's original fixture
-    # used event_transfers=1 for event 3, which under the correct
-    # advance_ft formula (min(5, max(0, FT - used) + 1), applied
-    # iteratively across all 3 events starting from the universal FT=1
-    # season seed) actually yields ft=3, not 2 -- a genuine arithmetic
-    # bug in the original test data, verified by hand execution before
-    # dispatch. This fixture is hand-verified to produce ft==2, matched==True.
-    state = State(free_transfers=2, last_event=3, chips_used=[])
+    # 0 transfers in GW1 (unlimited pre-deadline, so nothing is banked) leaves 1
+    # for GW2; 0 used in GW2 banks a second for GW3; the 2 made in GW3 spend both
+    # free transfers, so GW4 starts from 0 and accrues exactly 1. Tracked state
+    # agreeing with that derivation is what `matched` reports.
+    state = State(free_transfers=1, last_event=3, chips_used=[])
     history = {"current": [
         {"event": 1, "event_transfers": 0},
         {"event": 2, "event_transfers": 0},
@@ -69,7 +64,7 @@ def test_reconcile_matches_when_history_agrees():
     ]}
     ft, matched = reconcile(state, history)
     assert matched is True
-    assert ft == 2
+    assert ft == 1
 
 
 def test_reconcile_reports_drift_and_prefers_derived_value():
@@ -81,4 +76,38 @@ def test_reconcile_reports_drift_and_prefers_derived_value():
     ]}
     ft, matched = reconcile(state, history)
     assert matched is False
+    assert ft == 1
+
+
+def test_reconcile_gives_one_free_transfer_for_gw2():
+    """GW1 transfers are unlimited, so GW2 starts with exactly 1 FT -- never 2.
+
+    FPL grants the first free transfer *after* the GW1 deadline ("1 base +
+    max_extra_free_transfers=4" in bootstrap game_settings). Seeding the
+    pre-GW1 balance at 1 double-counts that grant and makes the optimizer
+    spend a transfer it has to pay 4 points for.
+    """
+    state = State(free_transfers=1, last_event=1, chips_used=[])
+    history = {"current": [{"event": 1, "event_transfers": 0}]}
+    ft, _ = reconcile(state, history)
+    assert ft == 1
+
+
+def test_reconcile_banks_an_extra_transfer_after_an_unused_gw2():
+    """One unused FT in GW2 rolls into GW3 as 2."""
+    history = {"current": [
+        {"event": 1, "event_transfers": 0},
+        {"event": 2, "event_transfers": 0},
+    ]}
+    ft, _ = reconcile(State(), history)
+    assert ft == 2
+
+
+def test_reconcile_spends_the_free_transfer_in_gw2():
+    """Using the single GW2 transfer leaves 1 for GW3, not 0."""
+    history = {"current": [
+        {"event": 1, "event_transfers": 0},
+        {"event": 2, "event_transfers": 1},
+    ]}
+    ft, _ = reconcile(State(), history)
     assert ft == 1

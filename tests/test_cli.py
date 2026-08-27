@@ -64,7 +64,7 @@ def test_happy_path_resolves_squad_bank_and_free_transfers(tmp_path):
     assert errors == []
     assert live.current_squad == list(range(1, 16))
     assert live.bank == 0.5
-    assert live.free_transfers == 2  # unused FT rolls 1 -> 2
+    assert live.free_transfers == 1  # GW1 banks nothing; GW2 gets the first FT
     assert live.warnings == []
 
 
@@ -75,7 +75,7 @@ def test_warns_when_tracked_state_drifts_from_history(tmp_path):
     live, errors = resolve_current_squad(Config(entry_id=1), gw=2,
                                           state_path=state_path, client=client)
     assert errors == []
-    assert live.free_transfers == 2  # trusts the derived value, not the stale 5
+    assert live.free_transfers == 1  # trusts the derived value, not the stale 5
     assert live.warnings and "drifted" in live.warnings[0]
 
 

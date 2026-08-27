@@ -44,8 +44,15 @@ def advance_ft(state: State, transfers_made: int, chip: str | None = None) -> in
 
 
 def reconcile(state: State, entry_history: dict) -> tuple[int, bool]:
-    """Derive the FT balance from the API's per-event transfer counts."""
-    derived = State(free_transfers=1, last_event=0, chips_used=[])
+    """Derive the FT balance from the API's per-event transfer counts.
+
+    Seeds at 0, not 1: transfers before the GW1 deadline are unlimited, and FPL
+    grants the first free transfer only *after* that deadline. Replaying GW1
+    through advance_ft therefore turns 0 into the 1 you carry into GW2. Seeding
+    at 1 would double-count that grant and hand the optimizer a second transfer
+    it would actually pay 4 points for.
+    """
+    derived = State(free_transfers=0, last_event=0, chips_used=[])
     for event in entry_history.get("current", []):
         derived.free_transfers = advance_ft(derived, int(event.get("event_transfers", 0)))
         derived.last_event = int(event.get("event", derived.last_event))
