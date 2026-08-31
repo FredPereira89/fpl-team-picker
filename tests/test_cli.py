@@ -1,6 +1,7 @@
 import json
 import pytest
-from fpl.cli import resolve_current_squad, record_transfers
+from fpl.cli import (resolve_current_squad, record_transfers,
+                     carry_purchase_prices)
 from fpl.config import Config
 from fpl.state import load_state, save_state, State
 
@@ -123,3 +124,29 @@ def test_resolved_squad_carries_the_recorded_purchase_prices(tmp_path):
                      purchase_prices={1: 4.5}), path)
     live, _ = resolve_current_squad(cfg, gw=2, state_path=path, client=FakeClient(picks=PICKS, history=HISTORY_NO_TRANSFERS))
     assert live.purchase_prices == {1: 4.5}
+
+
+# --- the ledger must track the squad you own, not the one you were offered ---
+
+def test_purchase_prices_track_the_squad_you_own_not_the_one_recommended():
+    """A recommendation is a proposal, not a transaction.
+
+    run_gameweek.py wrote `rec.squad_ids` -- the optimizer's output -- so any
+    advice the user declined leaked into the price ledger as if they had acted
+    on it. Real state.json after two gameweeks held a purchase price for Leno,
+    who was only ever *suggested*, and none for Raya, who was actually owned.
+    That corrupts the selling values P6 exists to get right.
+    """
+    owned = [1, 2, 3]
+    recommended_instead = [1, 2, 99]
+    paid = {1: 6.0, 2: 5.5}
+    market = {1: 6.2, 2: 5.5, 3: 4.5, 99: 12.0}
+
+    carried = carry_purchase_prices(owned, paid, market)
+
+    assert set(carried) == set(owned)
+    assert 99 not in carried, "a player who was only recommended was never bought"
+    assert carried[1] == 6.0, "a held player keeps what he cost, not what he is worth now"
+    assert carried[3] == 4.5, "an unrecorded player falls back to market value"
+    assert recommended_instead  # documents the squad that must NOT be recorded
+

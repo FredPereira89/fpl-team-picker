@@ -41,6 +41,56 @@ Running log of what's been decided and done. Read this first when resuming work.
   the Enzo → Tzolis transfer was a 0-vs-0 wash — refusing the −4 to undo it was correct.
   See the session log for the full breakdown and the model's second out-of-sample score.
 
+### GW3 (deadline Fri 4 Sep 2026 17:30 UTC)
+
+- **1 FT, £0.5m bank, squad value £99.6m. No injury flags in the 15** (all `status=a`,
+  checked 2026-08-31).
+- **Recommendation: hold, roll the FT to 2.** XI (4-3-3): Raya; Guéhi, Tarkowski, Calafiori,
+  Virgil; Semenyo, Schade, Tzolis; Haaland (C), Thiago, João Pedro. Bench: Dubravka,
+  Kadıoğlu, Hughes, D.Essugo. Captain Haaland at home to Coventry (7.56 xP, clear of Guéhi
+  on 5.36).
+- **The model's own move, Tzolis → Enzo (+3.0 discounted xP), is rejected.** Enzo has
+  started **0 of 2** games and played 25 minutes all season; Tzolis has started both. The
+  model rates Enzo's p_start at **0.849 against Tzolis's 0.786** — see the new blind spot
+  below. It would also be a round trip on the transfer paid for last week.
+- Everything else the optimizer likes is bench fodder: D.Essugo → Gomez is +8.9 raw xP over
+  5 GWs but nearly all of it sits in bench slot 4, weighted 0.02 in the objective.
+- **Four of the XI are in ARS v CHE** (Raya, Calafiori, Tzolis on one side, João Pedro on the
+  other), so that fixture partly hedges itself. The two easiest fixtures on the board,
+  MCI v COV and BRE v SUN, cover Haaland, Guéhi, Semenyo, Schade and Thiago.
+
+### ⚠ Promoted clubs were rated as the best defences in the league — fixed 2026-08-31
+
+`team_ratings` treated a club as having a Premier League record if **any** of its players had
+**one minute** of it (`MIN_MINUTES = 1`). A promoted club fields several players who logged
+minutes elsewhere, so it cleared the bar, and its goals for/against were then divided by the
+league mean as if they were a full season:
+
+| Club | baseline mins | GF | GA | att | dfn |
+|---|---|---|---|---|---|
+| COV | 2,415 (5 players) | 6 | 42 | **0.13** | **0.09** |
+| IPS | 4,642 (3 players) | 2 | 80 | **0.04** | **0.17** |
+| HUL | 0 | 0 | 0 | 1.00 | 1.00 (correct — the prior path) |
+| every other club | 29,165–49,619 | — | — | 0.42–1.88 | 0.77–1.70 |
+
+Coventry came out as the best defence in the league by a factor of ten, so **MCI v COV was
+Man City's hardest attacking fixture of GW3** (att_mult 0.18 against Arsenal's 2.39) and
+Haaland's GW3 xP collapsed from 7.45 to **2.72**. The optimizer's answer was to sell Haaland,
+Tzolis and D.Essugo for B.Fernandes, Mbeumo and Calvert-Lewin **on a −8 hit**. Note the
+cruelty of the threshold: Hull, with literally no data, was handled correctly; the clubs with
+*a little* data were the ones that broke.
+
+Fixed by making the test squad-level — `MIN_TEAM_MINUTES = 10_000`, against a real squad's
+29,000–50,000 and a promoted squad's 0–4,642, so the margin is wide and the constant does not
+need to be precise. Promoted clubs now take the `_prior_from_overall` path they were always
+meant to take. After the fix Haaland's GW3 xP is **7.56** and the recommendation is to hold.
+
+**Follow-up, not done:** the prior itself is weak. `_prior_from_overall` maps FPL's 1–5
+strength onto 0.85–1.45, so every promoted club lands on exactly att 1.00 / dfn 1.00 — league
+average, when a promoted side is nearer 0.75 / 1.25. Shrinking the raw ratio toward the mean
+by sample size (as P1 did for `p_start`) would be the real fix and would remove the cliff
+entirely.
+
 ### ⚠ The model cannot value Tzolis, and says so misleadingly
 
 With 0 FT left the optimizer recommends **Tzolis → Enzo on a −4 hit**. That recommendation
@@ -119,10 +169,56 @@ blind spot the model cannot see, and it is the whole reason the override mechani
   fix → +0.60 on GW1 → **+0.72 on GW2**. Two gameweeks now say the residual is not in clean
   sheets; the remaining suspects are saves and bonus, i.e. **P7, the deferred BPS rebuild**.
   Until it is done the optimizer is buying keepers at inflated prices every week.
+- **The new-signing blind spot has a mirror: a dropped established player.** P3 counts
+  current-season starts as binomial evidence, but the prior is 38 games plus
+  `model.start_prior_games`, so two rounds barely move it. Enzo has started 0 of 2 and played
+  25 minutes this season, and the model still rates his p_start at **0.849 — above Tzolis's
+  0.786, who has started both**. Ownership saw it (Enzo 3.7%, Tzolis 25.0%) and the model did
+  not. Until this is weighted properly, check `starts` this season before acting on any
+  transfer into an established player.
+- ~~`data/state.json` purchase prices drift.~~ **Fixed 2026-08-31** — `run_gameweek.py` wrote
+  `rec.squad_ids`, the *recommendation*, so advice the user declined was booked as a purchase.
+  The live file held a price for Leno (only ever suggested) and none for Raya (actually
+  owned). Now records the squad the manager owns via `cli.carry_purchase_prices`.
+  Note `record_transfers` still advances the FT count by the *recommended* transfers for the
+  same reason, which is harmless only because `reconcile` re-derives it from FPL history.
 - 5-GW clean-sheet projections are directional, not precise, past ~GW2 — they are built from
   last season's team ratings.
 
 ## Session log
+
+### 2026-08-31 (later) — GW3, and two bugs found by disbelieving the output
+
+The first GW3 Mode 2 run recommended **selling Haaland** and taking a **−8 hit**. That is the
+same symptom as the 2026-08-26 season-rollover bug, and it was again a data bug rather than a
+strange-but-correct call. Two distinct faults, both found by checking a number that looked
+wrong rather than trusting the report.
+
+1. **Promoted clubs rated as elite defences** (`fpl/model/strength.py`). `MIN_MINUTES = 1`
+   asked "does any player here have PL history" when the question is "does this squad have a
+   PL season". Full write-up in the section above. Coventry rated `dfn` 0.09, so MCI v COV —
+   the easiest fixture on the board — became City's hardest, and Haaland's GW3 xP fell 7.45 →
+   2.72 while his p_start did not move at all (0.868 → 0.871). That gap between a stable
+   p_start and a collapsing xP is what gave it away. Fixed with `MIN_TEAM_MINUTES = 10_000`;
+   Haaland is back to 7.56 and the recommendation is to hold.
+2. **The price ledger recorded recommendations as purchases** (`run_gameweek.py`,
+   `fpl/cli.py`). `record_transfers` was passed `rec.squad_ids` — the optimizer's output — so
+   every run booked the advice whether or not the user took it. `data/state.json` held a
+   purchase price for **Leno**, who was only ever suggested in GW2, and **none for Raya**, who
+   has been owned since GW1. It had also just written B.Fernandes, Mbeumo and Calvert-Lewin
+   from the broken run above. Extracted `cli.carry_purchase_prices` and passed the squad the
+   manager actually owns; state.json restored by hand to the real 15 and verified against
+   `entry/1461088/event/2/picks/`.
+
+Both fixed test-first: the strength test previously gave its promoted club **zero** minutes,
+which is the one case that already worked, so it never caught the bug. Suite 260 → 262.
+
+**GW3 call: hold, roll the FT to 2.** The model's own move is Tzolis → Enzo at +3.0
+discounted xP, and it is rejected — Enzo has started 0 of 2 games this season and played 25
+minutes, against Tzolis's 2 of 2, and it would reverse the transfer paid for last week. That
+comparison also exposed a **new blind spot: the model rates the dropped player's p_start
+(0.849) above the one who has started every game (0.786)**, because two rounds of evidence
+barely move a 38-game prior. Recorded in "Other standing notes".
 
 ### 2026-08-31 — GW2 retrospective, and a second out-of-sample score
 
@@ -342,15 +438,19 @@ Per-player actuals (XI only, mult × pts):
 
 ## Next session
 
-1. **GW3 is the next live decision.** 1 FT (accrued after the GW2 deadline — confirm against
-   `entry/{id}/history/`, `reconcile` re-derives it). Bank £0.5m, squad value £100.2m.
-   Re-check Arsenal team news first: Saliba/Timber → Calafiori premise, overridden to 0.80
-   and expiring at GW6.
-2. **P7, the BPS rebuild, is now the top modelling item** — not optional. Two scored
+1. **GW4 (deadline Sat 12 Sep 2026 12:30 UTC).** Expect 2 FT if the GW3 hold is applied.
+   Re-check Arsenal team news (Saliba/Timber → Calafiori premise, expires GW6) and score GW3
+   with `python scripts/score_gameweek.py --gw 3`.
+2. **Shrink team ratings toward the mean by sample size** instead of the
+   `MIN_TEAM_MINUTES` cliff, and give promoted clubs a prior below league average — see the
+   promoted-club section above. The cliff fixes the catastrophe; it does not make the
+   estimate good.
+3. **Weight current-season starts properly for established players** — the Enzo mirror of the
+   Tzolis blind spot, in "Other standing notes".
+4. **P7, the BPS rebuild, remains a top modelling item** — not optional. Two scored
    gameweeks agree the goalkeeper over-prediction (+0.72 on GW2) survives the clean-sheet
    fix, which points at saves and bonus. See the standing note above and `handoff.md`.
-3. **Tzolis is owned and still unmeasured.** GW2 did not test the valuation blind spot — he
-   played 45 minutes for 0 points, and the Enzo alternative did not play at all. Re-check
-   once a few GWs of 2026/27 data accumulate; his minutes override expires at GW6.
-4. Re-run `python scripts/score_gameweek.py --gw 2` once GW2 is `data_checked` — the recorded
+5. **Tzolis is owned and still unmeasured.** Neither GW2 nor GW3 tests the valuation blind
+   spot. Re-check once a few GWs of 2026/27 data accumulate; his override expires at GW6.
+6. Re-run `python scripts/score_gameweek.py --gw 2` once GW2 is `data_checked` — the recorded
    verdict was scored on provisional bonus, so a point or two may still move.

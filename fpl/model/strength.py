@@ -2,14 +2,25 @@
 
 FPL's strength_attack_* and strength_defence_* fields are zeroed in the live
 2026/27 data, so ratings are computed from last season's goals for/against
-(carried over in bootstrap). Teams with no PL history fall back to a prior
-scaled from strength_overall_*, or to an optional odds provider.
+(carried over in bootstrap). Teams without most of a Premier League season
+behind them -- promoted clubs -- fall back to a prior scaled from
+strength_overall_*, or to an optional odds provider.
 """
 import pandas as pd
 
 HOME_ATT = 1.10
 AWAY_ATT = 0.90
-MIN_MINUTES = 1  # a team with zero recorded minutes has no PL history
+# A club counts as established only if its squad carries most of a Premier
+# League season between them. The old test was `>= 1 minute`, which read "does
+# any player have PL history" -- but a promoted club fields several players who
+# logged minutes elsewhere, so it passed, and its goals for/against were then
+# divided by the league mean as if they were a full season. Coventry came up
+# with 2,415 minutes across five players (6 for, 42 against) and rated out at
+# att 0.13 / dfn 0.09: the best defence in the league by a factor of ten, which
+# made MCI v COV Man City's hardest attacking fixture of GW3. A real squad logs
+# 29,000-50,000 minutes; the promoted clubs logged 0-4,642, so the two groups
+# are separated by a wide margin and the threshold does not need to be precise.
+MIN_TEAM_MINUTES = 10_000
 # Premier League goals conceded per team per match. Used when the baseline
 # season carries no usable history at all.
 DEFAULT_LEAGUE_GC = 1.35
@@ -52,13 +63,13 @@ def team_ratings(players: pd.DataFrame, teams: pd.DataFrame, odds_provider=None)
         agg, left_on="team_id", right_index=True, how="left"
     ).fillna({"gf": 0, "ga": 0, "mins": 0})
 
-    established = df["mins"] >= MIN_MINUTES
+    established = df["mins"] >= MIN_TEAM_MINUTES
     mean_gf = df.loc[established, "gf"].mean() if established.any() else 1.0
     mean_ga = df.loc[established, "ga"].mean() if established.any() else 1.0
 
     att, dfn, conf = [], [], []
     for _, row in df.iterrows():
-        if row["mins"] >= MIN_MINUTES and mean_gf > 0 and mean_ga > 0:
+        if row["mins"] >= MIN_TEAM_MINUTES and mean_gf > 0 and mean_ga > 0:
             att.append(row["gf"] / mean_gf)
             dfn.append(row["ga"] / mean_ga)
             conf.append("high")

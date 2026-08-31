@@ -67,6 +67,20 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
                      state.purchase_prices), []
 
 
+def carry_purchase_prices(squad_ids, purchase_prices: dict[int, float],
+                          market_prices: dict[int, float]) -> dict[int, float]:
+    """What each of the squad's 15 cost, carried forward for next week.
+
+    `squad_ids` must be the squad the manager ACTUALLY owns, never the
+    optimizer's recommendation: a proposal the user declines would otherwise be
+    written into the ledger as a purchase, and P6's selling values are computed
+    against it. A player with no recorded price falls back to today's market
+    value -- the only honest guess available, and the CLI warns when it happens.
+    """
+    return {int(pid): float(purchase_prices.get(int(pid), market_prices[int(pid)]))
+            for pid in squad_ids}
+
+
 def record_transfers(state_path: Path, cfg, gw: int, transfers_made: int,
                      chip: str | None,
                      purchase_prices: dict[int, float] | None = None) -> None:

@@ -177,6 +177,26 @@ the P1/P2 gains held, so that gate is cleared — and it promoted **P7 from opti
 Take P7 first: the goalkeeper bias is measured, persistent across two gameweeks, and pointed
 straight at the part of the model P7 rebuilds.
 
+## Found since (2026-08-31, GW3)
+
+Two bugs outside the P-list, both fixed, plus one modelling gap that is not:
+
+- **Team ratings had no sample-size guard** (`MIN_MINUTES = 1`). Promoted clubs cleared the
+  "established" test on a few players' minutes elsewhere and rated `att` 0.04-0.13 / `dfn`
+  0.09-0.17 — the best defences in the league. Haaland's GW3 xP fell to 2.72 and the
+  optimizer wanted to sell him on a -8 hit. Fixed with `MIN_TEAM_MINUTES = 10_000`.
+  **The follow-up is real work**: shrink the raw ratio toward the league mean by sample size,
+  the way P1 did for `p_start`, instead of a cliff — and give promoted clubs a prior below
+  average, since `_prior_from_overall` currently puts every one of them at exactly 1.00/1.00.
+- **`run_gameweek.py` wrote `rec.squad_ids` into the purchase-price ledger**, booking declined
+  recommendations as purchases and corrupting the selling values P6 exists to compute.
+  Fixed via `cli.carry_purchase_prices`.
+- **NOT fixed — P3 has a mirror image.** Current-season starts are binomial evidence against a
+  38-game prior, so two rounds barely move an established player who has lost his place. Enzo
+  has started 0 of 2 and played 25 minutes; the model rates his p_start at 0.849, *above*
+  Tzolis's 0.786 with 2 starts from 2. P3 fixed the new signing and left the dropped starter.
+  Early-season evidence needs more weight than a flat prior gives it.
+
 ## Deliberately not done
 
 - **P7 (BPS rebuild).** The 2026/27 BPS table changed — clearances/blocks/interceptions now

@@ -7,7 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from fpl.cli import resolve_current_squad, record_transfers
+from fpl.cli import resolve_current_squad, record_transfers, carry_purchase_prices
 from fpl.config import load_config
 from fpl.data.cache import Cache
 from fpl.data.client import FplClient
@@ -82,9 +82,11 @@ def main() -> int:
         # Carry each retained player's original purchase price forward; a player
         # bought this week was bought at today's price. Without this the selling
         # value resets to market value every run and the budget drifts high again.
+        # Record the squad the manager OWNS, not `rec.squad_ids` -- the
+        # recommendation is a proposal, and writing it here booked transfers the
+        # user never made (see carry_purchase_prices).
         now = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
-        updated = {int(pid): float(purchase_prices.get(int(pid), now[int(pid)]))
-                   for pid in rec.squad_ids}
+        updated = carry_purchase_prices(current_squad, purchase_prices, now)
         record_transfers(data_root / "state.json", cfg, args.gw, transfers_made, chip,
                          purchase_prices=updated)
 
