@@ -1,0 +1,10 @@
+GW2 forecast scored against 614 players (307 of them appeared):
+  rank quality (Spearman)  +0.595 overall, +0.347 among players who appeared
+  error                    MAE 1.35, RMSE 2.25, bias +0.04 pts/player
+  top-20 overlap           20%
+  by position:
+    DEF  rank +0.592   bias +0.07
+    FWD  rank +0.563   bias +0.00
+    GKP  rank +0.529   bias +0.72
+    MID  rank +0.634   bias -0.15
+  WARNING: over-predicting GKP by more than 0.4 pts/player — the optimizer is buying those positions at inflated prices.
