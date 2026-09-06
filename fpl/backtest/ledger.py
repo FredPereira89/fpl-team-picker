@@ -66,8 +66,18 @@ def actuals_from_summaries(summaries: dict[int, dict], gw: int) -> pd.DataFrame:
     return pd.DataFrame(rows).groupby("player_id", as_index=False).sum()
 
 
+CANDIDATE_POOL = 60
+
+
+def _rho(frame: pd.DataFrame, pred_col: str) -> float:
+    if len(frame) < 3 or frame[pred_col].nunique() < 2 or frame["actual"].nunique() < 2:
+        return 0.0
+    r = spearmanr(frame[pred_col].values, frame["actual"].values).statistic
+    return 0.0 if np.isnan(r) else float(r)
+
+
 def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
-                   pred_col: str = "xp_next1") -> dict:
+                   pred_col: str = "xp_next1", top_n: int = CANDIDATE_POOL) -> dict:
     """Score one gameweek's forecast against what happened."""
     df = pred.merge(actuals, on="player_id", how="inner")
     if len(df) == 0:
@@ -81,10 +91,7 @@ def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
     base = evaluate_predictions(df[pred_col], df["actual"], df["position"])
 
     played = df[df["minutes"] > 0]
-    rho_played = 0.0
-    if len(played) >= 3 and played[pred_col].nunique() > 1 and played["actual"].nunique() > 1:
-        r = spearmanr(played[pred_col].values, played["actual"].values).statistic
-        rho_played = 0.0 if np.isnan(r) else float(r)
+    absent = df[df["minutes"] <= 0]
 
     return {
         **base,
@@ -96,8 +103,24 @@ def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
         # Rank quality among players who actually appeared isolates the scoring
         # model from the minutes model, which is where the two-layer diagnosis
         # in the 2026-08-27 audit came from.
-        "spearman_played": rho_played,
+        "spearman_played": _rho(played, pred_col),
         "n_played": int(len(played)),
+        # Pool-wide rank quality mostly measures telling starters from reserves,
+        # which is not a decision anyone needs help with. Squads are picked from
+        # the top of the model's own ordering, so skill has to be reported there
+        # too -- GW2 came out +0.595 overall and +0.114 inside its own top 60.
+        "spearman_top_n": _rho(df.nlargest(top_n, pred_col), pred_col),
+        "n_top": int(min(top_n, len(df))),
+        # Splitting bias this way names the layer at fault. A position looks
+        # over-predicted when players who never featured were handed points,
+        # which is the minutes model; the scoring model is only implicated by
+        # bias among those who did play.
+        "bias_played": float((played[pred_col].astype(float)
+                              - played["actual"].astype(float)).mean())
+        if len(played) else 0.0,
+        "bias_absent": float(absent[pred_col].astype(float).mean())
+        if len(absent) else 0.0,
+        "n_absent": int(len(absent)),
     }
 
 
@@ -111,8 +134,13 @@ def scored_summary(scored: dict, gw: int) -> str:
         f"({scored['n_played']} of them appeared):",
         f"  rank quality (Spearman)  {scored['spearman_overall']:+.3f} overall, "
         f"{scored['spearman_played']:+.3f} among players who appeared",
+        f"  ...in its own top {scored['n_top']:<3}      "
+        f"{scored['spearman_top_n']:+.3f}  <- the pool every pick comes from",
         f"  error                    MAE {scored['mae']:.2f}, RMSE {scored['rmse']:.2f}, "
         f"bias {scored['bias']:+.2f} pts/player",
+        f"  bias split               {scored['bias_played']:+.2f} among players who "
+        f"appeared, {scored['bias_absent']:+.2f} handed to the "
+        f"{scored['n_absent']} who did not play",
         f"  top-20 overlap           {scored['top20_overlap']:.0%}",
         "  by position:",
     ]
@@ -123,10 +151,16 @@ def scored_summary(scored: dict, gw: int) -> str:
         )
     over = [p for p, b in bias.items() if b > 0.4]
     if over:
+        # Which layer is at fault depends on where the bias sits. Points given
+        # to players who never featured are a minutes/news failure; the scoring
+        # model is only implicated by bias among those who actually appeared.
+        culprit = ("the minutes model — most of it is points handed to players who "
+                   "did not play, not inflated scoring"
+                   if scored["bias_absent"] > abs(scored["bias_played"])
+                   else "the scoring model — players who appeared were over-rated")
         lines.append(
             "  WARNING: over-predicting " + ", ".join(sorted(over)) +
-            " by more than 0.4 pts/player — the optimizer is buying those "
-            "positions at inflated prices."
+            f" by more than 0.4 pts/player. Look at {culprit}."
         )
     return "\n".join(lines)
 

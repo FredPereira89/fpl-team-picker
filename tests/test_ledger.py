@@ -86,6 +86,39 @@ def test_summary_names_the_positions_the_model_over_predicts():
     assert "GKP" in text
 
 
+def test_score_reports_rank_quality_inside_the_candidate_pool():
+    """Pool-wide Spearman is dominated by separating starters from reserves,
+    which no manager needs help with. Every real decision is taken among the
+    handful of players the model already rates highest, so skill has to be
+    reported there too — GW2 scored +0.595 overall and +0.114 in its own top 60.
+    """
+    actual = pd.DataFrame({"player_id": [1, 2, 3, 4], "actual": [1.0, 2.0, 3.0, 4.0],
+                           "minutes": [90.0] * 4})
+    s = score_gameweek(PRED, actual, top_n=3)
+    # The model ranked 1 > 2 > 3; actuals ran the other way.
+    assert s["spearman_top_n"] == pytest.approx(-1.0)
+    assert s["n_top"] == 3
+
+
+def test_bias_is_split_by_whether_the_player_actually_appeared():
+    """A position can look over-predicted purely because players who never
+    featured were given points — a minutes failure, not a scoring one. GW2's
+    goalkeeper warning was entirely this: bias -0.02 among keepers who started,
+    +1.03 among those who did not."""
+    actual = pd.DataFrame({"player_id": [1, 2, 3, 4], "actual": [4.0, 0.0, 2.0, 1.0],
+                           "minutes": [90.0, 0.0, 90.0, 90.0]})
+    s = score_gameweek(PRED, actual)
+    assert s["bias_played"] == pytest.approx(0.0)      # GKP 4.0 vs 4.0, etc.
+    assert s["bias_absent"] == pytest.approx(3.0)      # DEF predicted 3.0, never played
+
+
+def test_summary_blames_minutes_not_scoring_when_absentees_drive_the_bias():
+    actual = pd.DataFrame({"player_id": [1, 2, 3, 4], "actual": [4.0, 0.0, 2.0, 1.0],
+                           "minutes": [90.0, 0.0, 90.0, 90.0]})
+    text = scored_summary(score_gameweek(PRED, actual), gw=7)
+    assert "did not play" in text
+
+
 def test_scored_summary_persists_for_the_next_run(tmp_path):
     save_scored_summary("GW7 rank quality +0.472", root=tmp_path)
     assert load_scored_summary(root=tmp_path) == "GW7 rank quality +0.472"
