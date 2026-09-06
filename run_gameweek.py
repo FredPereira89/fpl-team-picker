@@ -31,6 +31,9 @@ def main() -> int:
                     help="1 = full squad build, 2 = weekly transfers")
     ap.add_argument("--gw", type=int, default=1, help="gameweek to optimise for")
     ap.add_argument("--no-refresh", action="store_true", help="use cached data only")
+    ap.add_argument("--confirm", action="store_true",
+                    help="record this week as PLAYED: spend the transfers and any "
+                         "chip in data/state.json. Without it the run only plans.")
     ap.add_argument("--config", type=Path, default=ROOT / "config.yaml")
     ap.add_argument("--overrides", type=Path, default=ROOT / "data" / "overrides.yaml",
                     help="team-news p_start overrides (see fpl/data/overrides.py)")
@@ -76,7 +79,14 @@ def main() -> int:
                   news=news, progress=progress, purchase_prices=purchase_prices)
     print(render(rec, xp))
 
-    if args.mode == 2 and current_squad is not None:
+    # A run is a PROPOSAL, not an execution. Recording unconditionally spent
+    # transfers that were only suggested and, when the advisor named a chip,
+    # marked that chip used -- a Triple Captain can be lost to a run that was
+    # never acted on. Only --confirm writes.
+    if args.mode == 2 and current_squad is not None and not args.confirm:
+        print("\n(Planning run — data/state.json untouched. Re-run with --confirm "
+              "once you have actually made these moves in FPL.)")
+    elif args.mode == 2 and current_squad is not None:
         chip = rec.chip.chip if rec.chip else None
         transfers_made = rec.transfers.n_transfers if rec.transfers else 0
         # Carry each retained player's original purchase price forward; a player
