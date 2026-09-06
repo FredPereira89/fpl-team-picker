@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from .config import Config
-from .data.cache import Cache
+from .data.cache import Cache, data_complete_after
 from .data.client import FplClient
 from .data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
                              history_past_frame, history_current_frame,
@@ -78,7 +78,14 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # element-summary history_past, which is stable all season. Pre-season this
     # is a no-op -- the two agree -- so it runs unconditionally rather than on a
     # brittle "has the season started" test.
-    summaries = client.element_summaries(players["player_id"].tolist(), progress=progress)
+    # These summaries carry BOTH the stable `history_past` baseline and this
+    # season's `history` (read below by history_current_frame). The 30-day TTL
+    # is right for the former and silently wrong for the latter, so the cache
+    # is additionally required to postdate the last finished match -- otherwise
+    # a snapshot taken in GW1 keeps counting as fresh into December and the
+    # form blend, which ramps with gws_played, stays pinned at its GW1 weight.
+    summaries = client.element_summaries(players["player_id"].tolist(), progress=progress,
+                                         not_before=data_complete_after(raw_fixtures))
     past = history_past_frame(summaries)
     baseline_season = latest_season(past)
     players = apply_season_baseline(players, past, baseline_season)

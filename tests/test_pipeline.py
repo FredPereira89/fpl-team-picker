@@ -56,7 +56,8 @@ class FakeClient:
     def fixtures(self):
         return FIXTURES
 
-    def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+    def element_summaries(self, player_ids, ttl_hours=None, progress=None,
+                          not_before=None):
         """Echo each element's totals back as a completed season.
 
         The BOOTSTRAP fixture above is written as a full season of history --
@@ -191,7 +192,8 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
         def bootstrap(self):
             return leaky
 
-        def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+        def element_summaries(self, player_ids, ttl_hours=None, progress=None,
+                              not_before=None):
             by_id = {e["id"]: e for e in leaky["elements"]}
             return {
                 int(pid): {"history_past": [dict(by_id[int(pid)], season_name="2025/26")]}
@@ -303,7 +305,8 @@ def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tm
 class InFormClient(FakeClient):
     """Player 20 has started and scored in every gameweek so far this season."""
 
-    def element_summaries(self, player_ids, ttl_hours=None, progress=None):
+    def element_summaries(self, player_ids, ttl_hours=None, progress=None,
+                          not_before=None):
         out = FakeClient.element_summaries(self, player_ids, ttl_hours, progress)
         for pid in out:
             out[pid] = dict(out[pid], history=[
@@ -317,6 +320,49 @@ class InFormClient(FakeClient):
                 for r in range(1, 5)
             ])
         return out
+
+
+class NotBeforeRecordingClient(FakeClient):
+    """Captures the cache floor the pipeline demands of element-summaries."""
+
+    def __init__(self, fixtures):
+        self._fixtures = fixtures
+        self.not_before = "never called"
+
+    def fixtures(self):
+        return self._fixtures
+
+    def element_summaries(self, player_ids, ttl_hours=None, progress=None,
+                          not_before=None):
+        self.not_before = not_before
+        return FakeClient.element_summaries(self, player_ids, ttl_hours, progress)
+
+
+def test_pipeline_requires_summaries_newer_than_the_last_finished_match(tmp_path):
+    """The current season is read out of element-summaries, which cache for 30
+    days. Age alone let a GW1 snapshot serve GW3, so the pipeline must also
+    demand the cache postdate the last finished match."""
+    from datetime import datetime, timedelta, timezone
+
+    played = [dict(f, finished=True) for f in FIXTURES if f["event"] <= 2]
+    upcoming = [f for f in FIXTURES if f["event"] > 2]
+    client = NotBeforeRecordingClient(played + upcoming)
+
+    run(Config(budget=100.0, horizon_gw=3), mode=1, from_event=3, root=tmp_path,
+        client=client)
+
+    last_ko = max(datetime.fromisoformat(f["kickoff_time"].replace("Z", "+00:00"))
+                  for f in played)
+    assert client.not_before == last_ko + timedelta(hours=3)
+
+
+def test_pipeline_leaves_ttl_in_charge_before_any_match_is_played(tmp_path):
+    """Pre-season there is nothing to be stale against — demanding a floor here
+    would force a needless refetch of every player."""
+    client = NotBeforeRecordingClient(FIXTURES)
+    run(Config(budget=100.0, horizon_gw=3), mode=1, from_event=1, root=tmp_path,
+        client=client)
+    assert client.not_before is None
 
 
 def test_current_season_form_reaches_the_projection(tmp_path):

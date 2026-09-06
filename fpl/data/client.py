@@ -30,9 +30,10 @@ class FplClient:
                 time.sleep(self.rate_limit_s - delta)
             self._last_call = time.monotonic()
 
-    def _get(self, path: str, slug: str, ttl_hours: float | None = None):
+    def _get(self, path: str, slug: str, ttl_hours: float | None = None,
+             not_before=None):
         ttl = self.ttl_hours if ttl_hours is None else ttl_hours
-        cached = self.cache.get_fresh(slug, ttl)
+        cached = self.cache.get_fresh(slug, ttl, not_before=not_before)
         if cached is not None:
             return cached
         url = BASE + path
@@ -59,16 +60,23 @@ class FplClient:
     def fixtures(self) -> list[dict]:
         return self._get("fixtures/", "fixtures")
 
-    def element_summary(self, player_id: int, ttl_hours: float | None = None) -> dict:
+    def element_summary(self, player_id: int, ttl_hours: float | None = None,
+                        not_before=None) -> dict:
         return self._get(f"element-summary/{player_id}/", f"element-summary-{player_id}",
-                         ttl_hours=ttl_hours)
+                         ttl_hours=ttl_hours, not_before=not_before)
 
     def element_summaries(self, player_ids, ttl_hours: float = HISTORY_TTL_H,
-                          progress=None) -> dict[int, dict]:
+                          progress=None, not_before=None) -> dict[int, dict]:
         """Fetch many element-summaries, tolerating individual failures.
 
-        Defaults to a long TTL because the only field the weekly pipeline reads
-        from these is `history_past`, which never changes once a season is over.
+        The long default TTL dates from when `history_past` was the only field
+        read from these — it is immutable once a season ends, so age did not
+        matter. `history_current_frame` now reads THIS season's rounds from the
+        same payload, which age very much does affect, so callers that need the
+        current season must pass `not_before=data_complete_after(fixtures)`.
+        Without it a 30-day-old snapshot counts as fresh and the model silently
+        runs on whatever gameweek happened to be current when it was taken.
+
         A player whose summary can't be fetched is simply omitted; downstream
         that zeroes their baseline and routes them to the price prior.
         """
@@ -76,7 +84,8 @@ class FplClient:
         ids = list(player_ids)
         for i, pid in enumerate(ids):
             try:
-                out[int(pid)] = self.element_summary(int(pid), ttl_hours=ttl_hours)
+                out[int(pid)] = self.element_summary(int(pid), ttl_hours=ttl_hours,
+                                                     not_before=not_before)
             except Exception:
                 self.stale = True
             if progress:
