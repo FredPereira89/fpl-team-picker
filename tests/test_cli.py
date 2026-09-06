@@ -31,6 +31,52 @@ PICKS = {
 HISTORY_NO_TRANSFERS = {"current": [{"event": 1, "event_transfers": 0}]}
 
 
+def test_confirmed_squad_for_this_gameweek_overrides_the_api_picks(tmp_path):
+    """entry/{id}/event/{gw}/picks only exists once GW{gw} has started, so during
+    the window when planning actually happens it can only return LAST week's
+    squad. A transfer made before the deadline is therefore invisible, and the
+    optimiser would keep recommending players you already bought."""
+    p = tmp_path / "state.json"
+    save_state(State(free_transfers=0, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), p)
+    live, errors = resolve_current_squad(Config(entry_id=1), gw=4, state_path=p,
+                                         client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert errors == []
+    assert live.current_squad == list(range(100, 115))
+    assert live.bank == 0.0
+    assert any("confirmed squad" in w for w in live.warnings)
+
+
+def test_confirmed_squad_also_fixes_the_free_transfer_count(tmp_path):
+    """reconcile() derives free transfers from COMPLETED gameweeks, so transfers
+    already made for the upcoming one do not show up and the balance reads too
+    high. Confirming the squad confirms the transfers that produced it."""
+    p = tmp_path / "state.json"
+    save_state(State(free_transfers=0, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), p)
+    live, _ = resolve_current_squad(Config(entry_id=1), gw=4, state_path=p,
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.free_transfers == 0
+
+
+def test_confirmed_squad_from_an_older_gameweek_is_ignored(tmp_path):
+    """A squad recorded for GW4 says nothing about GW5 — by then the API's own
+    picks are authoritative again."""
+    p = tmp_path / "state.json"
+    save_state(State(free_transfers=0, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4), p)
+    live, _ = resolve_current_squad(Config(entry_id=1), gw=5, state_path=p,
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.current_squad == list(range(1, 16))  # straight from PICKS
+
+
+def test_without_a_confirmed_squad_the_api_still_wins(tmp_path):
+    live, _ = resolve_current_squad(Config(entry_id=1), gw=4,
+                                    state_path=tmp_path / "state.json",
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.current_squad == list(range(1, 16))
+
+
 def test_returns_none_without_entry_id(tmp_path):
     live, errors = resolve_current_squad(Config(entry_id=None), gw=2,
                                           state_path=tmp_path / "state.json",

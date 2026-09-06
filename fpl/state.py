@@ -21,6 +21,15 @@ class State:
     # the rise, and no public endpoint reports the purchase price, so the only
     # way to budget a transfer honestly is to remember it here.
     purchase_prices: dict[int, float] = field(default_factory=dict)
+    # A squad confirmed by hand, and the gameweek it is the squad FOR.
+    # entry/{id}/event/{gw}/picks exists only once GW{gw} has started, so
+    # throughout the window when planning happens it can only report LAST
+    # week's team: a transfer made before the deadline stays invisible until
+    # after it. Recording the real 15 here is the only way the optimizer can
+    # plan from what is actually owned rather than a week-old snapshot.
+    squad: list[int] = field(default_factory=list)
+    squad_event: int = 0
+    bank: float = 0.0
 
 
 def load_state(path: Path, cfg) -> State:
@@ -36,6 +45,9 @@ def load_state(path: Path, cfg) -> State:
         # players by int, so convert on the way back in.
         purchase_prices={int(k): float(v)
                          for k, v in (raw.get("purchase_prices") or {}).items()},
+        squad=[int(i) for i in (raw.get("squad") or [])],
+        squad_event=int(raw.get("squad_event", 0)),
+        bank=float(raw.get("bank", 0.0)),
     )
 
 

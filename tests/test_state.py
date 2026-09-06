@@ -21,6 +21,27 @@ def test_save_then_load_roundtrips(tmp_path):
     assert s.chips_used == ["wildcard"]
 
 
+def test_save_then_load_roundtrips_a_confirmed_squad(tmp_path):
+    """FPL exposes picks only for gameweeks that have started, so a transfer
+    made during the planning window is invisible until after the deadline it
+    was made for. A squad confirmed by hand has to survive in state."""
+    p = tmp_path / "state.json"
+    save_state(State(free_transfers=0, last_event=3, chips_used=[],
+                     squad=[1, 2, 3], squad_event=4, bank=0.3), p)
+    s = load_state(p, Config(free_transfers=1))
+    assert s.squad == [1, 2, 3]
+    assert s.squad_event == 4
+    assert s.bank == 0.3
+
+
+def test_state_without_a_recorded_squad_reads_as_empty(tmp_path):
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"free_transfers": 1, "last_event": 2}))
+    s = load_state(p, Config(free_transfers=1))
+    assert s.squad == []
+    assert s.squad_event == 0
+
+
 def test_unused_transfer_accrues():
     assert advance_ft(State(1, 1, []), transfers_made=0) == 2
 
