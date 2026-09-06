@@ -2,7 +2,7 @@
 
 Running log of what's been decided and done. Read this first when resuming work.
 
-## Current state (as of 2026-08-26)
+## Current state (as of 2026-08-31)
 
 - Season 2026/27, GW1 deadline **Fri 21 Aug 2026 17:30 UTC**.
 - `entry_id: 1461088` (Frederico Pereira, "Haaland&Grosso") set in `config.yaml`.
@@ -36,6 +36,10 @@ Running log of what's been decided and done. Read this first when resuming work.
 - The superseded pre-transfer advice was to hold and bank the FT; the only move the model
   liked was Raya → Leno at +1.55 xP/5GW, rejected because GK is the position the backtest
   measured at Spearman 0.034.
+- **GW2 is now finished (result recorded 2026-08-31): actual score 84 pts** vs the 58.23
+  predicted (+25.8, +44%). Season total 138. Haaland's captaincy returned 26 of the 84, and
+  the Enzo → Tzolis transfer was a 0-vs-0 wash — refusing the −4 to undo it was correct.
+  See the session log for the full breakdown and the model's second out-of-sample score.
 
 ### ⚠ The model cannot value Tzolis, and says so misleadingly
 
@@ -110,10 +114,86 @@ blind spot the model cannot see, and it is the whole reason the override mechani
   Separately, the model WAS over-predicting keepers by +0.70 pts/GW through a clean-sheet
   scale bug, now fixed. Every run records its forecast to `data/predictions/`; run
   `python scripts/score_gameweek.py --gw N` after a gameweek to re-measure this properly.
+- **Goalkeeper BIAS is the live problem, and the clean-sheet fix did not cure it.** GK rank
+  quality is fine (0.524 on GW1, 0.529 on GW2), but the over-prediction went +0.70 before the
+  fix → +0.60 on GW1 → **+0.72 on GW2**. Two gameweeks now say the residual is not in clean
+  sheets; the remaining suspects are saves and bonus, i.e. **P7, the deferred BPS rebuild**.
+  Until it is done the optimizer is buying keepers at inflated prices every week.
 - 5-GW clean-sheet projections are directional, not precise, past ~GW2 — they are built from
   last season's team ratings.
 
 ## Session log
+
+### 2026-08-31 — GW2 retrospective, and a second out-of-sample score
+
+GW2's last fixture (Villa–Arsenal, 19:00 UTC) had finished about twenty minutes before this
+was written, so every number here is provisional: the event was still `finished: false` with
+bonus unconfirmed. Pulled `entry/1461088/`, `.../event/2/picks/`, `event/2/live/`,
+`fixtures/?event=2` and `bootstrap-static`.
+
+- **Final score: 84 points** (1 transfer, 0 hits, no chip, bench scored 0 so no autosub
+  regret). Season total 138. GW2 average was 66 and the highest score in the game 158 —
+  though the average, like the ranks, was still mid-recalculation: FPL's `entry/history/`
+  row read 67 points, exactly our 84 minus the three Arsenal players.
+- Predicted (model, pre-deadline) **58.23** vs actual **84.0** → **+25.8 (+44%)**. GW1 was
+  −6.48. Two gameweeks, one miss either side — nothing here says the model runs low.
+- **Ranks unsettled.** `entry/` read overall 3,383,298 against 3,208,418 after GW1, while the
+  history row still carried the pre-Arsenal 3,938,848. Neither is a finished number; re-check.
+
+Per-player actuals (XI only, mult × pts):
+
+| Player | Min | Return | Pts |
+|---|---|---|---|
+| Haaland (FWD, **C**) | 90 | 2 goals, 3 bonus | 13 → **26** |
+| Tarkowski (DEF) | 90 | 1 goal, 2 bonus | **12** |
+| Calafiori (DEF) | 90 | 1 assist, clean sheet, 2 bonus | **11** |
+| Schade (MID) | 87 | 1 goal, 3 bonus | **10** |
+| João Pedro (FWD) | 90 | 1 goal, 1 assist, 2 bonus | **9** |
+| Raya (GKP) | 90 | clean sheet | 6 |
+| Semenyo (MID) | 90 | 1 assist | 5 |
+| Guéhi (DEF) | 90 | blank, conceded 1 | 2 |
+| Thiago (FWD, VC) | 90 | blank | 2 |
+| Virgil (DEF) | 90 | blank, conceded 2 | 1 |
+| Tzolis (MID) | 45 | yellow, subbed at half time | 0 |
+
+- **Captaincy paid this time.** Haaland was 26 of the 84. At 69.7% owned it bought no rank
+  against the template, but it was the right hold after the GW1 blank.
+- **The Enzo → Tzolis transfer was a wash.** Tzolis 0, and Enzo did not play at all, also 0.
+  The 2026-08-27 call to refuse the −4 to undo it was correct: the hit would have bought a
+  zero either way. This does **not** resolve the Tzolis valuation blind spot — the week
+  simply never tested it.
+- **Both of the model's biggest misses were upward**: Tarkowski (xP 3.02, actual 12) and
+  Schade (4.29, actual 10). Its two best-rated non-Haaland picks, Thiago (5.94) and Guéhi
+  (5.23), returned 2 apiece.
+- Bench all zero again. Kadıoğlu played the full 90 for 0 points and −4 BPS.
+
+#### The model scored on GW2 — the standing "confirm against GW2" item
+
+Scored `data/predictions/gw2.parquet` against real returns, sourced from `event/2/live/`
+rather than 614 `element-summary` calls because the gameweek had only just ended; the join
+and the metrics are `scripts/score_gameweek.py`'s own. Verdict saved to
+`data/predictions/last_score.txt`, so the next weekly report quotes a real measurement.
+
+| | GW1 (after the seven fixes) | GW2 |
+|---|---|---|
+| Spearman, all players | 0.474 | **0.595** |
+| MAE | 1.595 | **1.35** |
+| Bias, pts/player | — | **+0.04** |
+| Goalkeeper bias | +0.599 | **+0.72** |
+| DEF / MID / FWD ρ | 0.436 / 0.533 / 0.412 | 0.592 / 0.634 / 0.563 |
+
+- **P1 and P2 hold on a second sample.** Rank quality improved again and overall bias is now
+  essentially zero, across 614 players of whom 307 appeared.
+- **Goalkeepers are the exception and the finding of this session.** GK bias went the wrong
+  way — +0.72, worse than GW1's +0.60 and than the +0.70 the clean-sheet scale fix was meant
+  to cure. Two gameweeks agree the residual is not clean sheets. The likely home is saves and
+  bonus: the 2026/27 table restructured goalkeeper saves, and `expected_bonus` still carries
+  last season's realised `bonus90` forward. That is **P7**, and it should stop being optional.
+- Rank quality among players who actually appeared is **+0.347** against +0.595 overall, so
+  the ordering skill still leans heavily on the minutes model — the same two-layer shape the
+  2026-08-27 audit diagnosed, now measured a second time.
+- Top-20 overlap was only 20%, but on a single gameweek that is mostly variance in who
+  happened to haul, not a stable indictment.
 
 ### 2026-08-27 — model audit and seven fixes
 
@@ -262,13 +342,15 @@ Per-player actuals (XI only, mult × pts):
 
 ## Next session
 
-1. **Tzolis is now owned** (bought GW2, replacing Enzo). Outstanding question is not whether
-   to buy but whether the model can ever score him properly — see the blind-spot section above.
-   Re-check after a few GWs of 2026/27 data accumulate. His minutes override expires at GW6.
-2. Re-check Arsenal team news before the GW2 deadline (Saliba/Timber → Calafiori premise,
-   currently overridden to 0.80 and expiring at GW6).
-3. **Wire up form blending.** `blend_form` / `form_weight` are tested but uncalled, so the
-   model still cannot see any 2026/27 form. This is the biggest remaining modelling gap —
-   and it grows every gameweek.
-4. Consider whether the GK component is worth using at all given Spearman 0.034, or whether
-   GK picks should just defer to FPL's own xP / team news.
+1. **GW3 is the next live decision.** 1 FT (accrued after the GW2 deadline — confirm against
+   `entry/{id}/history/`, `reconcile` re-derives it). Bank £0.5m, squad value £100.2m.
+   Re-check Arsenal team news first: Saliba/Timber → Calafiori premise, overridden to 0.80
+   and expiring at GW6.
+2. **P7, the BPS rebuild, is now the top modelling item** — not optional. Two scored
+   gameweeks agree the goalkeeper over-prediction (+0.72 on GW2) survives the clean-sheet
+   fix, which points at saves and bonus. See the standing note above and `handoff.md`.
+3. **Tzolis is owned and still unmeasured.** GW2 did not test the valuation blind spot — he
+   played 45 minutes for 0 points, and the Enzo alternative did not play at all. Re-check
+   once a few GWs of 2026/27 data accumulate; his minutes override expires at GW6.
+4. Re-run `python scripts/score_gameweek.py --gw 2` once GW2 is `data_checked` — the recorded
+   verdict was scored on provisional bonus, so a point or two may still move.

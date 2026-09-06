@@ -33,7 +33,7 @@ making the ordering worse.
 | P5a | Captain term in the MILP + horizon decay | **done** |
 | P3 | Current-season form blending | **done** |
 | P4 | Penalty-taker / set-piece signal | **done** |
-| P7 | Rebuild bonus under the 2026/27 BPS table | **deferred** |
+| P7 | Rebuild bonus under the 2026/27 BPS table | **next** (was deferred; GW2 promoted it) |
 | P5b | Full multi-period MILP (per-GW squad variables) | **deferred** |
 
 Deferred items are deliberate, not forgotten — see "Deliberately not done" below.
@@ -57,6 +57,30 @@ process, not the forecast. The model now also beats FPL's own `ep_next` (0.466) 
 
 **One gameweek is one sample.** Re-run the check against GW2 before treating these
 magnitudes as settled — the ledger (P8) now makes that a single command.
+
+### GW2, scored 2026-08-31 — the gains hold, except for goalkeepers
+
+| | GW1 (after) | GW2 |
+|---|---|---|
+| Spearman, all players | 0.474 | **0.595** |
+| MAE | 1.595 | **1.35** |
+| Bias, pts/player | — | **+0.04** |
+| Goalkeeper bias | +0.599 | **+0.72** |
+| Defenders ρ | 0.436 | 0.592 |
+| Midfielders ρ | 0.533 | 0.634 |
+| Forwards ρ | 0.412 | 0.563 |
+
+614 players, 307 of whom appeared; ρ among those who appeared was +0.347, so the ordering
+skill still leans on the minutes model. Scored from `event/2/live/` rather than 614
+element-summary calls because the gameweek had only just ended — same join, same metrics.
+Bonus was still provisional, so re-run `scripts/score_gameweek.py --gw 2` once GW2 is
+`data_checked`.
+
+**P1 and P2 are confirmed on a second sample. P7 is no longer optional.** Goalkeeper
+over-prediction went +0.70 (pre-fix) → +0.60 (GW1) → **+0.72 (GW2)**: two gameweeks agree the
+residual survives the clean-sheet fix, which leaves saves and bonus — exactly what P7 covers.
+GK *rank* quality is fine either way (0.524, 0.529); it is the level that is wrong, and the
+level is what the optimizer spends its budget against.
 
 ## What changed, file by file
 
@@ -148,9 +172,10 @@ penalties is not credited twice, while a new signing gets the full premium.
 
 ## Remaining work
 
-Both remaining items are the ones deliberately left; see below. Before starting either,
-score GW2 (`python scripts/score_gameweek.py --gw 2`) and confirm the P1/P2 gains hold on a
-second gameweek.
+Both remaining items are the ones deliberately left; see below. GW2 has now been scored and
+the P1/P2 gains held, so that gate is cleared — and it promoted **P7 from optional to next**.
+Take P7 first: the goalkeeper bias is measured, persistent across two gameweeks, and pointed
+straight at the part of the model P7 rebuilds.
 
 ## Deliberately not done
 
