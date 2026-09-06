@@ -41,12 +41,19 @@ def data_complete_after(fixtures: list[dict]) -> datetime | None:
     since `history_current_frame` started reading this season's rounds out of
     them, "not yet expired" stopped meaning "still correct".
 
+    A match counts once FPL sets `finished_provisional`, at the final whistle.
+    Waiting for `finished` -- which flips only after FPL's bonus and stat check,
+    hours later -- would leave a window where the football has been played, the
+    history rows exist, and a snapshot taken before kickoff still passes as
+    current. GW3 2026/27 sat in that state: ten matches played, `finished`
+    False on every one of them.
+
     None when no fixture has finished (pre-season), which leaves the ordinary
     TTL in charge.
     """
     kickoffs = []
     for f in fixtures or []:
-        if not f.get("finished"):
+        if not (f.get("finished") or f.get("finished_provisional")):
             continue
         ko = f.get("kickoff_time")
         if not ko:

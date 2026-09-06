@@ -114,6 +114,22 @@ def test_data_complete_after_is_last_finished_kickoff_plus_match():
     assert got == datetime(2026, 8, 16, 16, 30, tzinfo=timezone.utc) + timedelta(hours=3)
 
 
+def test_data_complete_after_counts_provisionally_finished_matches():
+    """FPL sets finished_provisional at the final whistle and `finished` only
+    after its bonus/stat check, which can lag by hours. The history rows appear
+    at the whistle, so a cache taken during that window is already out of date
+    and must not be trusted — GW3 sat in exactly this state, all ten matches
+    played with finished=False on every one of them."""
+    fx = [
+        {"kickoff_time": "2026-08-29T14:00:00Z", "finished": True,
+         "finished_provisional": True},
+        {"kickoff_time": "2026-09-06T15:30:00Z", "finished": False,
+         "finished_provisional": True},
+    ]
+    got = data_complete_after(fx)
+    assert got == datetime(2026, 9, 6, 15, 30, tzinfo=timezone.utc) + timedelta(hours=3)
+
+
 def test_data_complete_after_ignores_unfinished_and_null_kickoffs():
     fx = [{"kickoff_time": None, "finished": True},
           {"kickoff_time": "2026-08-22T14:00:00Z", "finished": False}]
