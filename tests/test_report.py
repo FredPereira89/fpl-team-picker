@@ -34,6 +34,24 @@ def _rec(**kw):
     return Recommendation(**base)
 
 
+def test_multi_transfer_pairs_are_matched_by_position():
+    """out_ids and in_ids are each sorted by player_id, so zipping them paired a
+    keeper leaving with a midfielder arriving and printed "Raya -> Mbeumo" — a
+    transfer FPL would never allow, from a squad that was in fact perfectly
+    legal. Squad composition is fixed, so every out has an in of its own
+    position; the report has to pair them that way."""
+    # The arriving keeper must sort AFTER the arriving midfielder for the zip to
+    # misalign, exactly as Tzolakis (572) did against Mbeumo (427).
+    xp = pd.concat([XP, XP.iloc[[0]].assign(player_id=16, web_name="Player16",
+                                            position="GKP")], ignore_index=True)
+    plan = TransferPlan(out_ids=[1, 12], in_ids=[11, 16], n_transfers=2, hit_cost=0,
+                        gain=5.0)
+    out = render(_rec(mode=2, transfers=plan), xp)
+    assert "Player1 → Player16" in out    # GKP out, GKP in
+    assert "Player12 → Player11" in out   # MID out, MID in
+    assert "Player1 → Player11" not in out  # the keeper-for-midfielder nonsense
+
+
 def test_contains_all_required_sections():
     out = render(_rec(), XP)
     for section in ["## Gameweek 1", "### Starting XI", "### Bench (in order)",

@@ -30,6 +30,33 @@ def _name(df, pid) -> str:
     return f"{row['web_name']} ({row['team']}, £{row['price']}m, {row['xp_next1']:.1f} xP)"
 
 
+def _pair_by_position(df, out_ids, in_ids) -> list[tuple[int, int]]:
+    """Match each departing player with the arriving one who replaces him.
+
+    TransferPlan holds two sets, each sorted by player_id, and zipping them
+    paired players at random: a two-move plan printed "Raya → Mbeumo", a keeper
+    swapped for a midfielder, which FPL forbids and which made a perfectly legal
+    squad look broken. An FPL squad is fixed at 2/5/5/3, so a transfer never
+    changes the position counts and every player leaving has a counterpart
+    arriving in his own position.
+    """
+    by_pos: dict[str, list[int]] = {}
+    for i in in_ids:
+        by_pos.setdefault(str(df.loc[i, "position"]), []).append(i)
+    pairs, leftover = [], []
+    for o in out_ids:
+        same = by_pos.get(str(df.loc[o, "position"]))
+        if same:
+            pairs.append((o, same.pop(0)))
+        else:
+            leftover.append(o)
+    # Positions always balance for a real plan; pair anything left over in order
+    # rather than dropping a transfer silently from the report.
+    rest = [i for ids in by_pos.values() for i in ids]
+    pairs.extend(zip(leftover, rest))
+    return pairs
+
+
 def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     df = xp_df.set_index("player_id")
     lu = rec.lineup
@@ -76,7 +103,7 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     if t is None or t.n_transfers == 0:
         out.append("No transfer recommended — the squad is already optimal on projected points.")
     else:
-        for o, i in zip(t.out_ids, t.in_ids):
+        for o, i in _pair_by_position(df, t.out_ids, t.in_ids):
             out.append(f"{df.loc[o, 'web_name']} → {df.loc[i, 'web_name']}")
         hit = f" after a -{t.hit_cost} hit" if t.hit_cost else " (no hit — within your free transfers)"
         # The solver maximises a decayed horizon, so this figure is not a raw
