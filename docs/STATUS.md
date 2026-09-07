@@ -216,11 +216,26 @@ kickoff + 3h, so it answers "has the football been played", not "has FPL checked
 snapshot taken between a gameweek's final whistle and FPL's bonus/stat review passed that
 test and was then trusted for the rest of its 30-day TTL.
 
-- **Measured before changing anything, and it had not bitten.** GW3's last kickoff was
-  2026-09-06 15:30 UTC; the cached summaries were taken 19:37-19:58, while GW3 was still
-  `finished: false, finished_provisional: true`. Re-fetched 33 players (the whole squad plus
-  the top 25 by GW3 BPS, where bonus disputes live) and **not one number had changed** — the
-  data settled before the flag flipped. The GW4 forecast was built on final GW3 returns.
+- **It had bitten, in a place the first check missed.** GW3's last kickoff was 2026-09-06
+  15:30 UTC; the cached summaries were taken 19:37-19:58, while GW3 was still
+  `finished: false, finished_provisional: true`. A 33-player sample (the squad plus the top
+  25 by GW3 BPS) showed no change — but that sample compared points, bonus, minutes and BPS,
+  **not the expected-goals fields the model leans on hardest**. The full-pool diff of the
+  pre-check snapshot against one taken after GW3 went final:
+
+  | field | player-rounds revised |
+  |---|---|
+  | `expected_goals_conceded` | 41 |
+  | `expected_goals` | 11 |
+  | `expected_assists` | 8 |
+  | `defensive_contribution` | 2 |
+  | `bps` | 2 |
+
+  Points, bonus and minutes were indeed settled before the flag flipped; Opta's underlying
+  numbers were not. **45 players' model inputs changed**, moving 13 players' GW4 xP by up to
+  0.039 (Arsenal, Chelsea and Man Utd players — the clubs whose GW3 xGC was revised). The
+  recommendation did not change, but the premise "played means complete" is now measurably
+  false, not merely theoretically so.
 - **No timestamp can establish this**, so the snapshot now records it: `Cache.put(meta=...)`
   writes a `.meta` sidecar carrying `final_through`, the highest gameweek FPL had fully
   `finished` at capture time, and `get_fresh(require_final_through=N)` refuses a snapshot
@@ -229,8 +244,13 @@ test and was then trusted for the rest of its 30-day TTL.
   them would re-fetch 650 players for data that is usually already settled — and the report
   carries a line saying the history could not be verified (`pipeline.freshness_flags`,
   keyed on `settled_after`, last kickoff + 6h).
-- The element-summary cache was re-fetched once by hand after GW3 went final so it carries
-  the marker; that re-fetch also served as a second, full-pool check that nothing moved.
+- The element-summary cache was re-fetched by hand after GW3 went final so it carries the
+  marker, and the GW4 forecast was re-recorded from it. Both versions are in
+  `data/predictions/versions/`, which is what made the before/after diff possible at all.
+- **A lesson about the checking, not just the data:** the first diff compared the two
+  freshly-refetched snapshots with each other rather than against the pre-check one, and so
+  reported "0 changed" twice. When a cache keeps three snapshots per player, `snaps[-2]` is
+  not necessarily the one the earlier run actually used — select by timestamp, not position.
 
 **Argued against, with reasons**
 
