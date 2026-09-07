@@ -148,3 +148,84 @@ def test_slug_with_underscore_works_with_newest(tmp_path):
     payload, ts = c.newest("element_summary")
     assert payload == {"x": 1}
     assert ts.tzinfo is not None
+
+
+# --- Played is not the same as checked (2026-09-07) ---
+
+def _fx(event, ko, finished, provisional=True):
+    return {"event": event, "kickoff_time": ko, "finished": finished,
+            "finished_provisional": provisional}
+
+
+FINAL_GW3 = [_fx(3, "2026-09-06T13:00:00Z", True), _fx(3, "2026-09-06T15:30:00Z", True)]
+WHISTLE_GW3 = [_fx(3, "2026-09-06T13:00:00Z", True),
+               _fx(3, "2026-09-06T15:30:00Z", False)]
+
+
+def test_final_through_reports_the_last_fully_checked_gameweek():
+    from fpl.data.cache import final_through
+    fixtures = [_fx(2, "2026-08-31T19:00:00Z", True)] + FINAL_GW3
+    assert final_through(fixtures) == 3
+
+
+def test_a_gameweek_at_the_whistle_is_not_yet_checked():
+    """`finished_provisional` flips at full time; bonus and stat corrections
+    land when `finished` does. GW3 2026/27 sat in that state for hours."""
+    from fpl.data.cache import final_through
+    assert final_through([_fx(2, "2026-08-31T19:00:00Z", True)] + WHISTLE_GW3) == 2
+
+
+def test_final_through_is_zero_before_a_ball_is_kicked():
+    from fpl.data.cache import final_through
+    assert final_through([_fx(1, "2026-08-21T19:00:00Z", False, provisional=False)]) == 0
+
+
+def test_a_snapshot_records_what_was_checked_when_it_was_taken(tmp_path):
+    """No timestamp can express this: two snapshots taken a minute apart sit on
+    either side of FPL's data check, and only the snapshot itself knows which."""
+    c = Cache(tmp_path)
+    c.put("bootstrap-static", {"x": 1}, meta={"final_through": 3})
+    assert c.newest_meta("bootstrap-static") == {"final_through": 3}
+
+
+def test_a_snapshot_taken_before_the_check_is_refused(tmp_path):
+    c = Cache(tmp_path)
+    c.put("element-summary-1", {"history": []}, meta={"final_through": 2})
+    assert c.get_fresh("element-summary-1", ttl_hours=720) is not None
+    assert c.get_fresh("element-summary-1", ttl_hours=720, require_final_through=3) is None
+    assert c.get_fresh("element-summary-1", ttl_hours=720, require_final_through=2) is not None
+
+
+def test_a_snapshot_from_before_this_mechanism_is_still_used(tmp_path):
+    """Refusing every unmarked snapshot would re-fetch 650 players for data
+    that is usually already settled. They are used, and flagged instead."""
+    c = Cache(tmp_path)
+    c.put("element-summary-1", {"history": []})
+    assert c.get_fresh("element-summary-1", ttl_hours=720, require_final_through=3) is not None
+    assert c.newest_meta("element-summary-1") == {}
+
+
+def test_the_marker_does_not_look_like_a_snapshot(tmp_path):
+    """`_paths` globs for snapshots; a sidecar ending in .json would be read as
+    one and blow up on the timestamp parse."""
+    c = Cache(tmp_path)
+    c.put("fixtures", [{"id": 1}], meta={"final_through": 3})
+    assert c.newest("fixtures")[0] == [{"id": 1}]
+    assert c.newest_stamp("fixtures") is not None
+
+
+def test_pruning_takes_the_marker_with_it(tmp_path):
+    c = Cache(tmp_path)
+    for h in range(5):
+        c.put("bootstrap-static", {"n": h},
+              now=datetime(2026, 9, 1, h, tzinfo=timezone.utc), meta={"final_through": h})
+    c.prune("bootstrap-static", keep=2)
+    assert len(list(tmp_path.glob("bootstrap-static_*.json"))) == 2
+    assert len(list(tmp_path.glob("bootstrap-static_*.meta"))) == 2
+
+
+def test_settled_after_allows_for_fpls_own_check():
+    from fpl.data.cache import settled_after, FINAL_CHECK_H
+    when = settled_after(FINAL_GW3, 3)
+    assert when == datetime(2026, 9, 6, 15, 30, tzinfo=timezone.utc) + timedelta(hours=FINAL_CHECK_H)
+    assert settled_after(FINAL_GW3, 4) is None

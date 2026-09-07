@@ -187,3 +187,37 @@ def test_a_player_with_no_set_piece_duty_is_not_treated_as_first_choice():
     df = normalize_players(BOOTSTRAP).set_index("player_id")
     assert df["penalties_order"].isna().any()
     assert (df["penalties_order"].dropna() >= 1).all()
+
+
+# --- Per-match history (2026-09-07 review) ---
+
+def test_rounds_frame_keeps_one_row_per_match():
+    """Totals answer "how much" but never "when". Recency-weighted form, how
+    often a start lasts the hour, and how long a start lasts all need the
+    matches themselves."""
+    from fpl.data.normalize import history_rounds_frame
+    df = history_rounds_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=3)
+    assert list(df["round"]) == [1, 2]
+    assert list(df["minutes"]) == [90, 45]
+    assert list(df["starts"]) == [1, 0]
+
+
+def test_rounds_frame_excludes_the_gameweek_being_predicted():
+    from fpl.data.normalize import history_rounds_frame
+    df = history_rounds_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=2)
+    assert list(df["round"]) == [1]
+
+
+def test_rounds_frame_is_empty_but_shaped_before_a_ball_is_kicked():
+    from fpl.data.normalize import history_rounds_frame
+    df = history_rounds_frame({7: _summary_with_history(CURRENT_ROWS)}, before_event=1)
+    assert len(df) == 0
+    assert {"player_id", "round", "minutes", "starts"} <= set(df.columns)
+
+
+def test_rounds_frame_keeps_both_halves_of_a_double_gameweek():
+    from fpl.data.normalize import history_rounds_frame
+    doubled = CURRENT_ROWS + [dict(CURRENT_ROWS[0], round=2, minutes=70)]
+    df = history_rounds_frame({7: _summary_with_history(doubled)}, before_event=3)
+    assert len(df) == 3
+    assert sorted(df[df["round"] == 2]["minutes"]) == [45, 70]

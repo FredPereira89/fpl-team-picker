@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fpl.backtest.ledger import (available_gameweeks, load_predictions,
                                  actuals_from_summaries, score_gameweek,
-                                 scored_summary, save_scored_summary)
+                                 scored_summary, save_scored_summary,
+                                 gameweek_is_final)
 from fpl.config import load_config
 from fpl.data.cache import Cache, data_complete_after
 from fpl.data.client import FplClient
@@ -68,7 +69,9 @@ def main() -> int:
     # Without this the 30-day element-summary TTL hides the very gameweek being
     # scored: --no-refresh made it a year, so scoring a just-played gameweek was
     # impossible and this measurement never ran once all season.
-    not_before = None if args.no_refresh else data_complete_after(client.fixtures())
+    fixtures = client.fixtures()
+    not_before = None if args.no_refresh else data_complete_after(fixtures)
+    final = gameweek_is_final(fixtures, gw)
     summaries = client.element_summaries(player_ids, progress=progress,
                                          not_before=not_before)
     actuals = actuals_from_summaries(summaries, gw)
@@ -82,7 +85,10 @@ def main() -> int:
         print(str(e))
         return 1
 
-    text = scored_summary(scored, gw)
+    # Bonus points and stat corrections land hours after the final whistle, so
+    # a score taken before FPL's own check is a moving target -- say so in the
+    # verdict rather than letting the weekly report quote it as settled.
+    text = scored_summary(scored, gw, provisional=not final)
     print("\n" + text)
     path = save_scored_summary(text, DATA_ROOT)
     print(f"\nSaved to {path}. The next weekly report will quote this instead of the "

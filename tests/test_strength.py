@@ -154,3 +154,50 @@ def test_league_goals_per_team_match_falls_back_when_no_history():
     empty = pd.DataFrame({"player_id": [], "position": [], "minutes": [],
                           "goals_conceded": []})
     assert league_goals_per_team_match(empty) == DEFAULT_LEAGUE_GC
+
+
+# --- Ratings that react to the current season (2026-09-07 review) ---
+
+def _current(goals_for, goals_against, minutes):
+    """Season-to-date per-player totals, one player standing in per team."""
+    return pd.DataFrame({
+        "player_id": [1, 2, 3, 4, 5],
+        "goals_scored": goals_for,
+        "goals_conceded": goals_against,
+        "minutes": minutes,
+    })
+
+
+def test_a_collapse_this_season_weakens_a_strong_teams_rating():
+    """Ratings were built from the completed season alone, so a team that had
+    fallen apart -- new manager, sold its spine -- kept last May's rating until
+    the following July."""
+    base = team_ratings(PLAYERS, TEAMS).set_index("team_id")
+    # Team 1 has scored nothing and shipped goals through 6 games (~6000 mins)
+    now = _current([0, 12, 6, 12, 12], [18, 6, 9, 6, 6], [6000] * 5)
+    updated = team_ratings(PLAYERS, TEAMS, current=now).set_index("team_id")
+    assert updated.loc[1, "att"] < base.loc[1, "att"]
+    assert updated.loc[1, "dfn"] > base.loc[1, "dfn"]
+
+
+def test_a_promoted_side_playing_well_stops_being_rated_on_a_prior_alone():
+    base = team_ratings(PLAYERS, TEAMS).set_index("team_id")
+    now = _current([6, 6, 14, 6, 6], [8, 8, 2, 8, 8], [6000] * 5)
+    updated = team_ratings(PLAYERS, TEAMS, current=now).set_index("team_id")
+    assert updated.loc[3, "att"] > base.loc[3, "att"]
+    assert updated.loc[3, "dfn"] < base.loc[3, "dfn"]
+
+
+def test_one_gameweek_barely_moves_a_rating():
+    """A single result is noise. The blend has to be shrunk by how much
+    football is behind it, or every rating swings wildly in August."""
+    base = team_ratings(PLAYERS, TEAMS).set_index("team_id")
+    now = _current([0, 3, 1, 3, 3], [5, 1, 2, 1, 1], [990] * 5)
+    updated = team_ratings(PLAYERS, TEAMS, current=now).set_index("team_id")
+    assert abs(updated.loc[1, "att"] - base.loc[1, "att"]) < 0.15
+
+
+def test_no_current_season_data_leaves_the_baseline_untouched():
+    base = team_ratings(PLAYERS, TEAMS).set_index("team_id")
+    same = team_ratings(PLAYERS, TEAMS, current=pd.DataFrame()).set_index("team_id")
+    assert same["att"].tolist() == base["att"].tolist()

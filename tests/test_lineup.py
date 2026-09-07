@@ -72,3 +72,50 @@ def test_lineup_xp_counts_captain_twice():
     xp = XP.set_index("player_id")["xp_next1"]
     expected = sum(xp.loc[lu.xi]) + xp.loc[lu.captain]
     assert abs(lu.xp - expected) < 1e-9
+
+
+# --- The armband is worth the vice's points too (2026-09-07 review) ---
+
+def _with_p_play(values, xp_overrides=None):
+    """xp_next1 is UNCONDITIONAL, so a player's appearance odds and his
+    projection have to move together for a fixture to mean anything."""
+    df = XP.copy()
+    df["p_play"] = [values.get(int(p), 1.0) for p in df["player_id"]]
+    for pid, xp in (xp_overrides or {}).items():
+        df.loc[df.player_id == pid, "xp_next1"] = xp
+    return df
+
+
+def test_a_doubtful_captain_is_worth_the_vices_re_roll():
+    """If the captain does not appear at all, the vice's score doubles instead.
+    A captain with a real chance of missing, backed by a strong vice, can be
+    worth more than the top projection on its own -- which picking the top two
+    outright cannot express."""
+    # P8 is a 50/50 on an 18-point ceiling, so 9.0 unconditionally; P13 (8.5)
+    # is nailed.
+    #   C=P8:  9.0 + 0.5 * 8.5 = 13.25
+    #   C=P13: 8.5 + 0.0 * 9.0 =  8.50
+    lu = build_lineup(SQUAD, _with_p_play({8: 0.5}))
+    assert lu.captain == 8
+    assert lu.vice == 13
+
+
+def test_the_re_roll_never_outweighs_a_real_projection():
+    """A fringe starter is absent often enough that the vice would usually
+    inherit the armband, but he brings nothing of his own. P11 at a 20% chance
+    of a 2.0-point cameo is worth 0.4 unconditionally:
+      C=P11: 0.4 + 0.8 * 9.0 = 7.6   vs   C=P8: 9.0 + 0.0 * 8.5 = 9.0
+    """
+    lu = build_lineup(SQUAD, _with_p_play({11: 0.2}, {11: 0.4}))
+    assert lu.captain == 8
+
+
+def test_a_player_who_cannot_appear_is_never_captain():
+    lu = build_lineup(SQUAD, _with_p_play({8: 0.0}))
+    assert lu.captain != 8
+
+
+def test_uniform_appearance_odds_reproduce_the_old_ordering():
+    """Where nobody carries extra risk this must not move the armband."""
+    lu = build_lineup(SQUAD, _with_p_play({}))
+    assert (lu.captain, lu.vice) == (8, 13)

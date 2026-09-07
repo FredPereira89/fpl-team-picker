@@ -3,10 +3,11 @@
 Single joint MILP over squad and starting-XI membership. A two-stage
 "pick 15 then pick 11" would spend budget on bench players who score nothing.
 """
-from dataclasses import dataclass
-import numpy as np
+from dataclasses import dataclass, field
 import pandas as pd
 import pulp
+
+from .objective import add_bench, add_captaincy, captain_bonus, chosen_captains, first_captain
 
 SQUAD_SPLIT = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
 XI_MIN = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
@@ -22,6 +23,9 @@ class Squad:
     total_cost: float
     xp: float
     captain_id: int | None = None
+    # Who wears the armband in each gameweek of the horizon. It is free to move
+    # every week, so a single captain_id describes only the first of them.
+    captains: dict = field(default_factory=dict)
 
 
 def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
@@ -33,7 +37,6 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
     price = dict(zip(ids, pool["price"].astype(float)))
     pos = dict(zip(ids, pool["position"]))
     club = dict(zip(ids, pool["team"]))
-    bench_w = float(np.mean(cfg.bench_weight))
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
     squad = pulp.LpVariable.dicts("squad", ids, cat="Binary")
@@ -41,18 +44,12 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
     # The captain scores twice. Leaving this out of the objective made the
     # solver indifferent between a squad with one high ceiling and a squad of
     # equal total spread flat -- and captaincy is roughly a sixth of a
-    # gameweek's score. Over a multi-gameweek horizon this treats the armband
-    # as staying on one player, which understates the option to move it, but
-    # valuing a ceiling approximately beats not valuing it at all.
-    cap = pulp.LpVariable.dicts("cap", ids, cat="Binary")
+    # gameweek's score. The armband is re-chosen every gameweek, so it is
+    # valued per gameweek whenever the frame carries a per-gameweek breakdown.
+    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, pool, start, cfg, xp_col)
+    bench_terms = add_bench(prob, ids, xp, pos, squad, start, cfg)
 
-    prob += pulp.lpSum(
-        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) + xp[i] * cap[i]
-        for i in ids
-    )
-    prob += pulp.lpSum(cap[i] for i in ids) == 1
-    for i in ids:
-        prob += cap[i] <= start[i]
+    prob += pulp.lpSum(xp[i] * start[i] for i in ids) + bench_terms + cap_terms
 
     prob += pulp.lpSum(price[i] * squad[i] for i in ids) <= cfg.budget
     prob += pulp.lpSum(squad[i] for i in ids) == sum(SQUAD_SPLIT.values())
@@ -81,11 +78,11 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
 
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
-    captain = next((i for i in ids if cap[i].value() > 0.5), None)
     return Squad(
         player_ids=chosen,
         starting_ids=starters,
         total_cost=round(sum(price[i] for i in chosen), 1),
-        xp=round(sum(xp[i] for i in starters) + (xp[captain] if captain else 0.0), 3),
-        captain_id=captain,
+        xp=round(sum(xp[i] for i in starters) + captain_bonus(cap_vars, cap_values), 3),
+        captain_id=first_captain(cap_vars),
+        captains=chosen_captains(cap_vars),
     )

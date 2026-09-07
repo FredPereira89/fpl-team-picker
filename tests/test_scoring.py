@@ -209,3 +209,49 @@ def test_missing_set_piece_columns_are_treated_as_no_duty():
                                 "direct_freekicks_order"])
     out = apply_set_piece_roles(FLAT_RATES, bare, CFG).set_index("player_id")
     assert out.loc[1, "xg90"] == pytest.approx(0.3)
+
+
+# --- model.form_half_life_gw finally does something (2026-09-07 review) ---
+
+def _round_row(pid, rnd, goals, minutes=90):
+    return {"player_id": pid, "round": rnd, "minutes": minutes, "starts": 1,
+            "goals_scored": goals, "assists": 0, "clean_sheets": 0,
+            "goals_conceded": 0, "saves": 0, "bonus": 0, "bps": 0,
+            "yellow_cards": 0, "red_cards": 0, "own_goals": 0,
+            "defensive_contribution": 0, "total_points": 2,
+            "expected_goals": float(goals), "expected_assists": 0.0,
+            "expected_goals_conceded": 0.0}
+
+
+def test_recent_form_outweighs_the_start_of_the_season():
+    """Both players scored the same over four gameweeks; one did it last week.
+    Season-to-date totals cannot tell them apart, which is what
+    model.form_half_life_gw has been sitting in the config to fix."""
+    import pandas as pd
+    from fpl.model.scoring import ew_per90
+    rounds = pd.DataFrame(
+        [_round_row(1, r, g) for r, g in enumerate([4, 0, 0, 0], start=1)]
+        + [_round_row(2, r, g) for r, g in enumerate([0, 0, 0, 4], start=1)]
+    )
+    rates = ew_per90(rounds, Config(form_half_life_gw=2)).set_index("player_id")
+    assert rates.loc[2, "xg90"] > rates.loc[1, "xg90"]
+
+
+def test_a_long_half_life_treats_every_gameweek_alike():
+    import pandas as pd
+    from fpl.model.scoring import ew_per90
+    rounds = pd.DataFrame(
+        [_round_row(1, r, g) for r, g in enumerate([4, 0, 0, 0], start=1)]
+        + [_round_row(2, r, g) for r, g in enumerate([0, 0, 0, 4], start=1)]
+    )
+    rates = ew_per90(rounds, Config(form_half_life_gw=10_000)).set_index("player_id")
+    assert rates.loc[1, "xg90"] == pytest.approx(rates.loc[2, "xg90"], rel=1e-3)
+
+
+def test_weighted_rates_still_count_gameweeks_played():
+    """`form_weight` ramps on how many gameweeks are on record, so the weighted
+    frame has to keep reporting that count."""
+    import pandas as pd
+    from fpl.model.scoring import ew_per90
+    rounds = pd.DataFrame([_round_row(1, r, 1) for r in range(1, 4)])
+    assert int(ew_per90(rounds, Config()).set_index("player_id").loc[1, "gws_played"]) == 3

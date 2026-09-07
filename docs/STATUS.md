@@ -95,9 +95,12 @@ blind spot the model cannot see, and it is the whole reason the override mechani
 
 ### Other standing notes
 
-- `data/state.json` (FT balance / chips used) is written by each `--mode 2` run. It is
-  gitignored, and `reconcile` re-derives the FT count from `entry/{id}/history/` every run
-  anyway, so the file only drives the drift warning — deleting it is safe.
+- `data/state.json` (FT balance, chips used, purchase prices, confirmed squad) is written
+  **only by `--mode 2 --confirm`**; a planning run never touches it. It is tracked in git so
+  a mobile or cloud session gets real purchase prices rather than an empty map. Deleting it
+  is no longer safe: `reconcile` can re-derive the FT count from `entry/{id}/history/`, but
+  nothing can re-derive purchase prices or a squad confirmed for a gameweek FPL has not
+  published yet.
 - ~~**Form blending is dead code.**~~ **Fixed 2026-08-27** — `pipeline.run` now builds a
   `history_current_frame` and passes it to both `blended_rates` and `minutes_model`. The
   model sees 2026/27 form, and a player with no prior-season row is rated on his actual
@@ -123,6 +126,135 @@ blind spot the model cannot see, and it is the whole reason the override mechani
   last season's team ratings.
 
 ## Session log
+
+### 2026-09-07 — two external code reviews, worked through
+
+Two critiques landed in `docs/`: `fpl-team-picker-codex review.md` and
+`repo_critique_gemini_review.md`. Both were checked against the code before anything was
+changed; most of it held up. Implemented, in the order the Codex review recommends (state
+first, forecast quality second, optimizer last):
+
+**State and safety (the P0 that could cost real points)**
+
+- **A spent chip could be recommended again.** `pipeline.run` passed a literal `[]` for
+  `chips_used`. It now takes the chips actually played — local state merged with FPL's own
+  `entry/{id}/history/` chip list, which is the only way a chip played in the app is ever
+  seen. The API names two of them differently (`bboost`, `3xc`), so `state.canonical_chip`
+  translates.
+- **A Wildcard week drained the free-transfer balance.** `reconcile` replayed
+  `event_transfers` with no idea a chip had been played, so a wildcard's dozen transfers
+  emptied a banked balance — and, because a successful history fetch overrides local
+  tracking, the wrong number then replaced the correct one the following week. It now reads
+  the chip history and treats Wildcard/Free Hit gameweeks as balance-preserving.
+- **`--confirm` recorded a squad that contradicted itself.** It moved purchase prices to the
+  new players while leaving `squad` naming the old ones. It now records the squad, bank and
+  gameweek actually applied — and `--applied-squad` / `--applied-chip` say so when what you
+  did differs from what was advised, instead of the tool assuming every recommendation was
+  taken.
+- **Re-planning a confirmed gameweek invented a free transfer.** After `--confirm`,
+  `free_transfers` is *next* week's balance, with the weekly +1 already accrued.
+  `free_transfers_remaining` now tracks what is left inside the gameweek itself.
+- Chips are stored with the gameweek they were played in, not as a bare name list.
+
+**Configuration that did nothing**
+
+- `data.cache_ttl_matchday_hours` is wired: fixtures are fetched first, and on a matchday
+  every other TTL drops to it. Prices, news and availability move hour to hour then.
+- `news.max_age_hours` is wired: overrides carry a `checked_at` date and a stale one is
+  flagged loudly on every run. Deliberately still applied — the minutes model cannot make
+  these corrections for itself, so silently dropping one is worse than shouting about it.
+- `model.form_half_life_gw` is wired: current-season rates are now weighted toward recent
+  matches (`scoring.ew_per90`) instead of counting August the same as last Saturday.
+- `odds.provider` is rejected at config load, the same way the unimplemented risk profiles
+  already are. No provider exists; accepting a value silently did nothing.
+
+**Forecast**
+
+- **Saves and goals conceded are threshold-scored.** FPL pays 1 point per *three* saves and
+  deducts 1 per *two* conceded; the model used `E[N]/k`, which over-credits saves by about a
+  third of a point a match and over-punishes the concession by about a quarter — opposite
+  errors, both landing on keepers. Now `E[floor(N/k)]` under a Poisson count.
+- **Saves respond to the opponent.** A keeper's saves are the opponent's shots, so they now
+  scale with `opp_threat` (this fixture's expected goals conceded against an average one).
+- **`p_60` is no longer `p_start`.** Reaching the hour needs a start *and* the hour; the old
+  equality paid a full clean sheet to a player habitually withdrawn on 55. Minutes per start
+  and the share of starts lasting 60 are estimated per player from per-match history
+  (`normalize.history_rounds_frame`), shrunk to a league rate.
+- **Team ratings react to this season.** They were built from the completed season alone, so
+  a new manager, a rebuilt defence or a promoted side kept last May's rating until July.
+  Blended in by how much football is behind it (half weight at ~9 games).
+
+**Optimizer**
+
+- **The bench is ordered again.** Both solvers replaced the four configured slot weights with
+  their mean, pricing Bench 3 like Bench 1 and buying a £4.5m fourth substitute instead of
+  upgrading the XI. Explicit slots now carry the configured weights: `bench_weight` is
+  [bench 1, bench 2, bench 3, reserve keeper].
+- **The armband moves week to week.** `model.xp` emits `xp_gw{event}` columns and the solvers
+  choose a captain per gameweek, so a one-week fixture spike is no longer valued as though it
+  had to be captained for five. Both the bench-slot and captain variables are continuous:
+  for a fixed XI each sub-problem is integral anyway, so it costs the solver nothing.
+  Measured on the real GW4 frame: 0.8s for a full squad build, 1.5s for the transfer search.
+- **The vice-captain is worth something.** `choose_captain` maximises
+  `xp[c] + P(c does not appear) * xp[v]` — Codex's refinement of the Gemini item, keyed on no
+  appearance rather than `1 - p_start`, because a captain who comes off the bench for ten
+  minutes keeps the armband.
+
+**Validation**
+
+- Every forecast is versioned immutably under `data/predictions/versions/`, carrying its
+  creation time, model version, config fingerprint and the timestamps of the data snapshots
+  it read. Overwriting `gw{n}.parquet` destroyed the forecast the optimizer acted on the
+  moment anything was re-run.
+- A score taken before FPL has checked every fixture is labelled PROVISIONAL.
+
+**Provisional data on the INPUT side — the gap the above left open**
+
+The PROVISIONAL work above covers scoring. The same distinction was still missing where the
+model READS history: `data_complete_after` only requires a snapshot to postdate the last
+kickoff + 3h, so it answers "has the football been played", not "has FPL checked it". A
+snapshot taken between a gameweek's final whistle and FPL's bonus/stat review passed that
+test and was then trusted for the rest of its 30-day TTL.
+
+- **Measured before changing anything, and it had not bitten.** GW3's last kickoff was
+  2026-09-06 15:30 UTC; the cached summaries were taken 19:37-19:58, while GW3 was still
+  `finished: false, finished_provisional: true`. Re-fetched 33 players (the whole squad plus
+  the top 25 by GW3 BPS, where bonus disputes live) and **not one number had changed** — the
+  data settled before the flag flipped. The GW4 forecast was built on final GW3 returns.
+- **No timestamp can establish this**, so the snapshot now records it: `Cache.put(meta=...)`
+  writes a `.meta` sidecar carrying `final_through`, the highest gameweek FPL had fully
+  `finished` at capture time, and `get_fresh(require_final_through=N)` refuses a snapshot
+  that predates the check.
+- Snapshots written before this mechanism have no marker. They are still used — refusing
+  them would re-fetch 650 players for data that is usually already settled — and the report
+  carries a line saying the history could not be verified (`pipeline.freshness_flags`,
+  keyed on `settled_after`, last kickoff + 6h).
+- The element-summary cache was re-fetched once by hand after GW3 went final so it carries
+  the marker; that re-fetch also served as a second, full-pool check that nothing moved.
+
+**Argued against, with reasons**
+
+- *Fold the transfer-count loop into one MILP (Gemini 4).* The loop already enumerates every
+  count from 0 to `free_transfers + max_paid_hits` and takes the best net xP. Hit cost depends
+  only on the count, so this is the same global optimum — four CBC solves, not a modelling
+  flaw.
+- *Async player-history fetching (Gemini 5).* The 1 req/s throttle is deliberate. The 30-day
+  element-summary TTL plus the `not_before` floor means cold fetches are rare, and the
+  trade is a ban risk for a path that is already fast enough.
+- *Vice-captaincy as a linear MILP approximation (Gemini 1).* Its premise — that the solver
+  "assumes 0 captaincy points" for a rotation risk — is wrong: `xp` is unconditional, so a
+  `p_start=0.5` captain already contributes half. The real missing term is vice inheritance,
+  which belongs in lineup selection where it can be computed exactly.
+
+**Still not done, deliberately** — bonus rebuilt from projected BPS (needs a 22-player
+within-match BPS ranking model, and `model/bps.py` still carries `bonus90` forward), the
+ownership-weighted rank objective, and the full multi-period MILP over transfers, bank and
+chip timing. Per-gameweek captaincy is the first slice of that last one; weekly lineups and
+the transfer path across the horizon are not.
+
+361 tests pass. End-to-end run against the live cache reproduces the GW4 squad with no
+transfer (0 FT), and both team-news overrides now report themselves stale (297h and 273h
+against a 48h budget).
 
 ### 2026-08-31 — GW2 retrospective, and a second out-of-sample score
 
@@ -353,4 +485,10 @@ Per-player actuals (XI only, mult × pts):
    played 45 minutes for 0 points, and the Enzo alternative did not play at all. Re-check
    once a few GWs of 2026/27 data accumulate; his minutes override expires at GW6.
 4. Re-run `python scripts/score_gameweek.py --gw 2` once GW2 is `data_checked` — the recorded
-   verdict was scored on provisional bonus, so a point or two may still move.
+   verdict was scored on provisional bonus, so a point or two may still move. The script now
+   labels this for itself: a verdict taken before every fixture in the gameweek is `finished`
+   opens with a PROVISIONAL line, which the weekly report then quotes.
+5. **Re-verify the two team-news overrides.** Both are now dated (`checked_at`) and both are
+   flagged stale on every run — the evidence behind them is from 2026-08-26/27 against a
+   48-hour `news.max_age_hours`. They are still applied; the warning is the prompt to either
+   re-check Saliba/Timber and Tzolis or drop the entries.

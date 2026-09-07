@@ -40,7 +40,18 @@ def team_fixture_frame(fixtures: pd.DataFrame, ratings: pd.DataFrame,
                 "p_cs": float(np.exp(-xgc)),
                 "att_mult": float(r.loc[team_id, "att"]) * float(r.loc[opp_id, "dfn"]) * venue,
             })
-    return pd.DataFrame(rows).reset_index(drop=True)
+    out = pd.DataFrame(rows).reset_index(drop=True)
+    if len(out):
+        # How much shooting this team faces relative to an average fixture. A
+        # goalkeeper's saves are the opponent's shots, so a save rate carried
+        # forward unadjusted rates a keeper facing the champions exactly as one
+        # facing the worst attack in the league -- which is most of why the
+        # goalkeeper projection had no measurable rank skill.
+        mean_xgc = float(out["xgc"].mean())
+        out["opp_threat"] = (out["xgc"] / mean_xgc) if mean_xgc > 0 else 1.0
+    else:
+        out["opp_threat"] = pd.Series(dtype="float64")
+    return out
 
 
 def fixture_counts(fixtures: pd.DataFrame, team_ids, from_event: int,

@@ -75,6 +75,14 @@ def load_config(path: Path) -> Config:
             f"wired into the optimizer -- ownership_weight has no effect yet. "
             f"Use 'balanced' for now."
         )
+    if cfg.odds_provider is not None:
+        raise ValueError(
+            f"odds.provider={cfg.odds_provider!r} is accepted by the schema but no "
+            f"provider is implemented -- the pipeline never passes one to "
+            f"model.strength.team_ratings, so setting this would silently do "
+            f"nothing. Leave it null (team_ratings still takes an injected "
+            f"provider object for tests and future use)."
+        )
     if not 0 <= cfg.free_transfers <= FT_CAP:
         raise ValueError(f"free_transfers must be 0..{FT_CAP}, got {cfg.free_transfers}")
     if cfg.start_prior_games <= 0:

@@ -169,3 +169,125 @@ def test_resolved_squad_carries_the_recorded_purchase_prices(tmp_path):
                      purchase_prices={1: 4.5}), path)
     live, _ = resolve_current_squad(cfg, gw=2, state_path=path, client=FakeClient(picks=PICKS, history=HISTORY_NO_TRANSFERS))
     assert live.purchase_prices == {1: 4.5}
+
+
+# --- Confirmation records what was applied (2026-09-07 review) ---
+
+NEW_SQUAD = list(range(200, 215))
+
+
+def test_confirming_records_the_squad_that_was_actually_applied(tmp_path):
+    """Recording the transfer COUNT without the squad left state contradicting
+    itself: purchase prices moved to the new players while `squad` still named
+    the old ones, so a re-run before the deadline planned from the wrong 15."""
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    written = record_transfers(path, cfg, gw=4, transfers_made=1, chip=None,
+                               purchase_prices={i: 5.0 for i in NEW_SQUAD},
+                               squad=NEW_SQUAD, bank=0.7)
+    back = load_state(path, cfg)
+    assert back.squad == NEW_SQUAD
+    assert back.squad_event == 4
+    assert back.bank == 0.7
+    assert written.squad == NEW_SQUAD
+
+
+def test_confirming_without_a_squad_leaves_the_recorded_one_alone(tmp_path):
+    """A Mode 1 rebuild or a legacy call says nothing about what is owned."""
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    save_state(State(free_transfers=1, last_event=3, chips_used=[],
+                     squad=[1, 2, 3], squad_event=4, bank=0.2), path)
+    record_transfers(path, cfg, gw=4, transfers_made=1, chip=None)
+    back = load_state(path, cfg)
+    assert back.squad == [1, 2, 3]
+    assert back.squad_event == 4
+
+
+def test_replanning_a_confirmed_gameweek_does_not_hand_back_the_accrued_transfer(tmp_path):
+    """After confirming GW4, `free_transfers` is GW5's balance -- the weekly +1
+    has already accrued. Re-planning GW4 with that number offered a transfer
+    that was already spent, and the optimizer took it for free."""
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=1, free_transfers=1)
+    save_state(State(free_transfers=1, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), path)
+    record_transfers(path, cfg, gw=4, transfers_made=1, chip=None,
+                     squad=NEW_SQUAD, bank=0.0)
+
+    live, _ = resolve_current_squad(cfg, gw=4, state_path=path,
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.current_squad == NEW_SQUAD
+    assert live.free_transfers == 0
+    assert load_state(path, cfg).free_transfers == 1  # still 1 waiting for GW5
+
+
+def test_replanning_a_confirmed_wildcard_gameweek_keeps_the_balance(tmp_path):
+    """A Wildcard spends no free transfer, so re-planning that gameweek must
+    still show the banked balance -- not zero."""
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=1, free_transfers=2)
+    save_state(State(free_transfers=2, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), path)
+    record_transfers(path, cfg, gw=4, transfers_made=11, chip="wildcard",
+                     squad=NEW_SQUAD, bank=0.0)
+
+    live, _ = resolve_current_squad(cfg, gw=4, state_path=path,
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.free_transfers == 2
+    assert live.chips_used == ["wildcard"]
+
+
+def test_replanning_a_confirmed_free_hit_gameweek_keeps_the_balance(tmp_path):
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=1, free_transfers=2)
+    save_state(State(free_transfers=2, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), path)
+    record_transfers(path, cfg, gw=4, transfers_made=9, chip="freehit",
+                     squad=NEW_SQUAD, bank=0.0)
+
+    live, _ = resolve_current_squad(cfg, gw=4, state_path=path,
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.free_transfers == 2
+    assert live.chips_used == ["freehit"]
+
+
+def test_confirming_records_the_gameweek_a_chip_was_played_in(tmp_path):
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    record_transfers(path, cfg, gw=7, transfers_made=0, chip="benchboost")
+    assert load_state(path, cfg).chip_events == [{"chip": "benchboost", "event": 7}]
+
+
+def test_resolved_squad_reports_chips_fpl_says_are_already_played(tmp_path):
+    """A chip played in the FPL app never touches local state. Without reading
+    the API's chip list the advisor recommends it again the following week."""
+    history = dict(HISTORY_NO_TRANSFERS, chips=[{"name": "3xc", "event": 1}])
+    live, _ = resolve_current_squad(Config(entry_id=1), gw=2,
+                                    state_path=tmp_path / "state.json",
+                                    client=FakeClient(PICKS, history))
+    assert live.chips_used == ["triplecaptain"]
+    assert any("triplecaptain" in w for w in live.warnings)
+
+
+def test_no_chips_played_means_no_chip_warning(tmp_path):
+    live, _ = resolve_current_squad(Config(entry_id=1), gw=2,
+                                    state_path=tmp_path / "state.json",
+                                    client=FakeClient(PICKS, HISTORY_NO_TRANSFERS))
+    assert live.chips_used == []
+    assert live.warnings == []
+
+
+def test_confirming_persists_a_chip_fpl_played_outside_this_tool(tmp_path):
+    """A chip played in the FPL app reaches the advisor through the API merge;
+    it has to survive into local state too, or the next confirmation drops it."""
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=1, free_transfers=1)
+    history = dict(HISTORY_NO_TRANSFERS, chips=[{"name": "bboost", "event": 1}])
+    live, _ = resolve_current_squad(cfg, gw=2, state_path=path,
+                                    client=FakeClient(PICKS, history))
+    record_transfers(path, cfg, gw=2, transfers_made=1, chip=None,
+                     squad=NEW_SQUAD, bank=0.0, api_chips=live.chip_events)
+    back = load_state(path, cfg)
+    assert back.chips_used == ["benchboost"]
+    assert back.chip_events == [{"chip": "benchboost", "event": 1}]

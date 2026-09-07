@@ -145,3 +145,46 @@ def test_a_new_signing_who_starts_stops_being_priced_off_his_transfer_fee():
 def test_an_unavailable_player_is_still_zeroed_whatever_his_form():
     after = minutes_model(PLAYERS, CFG, current=CURRENT_STARTS).set_index("player_id")
     assert after.loc[3, "p_start"] == 0.0
+
+
+# --- Sixty minutes is not the same event as starting (2026-09-07 review) ---
+
+def _rounds(pid, minutes_per_start):
+    return pd.DataFrame([
+        {"player_id": pid, "round": r, "starts": 1, "minutes": m,
+         "goals_scored": 0, "assists": 0, "clean_sheets": 0, "goals_conceded": 0,
+         "saves": 0, "bonus": 0, "bps": 0, "yellow_cards": 0, "red_cards": 0,
+         "own_goals": 0, "defensive_contribution": 0, "total_points": 2}
+        for r, m in enumerate(minutes_per_start, start=1)
+    ])
+
+
+def test_p60_is_below_p_start_because_starts_do_not_all_last_the_hour():
+    """`p_60 = p_start` paid a full clean sheet to every starter, including one
+    who is habitually withdrawn before the hour."""
+    df = minutes_model(PLAYERS, CFG).set_index("player_id")
+    assert df.loc[1, "p_60"] < df.loc[1, "p_start"]
+    assert df.loc[1, "p_60"] > 0.5 * df.loc[1, "p_start"]
+
+
+def test_a_player_hooked_early_every_week_reaches_sixty_less_often():
+    hooked = _rounds(1, [55, 50, 58, 52, 57, 49, 54, 51])
+    lasted = _rounds(1, [90, 88, 90, 90, 85, 90, 90, 90])
+    early = minutes_model(PLAYERS, CFG, rounds=hooked).set_index("player_id")
+    full = minutes_model(PLAYERS, CFG, rounds=lasted).set_index("player_id")
+    assert early.loc[1, "p_60"] < full.loc[1, "p_60"]
+    assert early.loc[1, "e_minutes"] < full.loc[1, "e_minutes"]
+
+
+def test_expected_minutes_follow_the_players_own_starts_not_a_constant():
+    """M_START was a flat 80 for everyone. A player who plays the full 90 every
+    week and one who is always withdrawn on 55 are not the same asset."""
+    full = minutes_model(PLAYERS, CFG, rounds=_rounds(1, [90] * 10)).set_index("player_id")
+    assert full.loc[1, "e_minutes"] > M_START * float(full.loc[1, "p_start"])
+
+
+def test_without_per_round_history_the_league_defaults_stand():
+    """Pre-season there are no rounds to learn from; the model must still run."""
+    df = minutes_model(PLAYERS, CFG, rounds=None).set_index("player_id")
+    assert 0 < df.loc[1, "p_60"] <= df.loc[1, "p_start"]
+    assert df.loc[1, "e_minutes"] > 0

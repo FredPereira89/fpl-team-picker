@@ -126,3 +126,69 @@ def test_scored_summary_persists_for_the_next_run(tmp_path):
 
 def test_no_scored_summary_yet_reads_as_absent(tmp_path):
     assert load_scored_summary(root=tmp_path) is None
+
+
+# --- Reproducible forecast versions (2026-09-07 review) ---
+
+def test_every_write_keeps_an_immutable_copy(tmp_path):
+    """Overwriting gw{n}.parquet destroyed the forecast the optimizer actually
+    acted on the moment anything was re-run -- including the pre-deadline one a
+    mid-week team-news update replaced."""
+    from datetime import datetime, timezone
+    from fpl.backtest.ledger import forecast_versions
+    first = datetime(2026, 9, 1, 10, tzinfo=timezone.utc)
+    second = datetime(2026, 9, 2, 10, tzinfo=timezone.utc)
+    save_predictions(PRED, gw=4, root=tmp_path, created_at=first)
+    revised = PRED.copy()
+    revised["xp_next1"] = revised["xp_next1"] + 1.0
+    save_predictions(revised, gw=4, root=tmp_path, created_at=second)
+
+    versions = forecast_versions(4, tmp_path)
+    assert len(versions) == 2
+    earlier = pd.read_parquet(versions[0])
+    assert earlier["xp_next1"].tolist() == PRED["xp_next1"].tolist()
+    # the canonical file is the latest, which is what the scorer reads
+    assert load_predictions(4, tmp_path)["xp_next1"].tolist() == revised["xp_next1"].tolist()
+
+
+def test_a_forecast_records_when_and_under_what_settings_it_was_made(tmp_path):
+    from fpl.config import Config
+    from fpl.backtest.ledger import MODEL_VERSION, config_fingerprint
+    cfg = Config(horizon_gw=5)
+    save_predictions(PRED, gw=4, root=tmp_path, cfg=cfg,
+                     sources={"bootstrap-static": "2026-09-01T10:00:00Z"})
+    row = load_predictions(4, tmp_path).iloc[0]
+    assert row["model_version"] == MODEL_VERSION
+    assert row["config_hash"] == config_fingerprint(cfg)
+    assert "bootstrap-static" in row["sources"]
+    assert row["created_at"]
+
+
+def test_the_same_settings_fingerprint_the_same_way():
+    from fpl.config import Config
+    from fpl.backtest.ledger import config_fingerprint
+    assert config_fingerprint(Config()) == config_fingerprint(Config())
+    assert config_fingerprint(Config(horizon_gw=5)) != config_fingerprint(Config(horizon_gw=3))
+
+
+def test_a_gameweek_is_final_only_once_fpl_has_checked_every_fixture():
+    """`finished_provisional` flips at the whistle; bonus and stat corrections
+    land after `finished`."""
+    from fpl.backtest.ledger import gameweek_is_final
+    played = [{"event": 3, "finished": True, "finished_provisional": True},
+              {"event": 3, "finished": True, "finished_provisional": True}]
+    whistle = [{"event": 3, "finished": True, "finished_provisional": True},
+               {"event": 3, "finished": False, "finished_provisional": True}]
+    assert gameweek_is_final(played, 3) is True
+    assert gameweek_is_final(whistle, 3) is False
+    assert gameweek_is_final([], 3) is False
+
+
+def test_a_provisional_score_says_so_at_the_top():
+    """The weekly report quotes this verdict verbatim, so an unfinished
+    gameweek must not read as a settled measurement."""
+    actuals = pd.DataFrame({"player_id": [1, 2, 3, 4], "actual": [6.0, 2.0, 8.0, 1.0],
+                            "minutes": [90, 90, 90, 0]})
+    scored = score_gameweek(PRED, actuals)
+    assert scored_summary(scored, 3, provisional=True).startswith("PROVISIONAL")
+    assert not scored_summary(scored, 3).startswith("PROVISIONAL")

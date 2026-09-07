@@ -21,7 +21,41 @@ class FplClient:
         self.rate_limit_s = rate_limit_s
         self.session = session or requests.Session()
         self.stale = False
+        # When each payload this run used was captured. A forecast is only
+        # reproducible if it records which snapshots it read: "the model got
+        # worse" and "the model was handed a week-old bootstrap" look identical
+        # in the score ledger otherwise.
+        self.sources: dict[str, str] = {}
+        # Recorded alongside every snapshot this client writes. `final_through`
+        # says which gameweeks FPL had finished CHECKING at capture time, which
+        # a timestamp cannot express and a later reader cannot recover.
+        self.snapshot_meta: dict = {}
+        # Slugs served from a snapshot too old to carry a `final_through`
+        # marker, when one was asked for.
+        self.unverified: set[str] = set()
         self._last_call = 0.0
+
+    def _record_source(self, slug: str) -> None:
+        ts = self.cache.newest_stamp(slug)
+        if ts is not None:
+            self.sources[slug] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def source_summary(self) -> dict:
+        """Snapshot times, with the per-player summaries collapsed to a range.
+
+        Seven hundred element-summary entries say nothing a first-and-last pair
+        does not, and would dwarf the forecast they annotate.
+        """
+        out, summaries = {}, []
+        for slug, ts in self.sources.items():
+            if slug.startswith("element-summary-"):
+                summaries.append(ts)
+            else:
+                out[slug] = ts
+        if summaries:
+            out["element-summary"] = {"oldest": min(summaries), "newest": max(summaries),
+                                      "n": len(summaries)}
+        return out
 
     def _throttle(self) -> None:
         if self.rate_limit_s:
@@ -31,10 +65,20 @@ class FplClient:
             self._last_call = time.monotonic()
 
     def _get(self, path: str, slug: str, ttl_hours: float | None = None,
-             not_before=None):
+             not_before=None, require_final_through=None):
         ttl = self.ttl_hours if ttl_hours is None else ttl_hours
-        cached = self.cache.get_fresh(slug, ttl, not_before=not_before)
+        cached = self.cache.get_fresh(slug, ttl, not_before=not_before,
+                                      require_final_through=require_final_through)
         if cached is not None:
+            self._record_source(slug)
+            # Served a snapshot that predates the `final_through` marker, so it
+            # cannot say whether it was taken before or after FPL's data check.
+            # It is still used -- refusing every pre-marker snapshot would
+            # re-fetch 650 players for data that is usually settled -- but the
+            # caller is told, so a report can carry the caveat.
+            if (require_final_through is not None
+                    and "final_through" not in self.cache.newest_meta(slug)):
+                self.unverified.add(slug)
             return cached
         url = BASE + path
         if any(f in url.lower() for f in FORBIDDEN):
@@ -49,9 +93,11 @@ class FplClient:
             if fallback is None:
                 raise
             self.stale = True
+            self._record_source(slug)
             return fallback[0]
-        self.cache.put(slug, payload)
+        self.cache.put(slug, payload, meta=self.snapshot_meta or None)
         self.cache.prune(slug, keep=3)
+        self._record_source(slug)
         return payload
 
     def bootstrap(self) -> dict:
@@ -61,12 +107,14 @@ class FplClient:
         return self._get("fixtures/", "fixtures")
 
     def element_summary(self, player_id: int, ttl_hours: float | None = None,
-                        not_before=None) -> dict:
+                        not_before=None, require_final_through=None) -> dict:
         return self._get(f"element-summary/{player_id}/", f"element-summary-{player_id}",
-                         ttl_hours=ttl_hours, not_before=not_before)
+                         ttl_hours=ttl_hours, not_before=not_before,
+                         require_final_through=require_final_through)
 
     def element_summaries(self, player_ids, ttl_hours: float = HISTORY_TTL_H,
-                          progress=None, not_before=None) -> dict[int, dict]:
+                          progress=None, not_before=None,
+                          require_final_through=None) -> dict[int, dict]:
         """Fetch many element-summaries, tolerating individual failures.
 
         The long default TTL dates from when `history_past` was the only field
@@ -84,8 +132,9 @@ class FplClient:
         ids = list(player_ids)
         for i, pid in enumerate(ids):
             try:
-                out[int(pid)] = self.element_summary(int(pid), ttl_hours=ttl_hours,
-                                                     not_before=not_before)
+                out[int(pid)] = self.element_summary(
+                    int(pid), ttl_hours=ttl_hours, not_before=not_before,
+                    require_final_through=require_final_through)
             except Exception:
                 self.stale = True
             if progress:

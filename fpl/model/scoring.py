@@ -53,6 +53,35 @@ def current_per90(current: pd.DataFrame) -> pd.DataFrame:
 
 RATE_COLUMNS = list(RATE_SPECS) + ["cards90"]
 
+
+def ew_per90(rounds: pd.DataFrame, cfg) -> pd.DataFrame:
+    """Season-to-date per-90 rates, weighted toward recent matches.
+
+    `current_per90` treats a goal in August exactly like a goal last Saturday.
+    `model.form_half_life_gw` has been in the config since the first commit to
+    say how fast that should decay, and until now nothing read it: the weight
+    on "form" was decided only by how MANY gameweeks were on record, never by
+    which ones. Weights halve every `form_half_life_gw` rounds, applied to both
+    the stat and the minutes so the ratio stays a rate.
+
+    Deliberately unshrunk, exactly like `current_per90`: how much this season
+    counts at all is decided once, by `form_weight`.
+    """
+    df = rounds.copy()
+    df["_cards"] = df["yellow_cards"] + 3 * df["red_cards"]
+    half_life = max(float(cfg.form_half_life_gw), 1e-9)
+    latest = float(df["round"].max())
+    w = 0.5 ** ((latest - df["round"].astype(float)) / half_life)
+    weighted_minutes = (w * df["minutes"].astype(float)).groupby(df["player_id"]).sum()
+
+    out = {"player_id": weighted_minutes.index.astype(int),
+           "gws_played": df.groupby("player_id")["round"].nunique().astype(int)}
+    for name, source in dict(RATE_SPECS, cards90="_cards").items():
+        totals = (w * df[source].astype(float)).groupby(df["player_id"]).sum()
+        out[name] = np.where(weighted_minutes > 0,
+                             totals / np.maximum(weighted_minutes, 1e-9) * 90.0, 0.0)
+    return pd.DataFrame(out).reset_index(drop=True)
+
 # What a designated taker is worth per 90, over and above open play. A club wins
 # roughly one penalty every eight matches and converts about four in five.
 PENALTY_XG90 = 0.10
@@ -108,19 +137,26 @@ def apply_set_piece_roles(rates: pd.DataFrame, players: pd.DataFrame, cfg) -> pd
     return out
 
 
-def blended_rates(players: pd.DataFrame, current: pd.DataFrame | None, cfg) -> pd.DataFrame:
+def blended_rates(players: pd.DataFrame, current: pd.DataFrame | None, cfg,
+                  rounds: pd.DataFrame | None = None) -> pd.DataFrame:
     """Last season's shrunk baseline, blended with season-to-date output.
 
     Before 2026-08-27 this blend existed (blend_form / form_weight) but nothing
     called it, so the model ran entirely on the previous season and could not
     see the current one at all -- which is also why a summer signing with no
     prior Premier League row was rated at the positional mean forever.
+
+    Given `rounds` (per-match history) the current-season side is weighted
+    toward recent matches at `model.form_half_life_gw`; without it, every
+    gameweek so far counts the same.
     """
     base = per90_rates(players, cfg)
-    if current is None or len(current) == 0:
+    if rounds is not None and len(rounds):
+        cur = ew_per90(rounds, cfg).set_index("player_id")
+    elif current is not None and len(current):
+        cur = current_per90(current).set_index("player_id")
+    else:
         return apply_set_piece_roles(base, players, cfg)
-
-    cur = current_per90(current).set_index("player_id")
     out = base.copy()
     for i, pid in enumerate(out["player_id"].astype(int)):
         if pid not in cur.index:

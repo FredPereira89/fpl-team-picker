@@ -9,7 +9,7 @@ import pandas as pd
 import pulp
 
 from .squad import SQUAD_SPLIT, XI_MIN, XI_MAX, XI_SIZE, MAX_PER_CLUB
-import numpy as np
+from .objective import add_bench, add_captaincy, captain_bonus
 
 
 def selling_price(purchase: float, now: float) -> float:
@@ -26,6 +26,23 @@ def selling_price(purchase: float, now: float) -> float:
         return now
     rise_steps = round((now - purchase) * 10)
     return round(purchase + (rise_steps // 2) / 10.0, 1)
+
+
+def bank_after(bank: float, current_squad, new_squad, prices: dict[int, float],
+               purchase_prices: dict[int, float] | None = None) -> float:
+    """Cash left after swapping `current_squad` for `new_squad`.
+
+    Proceeds are SELLING prices, not market prices: a player who has risen 0.3
+    returns 0.1 of it. Retained players cancel out, so only the players who
+    actually changed hands move money.
+    """
+    cur = {int(i) for i in current_squad}
+    new = {int(i) for i in new_squad}
+    sold, bought = cur - new, new - cur
+    proceeds = sum(
+        selling_price((purchase_prices or {}).get(i, prices[i]), prices[i]) for i in sold
+    )
+    return round(float(bank) + proceeds - sum(prices[i] for i in bought), 1)
 
 
 @dataclass
@@ -49,22 +66,17 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
     cost = cost or price
     pos = dict(zip(ids, xp_df["position"]))
     club = dict(zip(ids, xp_df["team"]))
-    bench_w = float(np.mean(cfg.bench_weight))
     current_set = set(int(i) for i in current)
 
     prob = pulp.LpProblem("fpl_transfers", pulp.LpMaximize)
     squad = pulp.LpVariable.dicts("squad", ids, cat="Binary")
     start = pulp.LpVariable.dicts("start", ids, cat="Binary")
-    # Captaincy doubles one starter -- see optimize.squad for why it belongs in
-    # the objective rather than being applied after the fact.
-    cap = pulp.LpVariable.dicts("cap", ids, cat="Binary")
-    prob += pulp.lpSum(
-        xp[i] * start[i] + bench_w * xp[i] * (squad[i] - start[i]) + xp[i] * cap[i]
-        for i in ids
-    )
-    prob += pulp.lpSum(cap[i] for i in ids) == 1
-    for i in ids:
-        prob += cap[i] <= start[i]
+    # Captaincy doubles one starter, and the bench pays out in substitution
+    # order -- see optimize.objective for why both belong in the objective
+    # rather than being applied after the fact or averaged away.
+    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, xp_df, start, cfg, xp_col)
+    bench_terms = add_bench(prob, ids, xp, pos, squad, start, cfg)
+    prob += pulp.lpSum(xp[i] * start[i] for i in ids) + bench_terms + cap_terms
     prob += pulp.lpSum(cost.get(i, price[i]) * squad[i] for i in ids) <= budget
     prob += pulp.lpSum(squad[i] for i in ids) == sum(SQUAD_SPLIT.values())
     prob += pulp.lpSum(start[i] for i in ids) == XI_SIZE
@@ -84,8 +96,8 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
         return None
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
-    captain = next((i for i in ids if cap[i].value() > 0.5), None)
-    return chosen, starters, sum(xp[i] for i in starters) + (xp[captain] if captain else 0.0)
+    gross = sum(xp[i] for i in starters) + captain_bonus(cap_vars, cap_values)
+    return chosen, starters, gross
 
 
 def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: float,

@@ -122,6 +122,32 @@ def history_past_frame(summaries: dict[int, dict]) -> pd.DataFrame:
     return pd.DataFrame(rows).fillna(0).reset_index(drop=True)
 
 
+def history_rounds_frame(summaries: dict[int, dict], before_event: int) -> pd.DataFrame:
+    """One row per player per match played, strictly before `before_event`.
+
+    `history_current_frame` collapses the same data to season totals, which
+    answers "how much" but never "when" or "how often". Three questions need
+    the rounds themselves: whether recent matches should count for more than
+    August's (model.scoring.ew_per90), how often a start actually lasts 60
+    minutes, and how long a start actually lasts (model.minutes). A double
+    gameweek gives a player two rows in one round, which is what happened.
+    """
+    rows = []
+    for pid, summary in (summaries or {}).items():
+        for h in summary.get("history", []):
+            rnd = int(h.get("round", 0))
+            if rnd >= int(before_event):
+                continue
+            row = {"player_id": int(pid), "round": rnd}
+            for c in PLAYER_INT_COLS + FLOAT_COLS:
+                row[c] = pd.to_numeric(h.get(c, 0), errors="coerce")
+            rows.append(row)
+    cols = ["player_id", "round"] + PLAYER_INT_COLS + FLOAT_COLS
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)[cols].fillna(0).reset_index(drop=True)
+
+
 def history_current_frame(summaries: dict[int, dict], before_event: int) -> pd.DataFrame:
     """Season-to-date totals per player, from element-summary `history`.
 

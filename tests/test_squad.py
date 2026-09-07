@@ -140,3 +140,95 @@ def test_captain_is_the_best_starter_available():
     s = optimize_squad(POOL, CFG)
     starters = POOL[POOL.player_id.isin(s.starting_ids)].set_index("player_id")
     assert starters.loc[s.captain_id, "xp_next5"] == starters.xp_next5.max()
+
+
+# --- Ordered bench slots and a per-gameweek armband (2026-09-07 review) ---
+
+def _bench_choice_pool():
+    """A pool where the squad is forced except for three bench slots, and the
+    budget leaves exactly £16.0m for them.
+
+    Two affordable bench sets total the same 6 xP: one concentrated on the
+    first substitute (6/0/0) and one spread flat (2/2/2). Averaging the four
+    configured bench weights -- which both solvers did -- scores those two
+    identically. Substitutions run in bench order, so they are not the same:
+    Bench 1 comes on most weeks and Bench 3 almost never.
+    """
+    rows, pid = [], 1
+
+    def add(pos, xp, price, team):
+        nonlocal pid
+        rows.append({"player_id": pid, "web_name": f"P{pid}", "team": team,
+                     "position": pos, "price": price, "xp_next1": xp,
+                     "xp_next5": xp, "p_start": 0.9, "e_minutes": 80.0,
+                     "confidence": "high", "flags": []})
+        pid += 1
+        return pid - 1
+
+    # Starting XI plus the reserve keeper: 12 players at 4.0 = 48.0.
+    core = 0
+    for pos, n in [("GKP", 1), ("DEF", 3), ("MID", 5), ("FWD", 2)]:
+        for _ in range(n):
+            add(pos, 10.0, 4.0, f"CORE{core // 3}")
+            core += 1
+    add("GKP", 0.5, 4.0, "GKX")
+    # 8.0 + 4.0 + 4.0 = 16.0 exactly
+    spike = [add("DEF", 6.0, 8.0, "SPIKE1"), add("DEF", 0.0, 4.0, "SPIKE2"),
+             add("FWD", 0.0, 4.0, "SPIKE3")]
+    # 5.3 x 3 = 15.9, also affordable; any mix of the two sets is not.
+    flat = [add("DEF", 2.0, 5.3, "FLAT1"), add("DEF", 2.0, 5.3, "FLAT2"),
+            add("FWD", 2.0, 5.3, "FLAT3")]
+    return pd.DataFrame(rows), flat, spike
+
+
+def test_bench_budget_goes_to_the_first_substitute_not_spread_flat():
+    pool, flat, spike = _bench_choice_pool()
+    s = optimize_squad(pool, Config(budget=64.0, bench_weight=[0.5, 0.1, 0.05, 0.02]),
+                       xp_col="xp_next5")
+    assert set(spike).issubset(set(s.player_ids))
+    assert not set(flat) & set(s.player_ids)
+
+
+def _horizon_pool():
+    """Two candidates: a one-week spike and a steady accumulator."""
+    rows, pid = [], 1
+    for t in range(8):
+        for pos, n in [("GKP", 2), ("DEF", 5), ("MID", 5), ("FWD", 3)]:
+            for _ in range(n):
+                rows.append({"player_id": pid, "web_name": f"P{pid}", "team": f"T{t}",
+                             "position": pos, "price": 4.0, "xp_next1": 1.0,
+                             "xp_next5": 5.0, "xp_horizon": 5.0, "p_start": 0.9,
+                             "e_minutes": 80.0, "confidence": "high", "flags": [],
+                             **{f"xp_gw{e}": 1.0 for e in range(1, 6)}})
+                pid += 1
+    df = pd.DataFrame(rows)
+    spike, steady = 5, 6  # both MID/DEF in the cheap pool, both affordable
+    for col, val in [("xp_gw1", 15.0)] + [(f"xp_gw{e}", 0.0) for e in range(2, 6)]:
+        df.loc[df.player_id == spike, col] = val
+    for e in range(1, 6):
+        df.loc[df.player_id == steady, f"xp_gw{e}"] = 6.0
+    for pid_ in (spike, steady):
+        total = sum(float(df.loc[df.player_id == pid_, f"xp_gw{e}"].iloc[0])
+                    for e in range(1, 6))
+        df.loc[df.player_id == pid_, ["xp_next5", "xp_horizon"]] = total
+    return df, spike, steady
+
+
+def test_the_armband_moves_to_whoever_is_best_that_gameweek():
+    """A one-week spike should be captained that week and nobody's captain the
+    rest of the horizon. A single armband over five gameweeks values it as if
+    it had to be held all five, which is a decision that is free to revisit."""
+    pool, spike, steady = _horizon_pool()
+    s = optimize_squad(pool, Config(budget=100.0, horizon_decay=1.0),
+                       xp_col="xp_horizon", must_include=[spike, steady])
+    assert s.captains[1] == spike
+    assert all(s.captains[e] == steady for e in range(2, 6))
+    assert s.captain_id == spike  # this week's armband is what the report shows
+
+
+def test_a_frame_without_per_gameweek_columns_still_picks_one_captain():
+    """Callers outside the pipeline (and every test above) hand the solver a
+    plain frame; it must fall back to a single captain rather than fail."""
+    s = optimize_squad(POOL, CFG)
+    assert s.captain_id in s.starting_ids
+    assert list(s.captains) == [None]

@@ -11,18 +11,29 @@ from scipy.stats import poisson
 
 from .bps import expected_bonus
 
+# Always present. A frame ALSO carries one `xp_gw{event}` column per gameweek
+# in the horizon (see EVENT_PREFIX in optimize.objective): the optimizers use
+# them to move the armband week by week, which a single horizon total cannot
+# express, and the ledger keeps them so a scored gameweek can be traced back to
+# the fixture-by-fixture projection that produced it.
 CONTRACT_COLUMNS = [
     "player_id", "web_name", "team", "position", "price",
-    "xp_next1", "xp_next5", "xp_horizon", "p_start", "e_minutes", "confidence", "flags",
+    "xp_next1", "xp_next5", "xp_horizon", "p_start", "p_play", "e_minutes",
+    "confidence", "flags",
 ]
+EVENT_PREFIX = "xp_gw"
 
 GOAL_PTS = {"GKP": 6, "DEF": 6, "MID": 5, "FWD": 4}
 CS_PTS = {"GKP": 4, "DEF": 4, "MID": 1, "FWD": 0}
 ASSIST_PTS = 3
 DC_PTS = 2
 DC_THRESHOLD = {"GKP": 99, "DEF": 10, "MID": 12, "FWD": 12}
-SAVES_PER_POINT = 3.0
+SAVES_PER_POINT = 3
+CONCEDED_PER_PENALTY = 2
 CONCEDED_PENALTY_POSITIONS = {"GKP", "DEF"}
+# Where to stop summing the threshold tail. Ten points' worth of saves (30) or
+# conceded goals (20) in one match has probability far below rounding.
+MAX_THRESHOLDS = 10
 
 
 def p_dc_threshold(dc90: float, e_minutes: float, position: str) -> float:
@@ -32,6 +43,25 @@ def p_dc_threshold(dc90: float, e_minutes: float, position: str) -> float:
     threshold = DC_THRESHOLD.get(position, 12)
     lam = float(dc90) * float(e_minutes) / 90.0
     return float(poisson.sf(threshold - 1, lam))
+
+
+def expected_thresholds(lam: float, per_point: int) -> float:
+    """E[floor(N / per_point)] for a Poisson count N.
+
+    FPL awards saves and deducts conceded goals in WHOLE steps -- one point per
+    three saves, minus one per two conceded -- so the expectation of the award
+    is not the award on the expectation. E[N]/k overstates save points by about
+    a third of a point per match and overstates the conceded deduction by about
+    a quarter, in opposite directions, which is exactly the shape of the
+    goalkeeper bias in the score ledger.
+
+    Uses E[floor(N/k)] = sum_{m>=1} P(N >= k*m).
+    """
+    lam = float(lam)
+    if lam <= 0:
+        return 0.0
+    return float(sum(poisson.sf(per_point * m - 1, lam)
+                     for m in range(1, MAX_THRESHOLDS + 1)))
 
 
 def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> float:
@@ -48,9 +78,15 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
     pts += p_dc_threshold(float(rate_row["dc90"]), e_min, position) * DC_PTS
     pts += bonus
     if position in CONCEDED_PENALTY_POSITIONS:
-        pts -= 0.5 * float(fx_row["xgc"]) * share
+        pts -= expected_thresholds(float(fx_row["xgc"]) * share, CONCEDED_PER_PENALTY)
     if position == "GKP":
-        pts += float(rate_row["saves90"]) * share / SAVES_PER_POINT
+        # Saves are the opponent's shots on target, so they scale with how much
+        # shooting this fixture invites -- not with the keeper's own history
+        # alone. `opp_threat` is this fixture's expected goals conceded relative
+        # to an average one.
+        threat = float(fx_row["opp_threat"]) if "opp_threat" in fx_row else 1.0
+        pts += expected_thresholds(float(rate_row["saves90"]) * share * threat,
+                                   SAVES_PER_POINT)
     pts -= float(rate_row["cards90"]) * share
     return max(0.0, pts)
 
@@ -99,8 +135,14 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
                 v * decay ** (event - from_event) for event, v in per_event.items()
             ), 4),
             "p_start": float(mins_row["p_start"]),
+            "p_play": float(mins_row["p_play"]),
             "e_minutes": float(mins_row["e_minutes"]),
             "confidence": mins_row["confidence"],
             "flags": list(mins_row["flags"]),
+            # A blank gameweek is a real zero, not a missing value, so every
+            # horizon event gets a column whether or not the team plays.
+            **{f"{EVENT_PREFIX}{e}": round(per_event.get(e, 0.0), 4)
+               for e in horizon_events},
         })
-    return pd.DataFrame(rows, columns=CONTRACT_COLUMNS).reset_index(drop=True)
+    columns = CONTRACT_COLUMNS + [f"{EVENT_PREFIX}{e}" for e in horizon_events]
+    return pd.DataFrame(rows, columns=columns).reset_index(drop=True)

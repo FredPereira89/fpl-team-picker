@@ -10,7 +10,9 @@
 # only be corrected here.
 #
 # Every entry needs a `source`. Give an `until_gw` so it expires rather than
-# quietly outliving the news behind it.
+# quietly outliving the news behind it, and a `checked_at` date: `until_gw` can
+# cover a month of gameweeks, which is far longer than a fitness report stays
+# true, so `news.max_age_hours` warns once an entry has outlived its evidence.
 
 overrides:
   - player_id: 8
@@ -26,6 +28,7 @@ overrides:
     source: >-
       FPL bootstrap-static status/news for Saliba + J.Timber and event/1/live
       minutes for Calafiori + Hincapie, both checked 2026-08-26.
+    checked_at: 2026-08-26
     until_gw: 6
 
   - player_id: 557
@@ -42,4 +45,5 @@ overrides:
     source: >-
       FPL event/1/live (75 mins, 6 pts, 1 start) and bootstrap-static
       selected_by_percent for player 557, checked 2026-08-27.
+    checked_at: 2026-08-27
     until_gw: 6

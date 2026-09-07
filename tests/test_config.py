@@ -53,3 +53,12 @@ def test_rejects_not_yet_implemented_risk_profiles(tmp_path):
         p.write_text(f"risk: {{profile: {profile}}}\n")
         with pytest.raises(ValueError, match="not yet"):
             load_config(p)
+
+
+def test_setting_an_odds_provider_is_rejected_until_one_exists(tmp_path):
+    """The field was loaded and never read: any value silently did nothing.
+    Same treatment as the unimplemented risk profiles -- fail loudly instead."""
+    p = tmp_path / "config.yaml"
+    p.write_text("budget: 100.0\nodds: {provider: bet365}\n")
+    with pytest.raises(ValueError, match="odds.provider"):
+        load_config(p)

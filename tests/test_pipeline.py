@@ -57,7 +57,7 @@ class FakeClient:
         return FIXTURES
 
     def element_summaries(self, player_ids, ttl_hours=None, progress=None,
-                          not_before=None):
+                          not_before=None, **kwargs):
         """Echo each element's totals back as a completed season.
 
         The BOOTSTRAP fixture above is written as a full season of history --
@@ -91,8 +91,11 @@ def test_mode_one_respects_budget(tmp_path):
 
 def test_returns_contract_frame(tmp_path):
     from fpl.model.xp import CONTRACT_COLUMNS
-    _, xp = run(Config(), mode=1, from_event=1, root=tmp_path, client=FakeClient())
-    assert list(xp.columns) == CONTRACT_COLUMNS
+    cfg = Config(horizon_gw=5)
+    _, xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    # The fixed contract, then the per-gameweek breakdown the optimizers use to
+    # move the armband week by week.
+    assert list(xp.columns) == CONTRACT_COLUMNS + [f"xp_gw{e}" for e in range(1, 6)]
 
 
 def test_pipeline_imports_no_mcp_or_archive():
@@ -193,7 +196,7 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
             return leaky
 
         def element_summaries(self, player_ids, ttl_hours=None, progress=None,
-                              not_before=None):
+                              not_before=None, **kwargs):
             by_id = {e["id"]: e for e in leaky["elements"]}
             return {
                 int(pid): {"history_past": [dict(by_id[int(pid)], season_name="2025/26")]}
@@ -306,7 +309,7 @@ class InFormClient(FakeClient):
     """Player 20 has started and scored in every gameweek so far this season."""
 
     def element_summaries(self, player_ids, ttl_hours=None, progress=None,
-                          not_before=None):
+                          not_before=None, **kwargs):
         out = FakeClient.element_summaries(self, player_ids, ttl_hours, progress)
         for pid in out:
             out[pid] = dict(out[pid], history=[
@@ -333,7 +336,7 @@ class NotBeforeRecordingClient(FakeClient):
         return self._fixtures
 
     def element_summaries(self, player_ids, ttl_hours=None, progress=None,
-                          not_before=None):
+                          not_before=None, **kwargs):
         self.not_before = not_before
         return FakeClient.element_summaries(self, player_ids, ttl_hours, progress)
 
@@ -365,6 +368,54 @@ def test_pipeline_leaves_ttl_in_charge_before_any_match_is_played(tmp_path):
     assert client.not_before is None
 
 
+# --- Chip state and data freshness reach the pipeline (2026-09-07 review) ---
+
+def test_a_spent_chip_is_never_recommended_again(tmp_path):
+    """pipeline.run passed a literal [] for chips_used, so the advisor could not
+    know a chip was gone and cheerfully suggested it every week."""
+    # SkewedClient gives teams 1 and 2 a double gameweek in event 1, which is
+    # what makes the advisor reach for a Triple Captain.
+    cfg = Config(budget=100.0, horizon_gw=3)
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+    assert rec.chip.chip is not None, "fixture must advise some chip to be a test"
+
+    spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=SkewedClient(),
+                   chips_used=[rec.chip.chip])
+    assert spent.chip.chip != rec.chip.chip
+    assert "already used" in spent.chip.reason
+
+
+def test_a_matchday_shortens_the_cache_ttl(tmp_path):
+    """Prices, news and availability move hour to hour on a matchday. The
+    shorter TTL was configured from the start and never wired to anything."""
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT18:00:00Z")
+
+    class TodayClient(FakeClient):
+        ttl_hours = 6.0
+
+        def fixtures(self):
+            return [dict(f, kickoff_time=today) for f in FIXTURES]
+
+    client = TodayClient()
+    run(Config(budget=100.0, horizon_gw=3, cache_ttl_hours=6,
+               cache_ttl_matchday_hours=1), mode=1, from_event=1, root=tmp_path,
+        client=client)
+    assert client.ttl_hours == 1.0
+
+
+def test_off_matchday_the_ordinary_ttl_stands(tmp_path):
+    class QuietClient(FakeClient):
+        ttl_hours = 6.0
+
+    client = QuietClient()
+    run(Config(budget=100.0, horizon_gw=3, cache_ttl_hours=6,
+               cache_ttl_matchday_hours=1), mode=1, from_event=1, root=tmp_path,
+        client=client)
+    assert client.ttl_hours == 6.0
+
+
 def test_current_season_form_reaches_the_projection(tmp_path):
     """blend_form existed and was unit-tested for a month while nothing called
     it — the model ran on last season alone."""
@@ -375,3 +426,72 @@ def test_current_season_form_reaches_the_projection(tmp_path):
     cold_xp = float(cold.set_index("player_id").loc[20, "xp_next1"])
     hot_xp = float(hot.set_index("player_id").loc[20, "xp_next1"])
     assert hot_xp > cold_xp
+
+
+def test_no_refresh_survives_a_matchday(tmp_path):
+    """--no-refresh means "use cached data only". The matchday TTL must not
+    quietly shorten the cache it exists to keep serving and send the run to the
+    network anyway."""
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT18:00:00Z")
+
+    class TodayClient(FakeClient):
+        ttl_hours = 24 * 365
+
+        def fixtures(self):
+            return [dict(f, kickoff_time=today) for f in FIXTURES]
+
+    client = TodayClient()
+    # what run_gameweek.py --no-refresh builds
+    cfg = Config(budget=100.0, horizon_gw=3, cache_ttl_hours=24 * 365,
+                 cache_ttl_matchday_hours=24 * 365)
+    run(cfg, mode=1, from_event=1, root=tmp_path, client=client)
+    assert client.ttl_hours == 24 * 365
+
+
+def test_history_cached_before_fpls_data_check_is_flagged_in_the_report(tmp_path):
+    """A snapshot taken between a gameweek's last whistle and FPL confirming
+    bonus carries numbers that were still moving. Snapshots written from now on
+    say which gameweeks were checked; older ones cannot, so the report says the
+    forecast may be running on provisional returns."""
+    from fpl.pipeline import freshness_flags
+
+    played = [dict(f, finished=True) for f in FIXTURES if f["event"] <= 2]
+    upcoming = [f for f in FIXTURES if f["event"] > 2]
+
+    class Unverified:
+        # last GW2 kickoff is 2026-08-22T19:00Z; the snapshot predates the
+        # +6h settle window
+        unverified = {"element-summary-1"}
+        sources = {"element-summary-1": "2026-08-22T21:00:00Z"}
+
+    class Verified(Unverified):
+        unverified = set()
+
+    assert freshness_flags(Unverified(), played + upcoming, 2)
+    assert "provisional" in freshness_flags(Unverified(), played + upcoming, 2)[0].lower() \
+        or "corrections" in freshness_flags(Unverified(), played + upcoming, 2)[0].lower()
+    assert freshness_flags(Verified(), played + upcoming, 2) == []
+
+
+def test_history_cached_after_the_check_window_is_not_flagged(tmp_path):
+    from fpl.pipeline import freshness_flags
+
+    played = [dict(f, finished=True) for f in FIXTURES if f["event"] <= 2]
+
+    class Late:
+        unverified = {"element-summary-1"}
+        sources = {"element-summary-1": "2026-08-23T09:00:00Z"}  # well past +6h
+
+    assert freshness_flags(Late(), played, 2) == []
+
+
+def test_nothing_is_flagged_before_any_gameweek_is_checked(tmp_path):
+    from fpl.pipeline import freshness_flags
+
+    class Any:
+        unverified = {"element-summary-1"}
+        sources = {"element-summary-1": "2026-08-01T09:00:00Z"}
+
+    assert freshness_flags(Any(), FIXTURES, 0) == []

@@ -89,9 +89,13 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         comparison = (f"is tied for the highest projected return in the squad "
                      f"({cap_xp:.1f} xP, matching {vice['web_name']})")
     else:
+        # The armband falls to the vice if the captain does not appear at all,
+        # so a captain with real rotation or fitness doubt over a strong vice
+        # can be worth more than the higher projection on its own.
         comparison = (f"is the selected captain (projected {cap_xp:.1f} xP); "
-                     f"{vice['web_name']} projects slightly higher at {vice_xp:.1f} xP "
-                     f"but was picked as vice")
+                     f"{vice['web_name']} projects higher at {vice_xp:.1f} xP but "
+                     f"is the vice, so his score still doubles if {cap['web_name']} "
+                     f"does not appear")
     out += [
         f"### Captain: {cap['web_name']} (C)  |  Vice: {vice['web_name']} (VC)",
         f"Recommended because {cap['web_name']} {comparison}.",

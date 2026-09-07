@@ -12,7 +12,11 @@ whether the ordering is right; bias tells you whether the optimizer is being
 handed inflated numbers to spend its budget against, which is a different
 failure and the one that was live for goalkeepers.
 """
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -21,18 +25,80 @@ from scipy.stats import spearmanr
 from .gw_level import evaluate_predictions
 
 LEDGER_DIR = "predictions"
+VERSION_DIR = "versions"
+TS_FMT = "%Y%m%dT%H%M%SZ"
+# Bumped by hand when the forecast changes in a way that makes older scores
+# incomparable. A scored gameweek says which model produced it or it measures
+# nothing in particular.
+MODEL_VERSION = "2026-09-07"
 
 
-def save_predictions(xp: pd.DataFrame, gw: int, root: Path) -> Path:
-    """Write one gameweek's xP frame. Overwrites: a re-run before the deadline
-    supersedes the earlier forecast rather than accumulating drafts."""
+def config_fingerprint(cfg) -> str:
+    """Short, stable hash of the settings a forecast was produced under.
+
+    Two runs of the same model with different horizons, decay or shrinkage are
+    different forecasts, and a ledger that cannot tell them apart cannot
+    attribute a change in score to anything.
+    """
+    if cfg is None:
+        return ""
+    data = asdict(cfg) if is_dataclass(cfg) else dict(cfg)
+    blob = json.dumps(data, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def save_predictions(xp: pd.DataFrame, gw: int, root: Path, cfg=None,
+                     sources: dict | None = None, created_at=None) -> Path:
+    """Write one gameweek's xP frame, and keep an immutable copy of it.
+
+    `gw{n}.parquet` is the current forecast: a re-run before the deadline
+    supersedes the earlier one, which is what the scorer and the report want.
+    But overwriting also destroyed every earlier version, so "the forecast the
+    optimizer acted on" was unrecoverable the moment anything was re-run --
+    including the pre-deadline forecast that a mid-week team-news update
+    replaced. Each write therefore also lands under `versions/` under its own
+    timestamp, and carries when it was made, which model and config made it,
+    and which data snapshots it read.
+    """
     out = Path(root) / LEDGER_DIR
     out.mkdir(parents=True, exist_ok=True)
+    when = created_at or datetime.now(timezone.utc)
+
     frame = xp.copy()
     frame.insert(0, "gw", int(gw))
+    frame["created_at"] = when.isoformat()
+    frame["model_version"] = MODEL_VERSION
+    frame["config_hash"] = config_fingerprint(cfg)
+    frame["sources"] = json.dumps(sources or {}, sort_keys=True)
+
     path = out / f"gw{int(gw)}.parquet"
     frame.to_parquet(path, index=False)
+
+    versions = out / VERSION_DIR
+    versions.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(versions / f"gw{int(gw)}_{when.strftime(TS_FMT)}.parquet",
+                     index=False)
     return path
+
+
+def forecast_versions(gw: int, root: Path) -> list[Path]:
+    """Every recorded version of one gameweek's forecast, oldest first."""
+    d = Path(root) / LEDGER_DIR / VERSION_DIR
+    if not d.exists():
+        return []
+    return sorted(d.glob(f"gw{int(gw)}_*.parquet"))
+
+
+def gameweek_is_final(fixtures: list[dict], gw: int) -> bool:
+    """True once every fixture in `gw` has been checked by FPL.
+
+    `finished_provisional` flips at the final whistle; `finished` only after
+    the bonus and stat review, which can move points hours later. Scoring a
+    forecast against provisional returns measures the model against numbers
+    that are still moving, so the verdict has to say which it is.
+    """
+    rows = [f for f in (fixtures or []) if int(f.get("event") or 0) == int(gw)]
+    return bool(rows) and all(bool(f.get("finished")) for f in rows)
 
 
 def load_predictions(gw: int, root: Path) -> pd.DataFrame:
@@ -124,12 +190,19 @@ def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
     }
 
 
-def scored_summary(scored: dict, gw: int) -> str:
+def scored_summary(scored: dict, gw: int, provisional: bool = False) -> str:
     """One-screen verdict, written to be read by someone deciding whether to
     trust this week's recommendation."""
     by_pos = scored["spearman_by_position"]
     bias = scored["bias_by_position"]
-    lines = [
+    lines = []
+    if provisional:
+        # Bonus points and stat corrections still move after the final whistle.
+        lines.append(
+            f"PROVISIONAL: GW{gw} is not fully checked by FPL yet, so these "
+            f"numbers will still move. Re-score once it is final."
+        )
+    lines += [
         f"GW{gw} forecast scored against {scored['n']} players "
         f"({scored['n_played']} of them appeared):",
         f"  rank quality (Spearman)  {scored['spearman_overall']:+.3f} overall, "
