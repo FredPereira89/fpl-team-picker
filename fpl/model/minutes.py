@@ -184,6 +184,11 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             "p_play": p_play,
             "p_60": p_60,
             "e_minutes": e_minutes,
+            # Minutes logged WHEN HE STARTS. `e_minutes` blends starting and
+            # not starting, which is the right input for the linear terms
+            # (goals, assists, cards) and the wrong one for every threshold:
+            # a match is 90 minutes or 0, never the average of the two.
+            "m_start": m_start,
             "confidence": confidence,
             "flags": flags,
         })

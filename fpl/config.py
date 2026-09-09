@@ -4,11 +4,12 @@ from pathlib import Path
 import yaml
 
 VALID_PROFILES = {"balanced", "template", "differential"}
-# Accepted by the schema (forward-compatible), but the optimizer never reads
-# ownership_weight yet -- so these two would silently behave identically to
-# "balanced" rather than actually tilting picks. Reject them until they're
-# wired into the MILP objective, so the config never quietly no-ops.
-NOT_YET_IMPLEMENTED_PROFILES = {"template", "differential"}
+# Empty since 2026-09-09: ownership_weight now reaches the squad and transfer
+# objectives through optimize.objective.effective_xp, so "template" and
+# "differential" genuinely tilt picks instead of silently behaving like
+# "balanced". Anything added back here is rejected at load rather than
+# quietly no-opping.
+NOT_YET_IMPLEMENTED_PROFILES: set[str] = set()
 FT_CAP = 5
 
 
@@ -82,6 +83,12 @@ def load_config(path: Path) -> Config:
             f"model.strength.team_ratings, so setting this would silently do "
             f"nothing. Leave it null (team_ratings still takes an injected "
             f"provider object for tests and future use)."
+        )
+    if not 0.0 <= cfg.ownership_weight <= 1.0:
+        raise ValueError(
+            f"risk.ownership_weight scales the ownership tilt from 0 (pure "
+            f"expected points) to 1 (the strongest tilt on offer) and must be "
+            f"in 0..1, got {cfg.ownership_weight}"
         )
     if not 0 <= cfg.free_transfers <= FT_CAP:
         raise ValueError(f"free_transfers must be 0..{FT_CAP}, got {cfg.free_transfers}")

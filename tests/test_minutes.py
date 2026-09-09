@@ -188,3 +188,20 @@ def test_without_per_round_history_the_league_defaults_stand():
     df = minutes_model(PLAYERS, CFG, rounds=None).set_index("player_id")
     assert 0 < df.loc[1, "p_60"] <= df.loc[1, "p_start"]
     assert df.loc[1, "e_minutes"] > 0
+
+
+def test_minutes_model_exposes_expected_minutes_given_a_start():
+    """The nonlinear scoring thresholds (DC, saves, conceded) need the minutes a
+    player logs WHEN HE STARTS, not the blended expectation across starting and
+    not starting -- a player is 90 minutes or 0, never 73."""
+    df = minutes_model(PLAYERS, CFG).set_index("player_id")
+    assert "m_start" in df.columns
+    # Nailed starter: e_minutes is dragged below m_start by the chance he sits.
+    assert df.loc[1, "m_start"] > df.loc[1, "e_minutes"]
+    assert 45.0 <= df.loc[1, "m_start"] <= 90.0
+
+
+def test_m_start_follows_the_players_own_substitution_pattern():
+    hooked = minutes_model(PLAYERS, CFG, rounds=_rounds(1, [55] * 10)).set_index("player_id")
+    lasted = minutes_model(PLAYERS, CFG, rounds=_rounds(1, [90] * 10)).set_index("player_id")
+    assert hooked.loc[1, "m_start"] < lasted.loc[1, "m_start"]

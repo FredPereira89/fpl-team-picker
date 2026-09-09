@@ -10,6 +10,18 @@ MAX_BONUS_PER_MATCH = 3.0
 FIXTURE_SENSITIVITY = 0.5  # bonus is less fixture-dependent than goals
 
 
+def expected_bonus_for(bonus90: float, e_minutes: float, att_mult: float = 1.0) -> float:
+    """Expected bonus for ONE player in ONE fixture.
+
+    `build_xp` needs exactly this, once per (player, fixture). It was getting it
+    by filtering the entire rates and minutes frames each time, which made the
+    projection quadratic in squad size for no gain.
+    """
+    scale = 1.0 + (float(att_mult) - 1.0) * FIXTURE_SENSITIVITY
+    per_match = float(bonus90) * (float(e_minutes) / 90.0) * scale
+    return float(min(max(per_match, 0.0), MAX_BONUS_PER_MATCH))
+
+
 def expected_bonus(rates: pd.DataFrame, minutes: pd.DataFrame,
                    att_mult: float = 1.0) -> pd.Series:
     df = rates[["player_id", "bonus90"]].merge(

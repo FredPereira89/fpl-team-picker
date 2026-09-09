@@ -9,7 +9,8 @@ import pandas as pd
 import pulp
 
 from .squad import SQUAD_SPLIT, XI_MIN, XI_MAX, XI_SIZE, MAX_PER_CLUB
-from .objective import add_bench, add_captaincy, captain_bonus
+from .objective import (add_bench, add_captaincy, captain_bonus, captain_values,
+                        tilted_frame)
 
 
 def selling_price(purchase: float, now: float) -> float:
@@ -61,7 +62,10 @@ class TransferPlan:
 
 def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
     ids = [int(i) for i in xp_df["player_id"]]
-    xp = dict(zip(ids, xp_df[xp_col].astype(float)))
+    # Solve on the tilted score, report the untilted one -- see optimize.squad.
+    tilted = tilted_frame(xp_df, cfg, xp_col)
+    xp = dict(zip(ids, tilted[xp_col].astype(float)))
+    raw_xp = dict(zip(ids, xp_df[xp_col].astype(float)))
     price = dict(zip(ids, xp_df["price"].astype(float)))
     cost = cost or price
     pos = dict(zip(ids, xp_df["position"]))
@@ -74,7 +78,7 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
     # Captaincy doubles one starter, and the bench pays out in substitution
     # order -- see optimize.objective for why both belong in the objective
     # rather than being applied after the fact or averaged away.
-    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, xp_df, start, cfg, xp_col)
+    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, tilted, start, cfg, xp_col)
     bench_terms = add_bench(prob, ids, xp, pos, squad, start, cfg)
     prob += pulp.lpSum(xp[i] * start[i] for i in ids) + bench_terms + cap_terms
     prob += pulp.lpSum(cost.get(i, price[i]) * squad[i] for i in ids) <= budget
@@ -96,7 +100,10 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
         return None
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
-    gross = sum(xp[i] for i in starters) + captain_bonus(cap_vars, cap_values)
+    # Untilted, for the same reason as optimize.squad: the plan is weighed
+    # against a hit cost denominated in real points.
+    gross = sum(raw_xp[i] for i in starters) + captain_bonus(
+        cap_vars, captain_values(xp_df, ids, cfg, xp_col))
     return chosen, starters, gross
 
 

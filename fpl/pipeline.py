@@ -40,13 +40,15 @@ from .report.weekly import Recommendation, render
 HORIZON_COL = "xp_horizon"
 
 TRUST_SUMMARY = (
-    "Backtest complete (2025/26 held out, trained on 2024/25, n=11406 GW "
-    "observations): outfield rank quality (DEF/MID/FWD) beats both a naive "
-    "last-season baseline and FPL's own published xP -- treat those picks "
-    "with normal confidence. Goalkeeper rank quality shows no measurable "
-    "skill (Spearman 0.034) and is not shown to beat FPL's own xP -- treat "
-    "GK picks with extra caution; consider leaning on FPL's own projections "
-    "or team news for that position specifically."
+    "No gameweek of this model has been scored yet, so there is no measurement "
+    "of it to quote. The only backtest that exists (2025/26 held out, trained "
+    "on 2024/25, n=11406) measured a simplified points-per-90 PROXY, not the "
+    "production goal/assist/bonus/DC/saves split -- outfield rank quality beat "
+    "both a naive baseline and FPL's own published xP. Its goalkeeper verdict "
+    "is deliberately not repeated here: it reported no rank skill, and the two "
+    "gameweeks of the real model scored since (+0.524, +0.529) contradict it. "
+    "Treat this run as unmeasured rather than trusted, and score a gameweek "
+    "(scripts/score_gameweek.py) to replace this note with a real number."
 )
 
 

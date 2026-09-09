@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from fpl.model.bps import expected_bonus
 
 RATES = pd.DataFrame({
@@ -43,3 +44,19 @@ def test_returns_series_indexed_by_player_id():
     b = expected_bonus(RATES, MINUTES)
     assert b.index.name == "player_id"
     assert set(b.index) == {1, 2, 3}
+
+
+def test_scalar_bonus_matches_the_frame_version():
+    """build_xp needs one player's bonus per fixture. Re-filtering the whole
+    rates and minutes frames for every (player, fixture) pair made that an
+    O(n^2) scan; the scalar form is what the loop should call."""
+    from fpl.model.bps import expected_bonus_for
+    frame = expected_bonus(RATES, MINUTES, att_mult=1.2)
+    for pid, bonus90, e_min in zip(RATES["player_id"], RATES["bonus90"],
+                                   MINUTES["e_minutes"]):
+        assert expected_bonus_for(bonus90, e_min, 1.2) == pytest.approx(frame.loc[pid])
+
+
+def test_scalar_bonus_is_capped_at_three():
+    from fpl.model.bps import expected_bonus_for
+    assert expected_bonus_for(9.0, 90.0, 2.0) == 3.0

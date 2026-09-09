@@ -10,7 +10,83 @@ rather than twice:
   valued as though it had to be captained for five gameweeks -- when in reality
   captaincy is re-chosen, free, every week.
 """
+import pandas as pd
 import pulp
+
+# Ownership tilt. `differential` rewards players the field does not own;
+# `template` rewards matching it. Both are the same axis with opposite sign.
+PROFILE_SIGN = {"balanced": 0.0, "differential": 1.0, "template": -1.0}
+# The most the tilt may move a projection, as a fraction of it, at weight 1.0.
+# Deliberately small -- see effective_xp for why this is a tie-breaker and not
+# a rank model.
+MAX_TILT = 0.15
+
+
+def effective_xp(xp_df, cfg, xp_col: str):
+    """Expected points, nudged by how much of the field already owns the player.
+
+    Worth being precise about what ownership can and cannot buy, because the
+    obvious formula is wrong. If you own player i you score `xp_i` and the
+    average rival scores `EO_i * xp_i`, so your edge is `xp_i * (1 - EO_i)`.
+    But if you DON'T own him your edge is `-EO_i * xp_i` -- and the difference
+    between owning and not owning is `xp_i` either way. Effective ownership
+    cancels out of EXPECTED rank entirely. What it actually changes is the
+    VARIANCE of your rank: the template holds your position, a differential
+    widens the distribution in both directions.
+
+    Ranking on `xp * (1 - EO)` therefore does not maximise expected rank, it
+    just punts -- at weight 0.5 it preferred a player projected two points
+    lower purely for being unowned. Modelling this properly needs a
+    distribution over each player's points and over the field's, which this
+    model does not have.
+
+    So the tilt here is bounded to +/-`MAX_TILT` of a projection and is honestly
+    only a tie-breaker: among options the model cannot separate on points,
+    lean differential (chasing rank) or template (defending it). At
+    `ownership_weight = 0`, the default, this returns `xp_col` untouched.
+    """
+    xp = xp_df[xp_col].astype(float)
+    weight = float(getattr(cfg, "ownership_weight", 0.0) or 0.0)
+    sign = PROFILE_SIGN.get(getattr(cfg, "risk_profile", "balanced"), 0.0)
+    if weight == 0.0 or sign == 0.0 or "ownership" not in xp_df.columns:
+        return xp
+    return xp * tilt_factor(xp_df, cfg)
+
+
+def tilt_factor(xp_df, cfg):
+    """Per-player multiplier the ownership tilt applies. 1.0 everywhere when off.
+
+    Returned separately so a solver can scale EVERY objective column by the
+    same factor -- the horizon total and each per-gameweek column that carries
+    the armband -- instead of tilting the base term and leaving captaincy
+    untilted, which would rank a player differently depending on which term
+    was looking at him.
+    """
+    weight = float(getattr(cfg, "ownership_weight", 0.0) or 0.0)
+    sign = PROFILE_SIGN.get(getattr(cfg, "risk_profile", "balanced"), 0.0)
+    if weight == 0.0 or sign == 0.0 or "ownership" not in xp_df.columns:
+        return pd.Series(1.0, index=xp_df.index)
+    share = xp_df["ownership"].astype(float).clip(lower=0.0, upper=100.0) / 100.0
+    # (1 - 2*share) runs +1 for a wholly unowned player to -1 for a universal one.
+    return 1.0 + weight * MAX_TILT * sign * (1.0 - 2.0 * share)
+
+
+def tilted_frame(xp_df, cfg, xp_col: str):
+    """A copy of the frame with every objective column scaled by the tilt.
+
+    The solver maximises this; the caller reports from the ORIGINAL frame, so
+    what a user is shown stays honest expected points -- the same split as
+    `xp_horizon` (what the solver maximises) beside `xp_next5` (what is shown).
+    """
+    factor = tilt_factor(xp_df, cfg)
+    if (factor == 1.0).all():
+        return xp_df
+    out = xp_df.copy()
+    for col in [xp_col] + [c for _, c in event_columns(xp_df)]:
+        if col in out.columns:
+            out[col] = out[col].astype(float) * factor
+    return out
+
 
 # Per-gameweek expected points, written by model.xp as xp_gw{event}.
 EVENT_PREFIX = "xp_gw"

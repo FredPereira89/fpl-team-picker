@@ -47,12 +47,17 @@ def test_rejects_unknown_risk_profile(tmp_path):
         load_config(p)
 
 
-def test_rejects_not_yet_implemented_risk_profiles(tmp_path):
-    for profile in ("template", "differential"):
-        p = tmp_path / "config.yaml"
-        p.write_text(f"risk: {{profile: {profile}}}\n")
-        with pytest.raises(ValueError, match="not yet"):
-            load_config(p)
+def test_a_profile_listed_as_unimplemented_is_still_rejected(tmp_path, monkeypatch):
+    """`template` and `differential` were on this list until they were wired
+    into the objective on 2026-09-09, and the list is now empty. The guard it
+    provided must survive: a profile the optimizer cannot honour has to fail at
+    load rather than silently behave like `balanced`."""
+    import fpl.config as config_module
+    monkeypatch.setattr(config_module, "NOT_YET_IMPLEMENTED_PROFILES", {"template"})
+    p = tmp_path / "config.yaml"
+    p.write_text("risk: {profile: template}\n")
+    with pytest.raises(ValueError, match="not yet"):
+        load_config(p)
 
 
 def test_setting_an_odds_provider_is_rejected_until_one_exists(tmp_path):
@@ -61,4 +66,22 @@ def test_setting_an_odds_provider_is_rejected_until_one_exists(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text("budget: 100.0\nodds: {provider: bet365}\n")
     with pytest.raises(ValueError, match="odds.provider"):
+        load_config(p)
+
+
+def test_differential_and_template_profiles_are_accepted_now_they_are_wired(tmp_path):
+    """They were rejected because ownership_weight reached nothing. It now
+    reaches the squad and transfer objectives, so the config must stop lying."""
+    for profile in ("differential", "template"):
+        p = tmp_path / f"{profile}.yaml"
+        p.write_text(f"budget: 100\nrisk:\n  profile: {profile}\n  ownership_weight: 0.5\n")
+        cfg = load_config(p)
+        assert cfg.risk_profile == profile
+        assert cfg.ownership_weight == 0.5
+
+
+def test_ownership_weight_outside_zero_to_one_is_rejected(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text("budget: 100\nrisk:\n  profile: differential\n  ownership_weight: 4\n")
+    with pytest.raises(ValueError, match="ownership_weight"):
         load_config(p)

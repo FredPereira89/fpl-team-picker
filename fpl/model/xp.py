@@ -9,7 +9,8 @@ double gameweeks (2+ fixtures) and blanks (0 fixtures) fall out for free.
 import pandas as pd
 from scipy.stats import poisson
 
-from .bps import expected_bonus
+from .bps import expected_bonus_for
+from .minutes import M_START, M_SUB
 
 # Always present. A frame ALSO carries one `xp_gw{event}` column per gameweek
 # in the horizon (see EVENT_PREFIX in optimize.objective): the optimizers use
@@ -19,6 +20,10 @@ from .bps import expected_bonus
 CONTRACT_COLUMNS = [
     "player_id", "web_name", "team", "position", "price",
     "xp_next1", "xp_next5", "xp_horizon", "p_start", "p_play", "e_minutes",
+    # Percent of FPL managers who own him. Leagues are won on RANK, so points
+    # scored by a player most of the field also owns move you nowhere. The
+    # optimizer needs this to express that (optimize.objective.effective_xp).
+    "ownership",
     "confidence", "flags",
 ]
 EVENT_PREFIX = "xp_gw"
@@ -36,13 +41,52 @@ CONCEDED_PENALTY_POSITIONS = {"GKP", "DEF"}
 MAX_THRESHOLDS = 10
 
 
-def p_dc_threshold(dc90: float, e_minutes: float, position: str) -> float:
-    """Probability of hitting the Defensive Contribution threshold in one match."""
-    if e_minutes <= 0 or dc90 <= 0:
+def p_dc_threshold(dc90: float, minutes: float, position: str) -> float:
+    """P(hit the Defensive Contribution threshold) GIVEN `minutes` on the pitch.
+
+    Conditional on a known minutes figure this is exact. Feeding it a blended
+    expectation is not -- see `minutes_branches`.
+    """
+    if minutes <= 0 or dc90 <= 0:
         return 0.0
     threshold = DC_THRESHOLD.get(position, 12)
-    lam = float(dc90) * float(e_minutes) / 90.0
+    lam = float(dc90) * float(minutes) / 90.0
     return float(poisson.sf(threshold - 1, lam))
+
+
+def minutes_branches(mins_row) -> list[tuple[float, float]]:
+    """[(probability, minutes)] over the outcomes one match can actually take.
+
+    A player starts and plays `m_start`, or comes off the bench for `M_SUB`, or
+    does not feature. Every THRESHOLD award -- Defensive Contribution, saves,
+    goals conceded -- is a nonlinear function of minutes, so its expectation
+    has to be taken over this distribution rather than evaluated once at
+    `e_minutes`. Evaluating at the mean is Jensen's inequality applied
+    backwards and understates DC by ~0.13 pts/match for a rotation-risk
+    defender: it prices a player as though he reliably played 73 minutes, when
+    he in fact plays 80 or none.
+
+    The linear terms (goals, assists, cards) are correctly priced at
+    `e_minutes` and deliberately still are -- for those, expectation and
+    evaluation-at-the-mean coincide.
+    """
+    # Frames built outside model.minutes (older ledger parquets, hand-built
+    # rows) carry only e_minutes. Treat those as a certainty at that many
+    # minutes, which is exactly how they priced before this existed.
+    if "p_start" not in mins_row:
+        return [(1.0, float(mins_row["e_minutes"]))]
+    p_start = float(mins_row["p_start"])
+    p_play = float(mins_row["p_play"])
+    # Same reasoning for m_start: the league-average start length stands in.
+    m_start = float(mins_row["m_start"]) if "m_start" in mins_row else M_START
+    p_sub = max(0.0, p_play - p_start)
+    return [(p_start, m_start), (p_sub, M_SUB)]
+
+
+def p_dc_threshold_mixture(dc90: float, mins_row, position: str) -> float:
+    """P(hit the DC threshold), integrated over the minutes distribution."""
+    return float(sum(p * p_dc_threshold(dc90, m, position)
+                     for p, m in minutes_branches(mins_row) if p > 0))
 
 
 def expected_thresholds(lam: float, per_point: int) -> float:
@@ -64,6 +108,16 @@ def expected_thresholds(lam: float, per_point: int) -> float:
                      for m in range(1, MAX_THRESHOLDS + 1)))
 
 
+def expected_thresholds_over_minutes(rate90: float, mins_row, per_point: int) -> float:
+    """E[floor(N / per_point)] integrated over the minutes distribution.
+
+    Same correction as `p_dc_threshold_mixture`, for the two stepped awards
+    that scale with time on the pitch: saves earned and goals conceded.
+    """
+    return float(sum(p * expected_thresholds(rate90 * m / 90.0, per_point)
+                     for p, m in minutes_branches(mins_row) if p > 0))
+
+
 def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> float:
     e_min = float(mins_row["e_minutes"])
     if e_min <= 0:
@@ -75,18 +129,19 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
     pts += float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * GOAL_PTS[position]
     pts += float(rate_row["xa90"]) * share * float(fx_row["att_mult"]) * ASSIST_PTS
     pts += float(fx_row["p_cs"]) * CS_PTS[position] * p_60
-    pts += p_dc_threshold(float(rate_row["dc90"]), e_min, position) * DC_PTS
+    pts += p_dc_threshold_mixture(float(rate_row["dc90"]), mins_row, position) * DC_PTS
     pts += bonus
     if position in CONCEDED_PENALTY_POSITIONS:
-        pts -= expected_thresholds(float(fx_row["xgc"]) * share, CONCEDED_PER_PENALTY)
+        pts -= expected_thresholds_over_minutes(float(fx_row["xgc"]), mins_row,
+                                                CONCEDED_PER_PENALTY)
     if position == "GKP":
         # Saves are the opponent's shots on target, so they scale with how much
         # shooting this fixture invites -- not with the keeper's own history
         # alone. `opp_threat` is this fixture's expected goals conceded relative
         # to an average one.
         threat = float(fx_row["opp_threat"]) if "opp_threat" in fx_row else 1.0
-        pts += expected_thresholds(float(rate_row["saves90"]) * share * threat,
-                                   SAVES_PER_POINT)
+        pts += expected_thresholds_over_minutes(
+            float(rate_row["saves90"]) * threat, mins_row, SAVES_PER_POINT)
     pts -= float(rate_row["cards90"]) * share
     return max(0.0, pts)
 
@@ -109,11 +164,8 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
             event = int(fx["event"])
             if event not in horizon_events:
                 continue
-            bonus = float(expected_bonus(
-                rates[rates.player_id == pid],
-                minutes[minutes.player_id == pid],
-                att_mult=float(fx["att_mult"]),
-            ).loc[pid])
+            bonus = expected_bonus_for(rate_row["bonus90"], mins_row["e_minutes"],
+                                       att_mult=float(fx["att_mult"]))
             per_event[event] = per_event.get(event, 0.0) + xp_for_fixture(
                 rate_row, mins_row, fx, pos, bonus
             )
@@ -124,6 +176,7 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
             "team": p["team"],
             "position": pos,
             "price": float(p["price"]),
+            "ownership": float(p.get("selected_by_percent", 0.0) or 0.0),
             "xp_next1": round(per_event.get(from_event, 0.0), 4),
             # xp_next5 is the honest total a human is shown. xp_horizon is the
             # same points discounted by cfg.horizon_decay per gameweek and is

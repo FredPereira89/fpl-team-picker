@@ -1,7 +1,9 @@
 import pandas as pd
 import pytest
 from fpl.config import Config
-from fpl.model.xp import build_xp, p_dc_threshold, CONTRACT_COLUMNS
+from fpl.model.xp import (build_xp, p_dc_threshold, p_dc_threshold_mixture,
+                          xp_for_fixture, minutes_branches, expected_thresholds,
+                          expected_thresholds_over_minutes, CONTRACT_COLUMNS)
 
 CFG = Config(horizon_gw=5)
 
@@ -202,3 +204,96 @@ def test_a_keeper_facing_a_bigger_threat_is_worth_more_saves():
     busy = dict(quiet, opp_threat=1.6)
     assert xp_for_fixture(rate, mins, busy, "GKP", bonus=0.0) > \
         xp_for_fixture(rate, mins, quiet, "GKP", bonus=0.0)
+
+
+# --- threshold points must integrate over the minutes distribution ---------
+# A match is 90 minutes or 0. Feeding blended `e_minutes` into a Poisson tail
+# is Jensen's inequality applied backwards -- the same error `expected_thresholds`
+# exists to fix for saves, left in place one function above it.
+
+def _mins(p_start, m_start, p_play=None):
+    return pd.Series({
+        "p_start": p_start, "p_play": p_start if p_play is None else p_play,
+        "p_60": p_start * 0.9, "m_start": m_start,
+        "e_minutes": p_start * m_start, "confidence": "high", "flags": [],
+    })
+
+
+def test_minutes_branches_cover_every_outcome_of_the_match():
+    from fpl.model.minutes import M_SUB
+    branches = minutes_branches(_mins(0.9, 80.0, p_play=0.935))
+    assert sum(p for p, _ in branches) == pytest.approx(0.935)
+    assert sum(p * m for p, m in branches) == pytest.approx(0.9 * 80.0 + 0.035 * M_SUB)
+
+
+def test_dc_probability_is_the_start_sub_mixture_not_the_mean_minutes_estimate():
+    """0.90 * P(N>=10 | 80 mins) + 0.035 * P(N>=10 | 20 mins), never
+    P(N>=10 | 72.7 mins), which understates it by about 0.13 pts a match."""
+    from scipy.stats import poisson
+    from fpl.model.minutes import M_SUB
+    m = _mins(0.9, 80.0, p_play=0.935)
+    expected = (0.9 * poisson.sf(9, 10.5 * 80.0 / 90)
+                + 0.035 * poisson.sf(9, 10.5 * M_SUB / 90))
+    assert p_dc_threshold_mixture(10.5, m, "DEF") == pytest.approx(expected)
+    assert p_dc_threshold_mixture(10.5, m, "DEF") > p_dc_threshold(10.5, 72.7, "DEF")
+
+
+def test_two_players_with_equal_expected_minutes_differ_on_thresholds():
+    """Both average 60 minutes. The one who starts 80 three weeks in four clears
+    a 10-action bar far more often than the one who plays 60 every week."""
+    steady = _mins(1.0, 60.0)
+    rotated = _mins(0.75, 80.0)
+    assert steady["e_minutes"] == pytest.approx(rotated["e_minutes"])
+    assert (p_dc_threshold_mixture(10.5, rotated, "DEF")
+            > p_dc_threshold_mixture(10.5, steady, "DEF"))
+
+
+def test_save_points_use_the_minutes_mixture():
+    from fpl.model.minutes import M_SUB
+    m = _mins(0.9, 80.0, p_play=0.935)
+    expected = (0.9 * expected_thresholds(3.2 * 80.0 / 90, 3)
+                + 0.035 * expected_thresholds(3.2 * M_SUB / 90, 3))
+    assert expected_thresholds_over_minutes(3.2, m, 3) == pytest.approx(expected)
+
+
+def test_a_player_who_never_starts_scores_no_threshold_points():
+    assert p_dc_threshold_mixture(10.5, _mins(0.0, 80.0), "DEF") == 0.0
+    assert expected_thresholds_over_minutes(3.2, _mins(0.0, 80.0), 3) == 0.0
+
+
+def test_frames_without_m_start_fall_back_to_the_league_start_length():
+    """Anything built outside model.minutes (tests, older ledger frames) must
+    still price, using the default start length rather than crashing."""
+    from fpl.model.minutes import M_START
+    legacy = pd.Series({"p_start": 0.9, "p_play": 0.935, "p_60": 0.81,
+                        "e_minutes": 72.7, "confidence": "high", "flags": []})
+    assert minutes_branches(legacy)[0] == pytest.approx((0.9, M_START))
+
+
+def test_a_frame_without_p_start_is_treated_as_certain_minutes():
+    """Frames from outside model.minutes (older ledger parquets, hand-built test
+    rows) carry only e_minutes. Those must price as a certainty at that many
+    minutes -- the behaviour before the mixture existed -- not crash."""
+    legacy = {"e_minutes": 90.0, "p_play": 1.0, "p_60": 1.0}
+    assert minutes_branches(legacy) == [(1.0, 90.0)]
+    assert p_dc_threshold_mixture(10.5, legacy, "DEF") == pytest.approx(
+        p_dc_threshold(10.5, 90.0, "DEF"))
+
+
+# --- ownership reaches the optimizer (2026-09-09 audit) --------------------
+# FPL leagues are won on RANK, not on points. Points scored by a player 60% of
+# the field also owns move you nowhere; the objective was pure expected points
+# and could not express that. `selected_by_percent` was normalized out of
+# bootstrap and then dropped before the optimizer ever saw it.
+
+def test_xp_frame_carries_ownership():
+    players = PLAYERS.assign(selected_by_percent=[55.0, 3.0, 0.4])
+    df = build_xp(players, RATES, MINUTES, TFX, COUNTS, CFG, from_event=1).set_index("player_id")
+    assert "ownership" in df.columns
+    assert df.loc[1, "ownership"] == pytest.approx(55.0)
+
+
+def test_a_frame_without_ownership_reads_as_zero_not_missing():
+    """Older bootstraps and hand-built frames must still price."""
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, CFG, from_event=1).set_index("player_id")
+    assert df.loc[1, "ownership"] == 0.0

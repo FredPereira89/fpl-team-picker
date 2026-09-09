@@ -495,3 +495,16 @@ def test_nothing_is_flagged_before_any_gameweek_is_checked(tmp_path):
         sources = {"element-summary-1": "2026-08-01T09:00:00Z"}
 
     assert freshness_flags(Any(), FIXTURES, 0) == []
+
+
+def test_fallback_trust_note_does_not_repeat_the_refuted_goalkeeper_claim():
+    """TRUST_SUMMARY asserted GK rank quality of 0.034 ("no measurable skill")
+    from a points-per-90 PROXY backtest. Two scored gameweeks of the production
+    model contradicted it (+0.524, +0.529). Telling a user to distrust their
+    keeper on a number the model's own ledger refutes is worse than saying
+    nothing."""
+    from fpl.pipeline import TRUST_SUMMARY
+    assert "0.034" not in TRUST_SUMMARY
+    assert "no measurable skill" not in TRUST_SUMMARY.lower()
+    # It must still say the fallback is not a measurement of this model.
+    assert "proxy" in TRUST_SUMMARY.lower()

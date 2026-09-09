@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 import pandas as pd
 import pulp
 
-from .objective import add_bench, add_captaincy, captain_bonus, chosen_captains, first_captain
+from .objective import (add_bench, add_captaincy, captain_bonus, captain_values,
+                        chosen_captains, first_captain, tilted_frame)
 
 SQUAD_SPLIT = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
 XI_MIN = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
@@ -33,7 +34,11 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
                    banned: list[int] | None = None) -> Squad:
     pool = xp_df[~xp_df["player_id"].isin(banned or [])].reset_index(drop=True)
     ids = [int(i) for i in pool["player_id"]]
-    xp = dict(zip(ids, pool[xp_col].astype(float)))
+    # The solver optimises the ownership-tilted score; everything reported back
+    # is read from `pool`, so the user still sees real expected points.
+    tilted = tilted_frame(pool, cfg, xp_col)
+    xp = dict(zip(ids, tilted[xp_col].astype(float)))
+    raw_xp = dict(zip(ids, pool[xp_col].astype(float)))
     price = dict(zip(ids, pool["price"].astype(float)))
     pos = dict(zip(ids, pool["position"]))
     club = dict(zip(ids, pool["team"]))
@@ -46,7 +51,7 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
     # equal total spread flat -- and captaincy is roughly a sixth of a
     # gameweek's score. The armband is re-chosen every gameweek, so it is
     # valued per gameweek whenever the frame carries a per-gameweek breakdown.
-    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, pool, start, cfg, xp_col)
+    cap_terms, cap_vars, cap_values = add_captaincy(prob, ids, tilted, start, cfg, xp_col)
     bench_terms = add_bench(prob, ids, xp, pos, squad, start, cfg)
 
     prob += pulp.lpSum(xp[i] * start[i] for i in ids) + bench_terms + cap_terms
@@ -78,11 +83,18 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
 
     chosen = [i for i in ids if squad[i].value() > 0.5]
     starters = [i for i in ids if start[i].value() > 0.5]
+    # Reported in UNTILTED points: the tilt is a solver preference, not a
+    # forecast, so what a human is shown stays real expected points. The
+    # armband is still valued week by week and discounted, exactly as the
+    # solver valued it -- only the ownership tilt is stripped back out.
+    captain = first_captain(cap_vars)
+    total = sum(raw_xp[i] for i in starters) + captain_bonus(
+        cap_vars, captain_values(pool, ids, cfg, xp_col))
     return Squad(
         player_ids=chosen,
         starting_ids=starters,
         total_cost=round(sum(price[i] for i in chosen), 1),
-        xp=round(sum(xp[i] for i in starters) + captain_bonus(cap_vars, cap_values), 3),
-        captain_id=first_captain(cap_vars),
+        xp=round(total, 3),
+        captain_id=captain,
         captains=chosen_captains(cap_vars),
     )

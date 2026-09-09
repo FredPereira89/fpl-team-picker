@@ -3,7 +3,9 @@ import pytest
 
 from fpl.backtest.ledger import (save_predictions, load_predictions,
                                  actuals_from_summaries, score_gameweek, scored_summary,
-                                 save_scored_summary, load_scored_summary)
+                                 save_scored_summary, load_scored_summary,
+                                 common_pool, spearman_on, compare_rankers,
+                                 spearman_ci)
 
 PRED = pd.DataFrame({
     "player_id": [1, 2, 3, 4],
@@ -192,3 +194,94 @@ def test_a_provisional_score_says_so_at_the_top():
     scored = score_gameweek(PRED, actuals)
     assert scored_summary(scored, 3, provisional=True).startswith("PROVISIONAL")
     assert not scored_summary(scored, 3).startswith("PROVISIONAL")
+
+
+# --- comparing rankers fairly (2026-09-09 audit) --------------------------
+# `spearman_top_n` selects the top N BY THE MODEL and then correlates the
+# model's own score inside that truncated set. Selecting on the predictor
+# collapses its variance while the outcome's stays wide, so the correlation
+# is attenuated by construction -- and, because every ranker would be scored
+# on a different set of players, it cannot be compared against a baseline.
+
+def _skewed(n=200, noise=1.0, seed=0):
+    """A pool where the model has real, uniform skill across the whole range."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    truth = rng.normal(0, 2, n)
+    return pd.DataFrame({
+        "player_id": range(n),
+        "position": ["MID"] * n,
+        "price": np.round(4.0 + truth * 0.4 + rng.normal(0, 0.3, n), 1),
+        "xp_next1": truth + rng.normal(0, noise * 0.3, n),
+        "actual": truth + rng.normal(0, noise, n),
+        "minutes": 90.0,
+    })
+
+
+def test_common_pool_is_the_union_of_each_rankers_top_n():
+    """Every candidate ranker must be scored on the SAME players, or the
+    comparison measures which pool each one happened to pick."""
+    df = _skewed()
+    pool = common_pool(df, ["xp_next1", "price"], top_n=20)
+    top_model = set(df.nlargest(20, "xp_next1")["player_id"])
+    top_price = set(df.nlargest(20, "price")["player_id"])
+    assert set(pool["player_id"]) == top_model | top_price
+
+
+def test_scoring_a_ranker_on_its_own_top_n_understates_its_skill():
+    """The bug this metric had: a model with genuine skill scores far lower on
+    the pool it selected than on a pool selected independently of it."""
+    df = _skewed()
+    own = spearman_on(df.nlargest(40, "xp_next1"), "xp_next1")
+    fair = spearman_on(common_pool(df, ["xp_next1", "price"], top_n=40), "xp_next1")
+    assert own < fair
+
+
+def test_ranker_comparison_scores_every_candidate_on_one_pool():
+    df = _skewed()
+    out = compare_rankers(df, ["xp_next1", "price"], top_n=40)
+    assert set(out) == {"xp_next1", "price"}
+    assert out["xp_next1"]["n"] == out["price"]["n"]
+    # The model is built to beat price here; the comparison has to show it.
+    assert out["xp_next1"]["rho"] > out["price"]["rho"]
+
+
+def test_a_correlation_is_reported_with_a_confidence_interval():
+    df = _skewed()
+    rho, lo, hi = spearman_ci(df, "xp_next1", n_boot=300, seed=1)
+    assert lo < rho < hi
+
+
+def test_a_small_pool_gets_a_visibly_wider_interval():
+    """60 players is not enough to distinguish 'no skill' from 'good skill',
+    and the verdict has to say so rather than print a bare number."""
+    df = _skewed(n=400)
+    _, lo_big, hi_big = spearman_ci(df, "xp_next1", n_boot=300, seed=1)
+    _, lo_sm, hi_sm = spearman_ci(df.head(30), "xp_next1", n_boot=300, seed=1)
+    assert (hi_sm - lo_sm) > (hi_big - lo_big)
+
+
+def test_score_gameweek_compares_the_model_against_baselines_fairly():
+    scored = score_gameweek(PRED, pd.DataFrame({
+        "player_id": [1, 2, 3, 4], "actual": [2.0, 6.0, 9.0, 1.0],
+        "minutes": [90.0, 90.0, 90.0, 90.0]}))
+    assert "ranker_comparison" in scored
+    assert set(scored["ranker_comparison"]) >= {"xp_next1", "price"}
+    ns = {v["n"] for v in scored["ranker_comparison"].values()}
+    assert len(ns) == 1, "every ranker must be scored on the same pool"
+
+
+def test_summary_reports_the_interval_and_the_fair_comparison():
+    scored = score_gameweek(PRED, pd.DataFrame({
+        "player_id": [1, 2, 3, 4], "actual": [2.0, 6.0, 9.0, 1.0],
+        "minutes": [90.0, 90.0, 90.0, 90.0]}))
+    text = scored_summary(scored, gw=7)
+    assert "95%" in text
+    assert "price" in text
+
+
+def test_summary_warns_that_one_gameweek_settles_nothing():
+    scored = score_gameweek(PRED, pd.DataFrame({
+        "player_id": [1, 2, 3, 4], "actual": [2.0, 6.0, 9.0, 1.0],
+        "minutes": [90.0, 90.0, 90.0, 90.0]}))
+    assert "one gameweek" in scored_summary(scored, gw=7).lower()

@@ -232,3 +232,101 @@ def test_a_frame_without_per_gameweek_columns_still_picks_one_captain():
     s = optimize_squad(POOL, CFG)
     assert s.captain_id in s.starting_ids
     assert list(s.captains) == [None]
+
+
+# --- rank-relative scoring (2026-09-09 audit) ------------------------------
+
+def test_effective_xp_is_unchanged_when_ownership_weight_is_zero():
+    """The default must stay exactly the expected-points objective."""
+    from fpl.optimize.objective import effective_xp
+    from fpl.config import Config
+    df = pd.DataFrame({"player_id": [1, 2], "xp_next1": [5.0, 5.0],
+                       "ownership": [60.0, 1.0]})
+    out = effective_xp(df, Config(ownership_weight=0.0), "xp_next1")
+    assert list(out) == [5.0, 5.0]
+
+
+def test_a_differential_profile_prefers_the_less_owned_of_two_equal_players():
+    from fpl.optimize.objective import effective_xp
+    from fpl.config import Config
+    df = pd.DataFrame({"player_id": [1, 2], "xp_next1": [5.0, 5.0],
+                       "ownership": [60.0, 1.0]})
+    out = list(effective_xp(df, Config(risk_profile="differential",
+                                       ownership_weight=0.5), "xp_next1"))
+    assert out[1] > out[0]
+
+
+def test_a_template_profile_prefers_the_widely_owned_of_two_equal_players():
+    """Matching the field protects a rank you are defending; it is the opposite
+    tilt, not the absence of one."""
+    from fpl.optimize.objective import effective_xp
+    from fpl.config import Config
+    df = pd.DataFrame({"player_id": [1, 2], "xp_next1": [5.0, 5.0],
+                       "ownership": [60.0, 1.0]})
+    out = list(effective_xp(df, Config(risk_profile="template",
+                                       ownership_weight=0.5), "xp_next1"))
+    assert out[0] > out[1]
+
+
+def test_ownership_tilt_never_outranks_a_real_points_gap():
+    """A differential worth two points less must not be preferred at a sane
+    weight -- the tilt is a tie-breaker on rank, not a licence to punt."""
+    from fpl.optimize.objective import effective_xp
+    from fpl.config import Config
+    df = pd.DataFrame({"player_id": [1, 2], "xp_next1": [7.0, 5.0],
+                       "ownership": [60.0, 0.5]})
+    out = list(effective_xp(df, Config(risk_profile="differential",
+                                       ownership_weight=0.5), "xp_next1"))
+    assert out[0] > out[1]
+
+
+def test_the_squad_solver_breaks_ties_toward_differentials_when_asked():
+    """Two identical pools apart from ownership must not produce the same squad
+    under a differential profile -- otherwise the setting is decorative."""
+    from fpl.config import Config
+    pool = POOL.copy()
+    pool["ownership"] = [60.0 if i % 2 == 0 else 0.5 for i in range(len(pool))]
+    balanced = optimize_squad(pool, Config(budget=100.0, horizon_gw=1))
+    diff = optimize_squad(pool, Config(budget=100.0, horizon_gw=1,
+                                       risk_profile="differential",
+                                       ownership_weight=1.0))
+    owned_balanced = pool.set_index("player_id").loc[balanced.player_ids, "ownership"].mean()
+    owned_diff = pool.set_index("player_id").loc[diff.player_ids, "ownership"].mean()
+    assert owned_diff < owned_balanced
+
+
+def test_the_reported_squad_score_stays_honest_expected_points():
+    """The tilt is a solver preference, not a points forecast. What the user is
+    shown must remain real projected points, like xp_next5 beside xp_horizon."""
+    from fpl.config import Config
+    pool = POOL.copy()
+    pool["ownership"] = 50.0
+    cfg = Config(budget=100.0, horizon_gw=1, risk_profile="differential",
+                 ownership_weight=1.0)
+    squad = optimize_squad(pool, cfg)
+    raw = pool.set_index("player_id").loc[squad.starting_ids, "xp_next5"].sum()
+    assert squad.xp >= raw  # raw starters + the captain's doubled raw points
+    assert squad.xp <= raw * 2
+
+
+def test_reported_score_values_the_armband_across_the_whole_horizon():
+    """The armband is re-chosen free every gameweek, so its value is the sum of
+    each week's captain, DISCOUNTED like every other future point. Reporting one
+    week's captain instead -- or the captain's undiscounted horizon total --
+    misstates what the plan is worth."""
+    from fpl.config import Config
+    from fpl.optimize.objective import captain_values
+    cfg = Config(budget=100.0, horizon_gw=3, horizon_decay=0.5)
+    pool = POOL.copy()
+    # Deliberately uneven weeks, so summing the parts differs from the total.
+    pool["xp_gw1"] = pool["xp_next5"] * 0.6
+    pool["xp_gw2"] = pool["xp_next5"] * 0.3
+    pool["xp_gw3"] = pool["xp_next5"] * 0.1
+    squad = optimize_squad(pool, cfg, xp_col="xp_next5")
+    starters = pool.set_index("player_id").loc[squad.starting_ids, "xp_next5"].sum()
+    armband = squad.xp - starters
+    values = captain_values(pool, list(pool["player_id"]), cfg, "xp_next5")
+    expected = sum(values[e][pid] for e, pid in squad.captains.items())
+    assert armband == pytest.approx(expected, rel=1e-6)
+    # And that is strictly less than handing over a whole undiscounted horizon.
+    assert armband < pool.set_index("player_id").loc[squad.captain_id, "xp_next5"]
