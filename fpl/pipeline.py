@@ -23,10 +23,11 @@ from .model.scoring import blended_rates
 from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
 from .backtest.ledger import save_predictions, load_scored_summary
+from .model.calibration import fit_calibration, apply_calibration, scored_history
 from .model.simulate import simulate_event
 from .optimize.squad import optimize_squad, enumerate_squads
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
-                            RIVALS)
+                            field_bar, required_rivals, RIVALS)
 from .optimize.lineup import build_lineup
 from .optimize.chips import advise_chips
 from .optimize.transfers import optimize_transfers, selling_price, bank_after
@@ -118,11 +119,19 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     rng = np.random.default_rng(0)
     rivals = sample_rival_squads(xp, n_rivals=RIVALS, rng=rng)
     rival_scores = squad_scores(rivals, samples)
+    # The bar for the configured target is drawn from as many rivals as that
+    # target needs -- 400 cannot locate anything past about the 99th
+    # percentile, and "top of FPL" lives far beyond it.
+    target = float(cfg.rank_target)
+    n_needed = required_rivals(target)
+    bar = (field_bar(xp, samples, target, rng, n_rivals=n_needed)
+           if n_needed > RIVALS else None)
     best, scored = pick_best_squad(candidates, ids, samples, rival_scores,
-                                   target=float(cfg.rank_target))
+                                   target=target, bar=bar)
     stats = dict(scored[candidates.index(best)])
     stats["n_candidates"] = len(candidates)
-    stats["target"] = float(cfg.rank_target)
+    stats["target"] = target
+    stats["n_rivals"] = n_needed
     return best, stats
 
 
@@ -204,6 +213,18 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     minutes = minutes_model(players, cfg, news=news, current=current, rounds=rounds)
     xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
 
+    # Recalibrate per position against gameweeks already scored. Position is
+    # the axis that matters: a GLOBAL affine correction cannot change any pick,
+    # because every squad has the same fifteen slots and the argmax is
+    # unmoved by shifting and scaling every candidate identically.
+    calibration_note = None
+    if getattr(cfg, "calibrate", True):
+        history = scored_history(root, summaries, from_event)
+        cal = fit_calibration(history)
+        if cal is not None:
+            xp = apply_calibration(xp, cal)
+            calibration_note = cal.summary
+
     # Record the forecast before acting on it. Scoring it later (fpl.backtest.
     # ledger, scripts/score_gameweek.py) is the only thing that measures the
     # production model rather than a proxy of it.
@@ -266,6 +287,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
 
     rec = Recommendation(
         rank=rank_stats,
+        calibration=calibration_note,
         gw=from_event, deadline=deadline, mode=actual_mode, lineup=lineup,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         flags=freshness_flags(client, raw_fixtures, checked_through),

@@ -107,3 +107,18 @@ def test_rank_can_be_switched_off(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("budget: 100\noptimizer:\n  rank_sims: 0\n")
     assert load_config(p).rank_sims == 0
+
+
+def test_a_rank_target_too_extreme_to_simulate_is_rejected_at_load(tmp_path):
+    """Failing at load beats failing twenty minutes into a run. Locating the
+    99.999th percentile would need ten million rival managers."""
+    p = tmp_path / "c.yaml"
+    p.write_text("budget: 100\noptimizer:\n  rank_target: 0.99999\n")
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        load_config(p)
+
+
+def test_an_expensive_but_reachable_target_is_allowed(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("budget: 100\noptimizer:\n  rank_target: 0.99\n")
+    assert load_config(p).rank_target == 0.99

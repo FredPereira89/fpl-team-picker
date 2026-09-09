@@ -539,3 +539,32 @@ def test_the_rank_chosen_squad_is_still_a_legal_fifteen(tmp_path):
     assert pos.get("GKP", 0) == 2 and pos.get("DEF", 0) == 5
     assert pos.get("MID", 0) == 5 and pos.get("FWD", 0) == 3
     assert len(rec.lineup.xi) == 11
+
+
+def test_calibration_is_skipped_until_enough_gameweeks_are_scored(tmp_path):
+    """Early season there is nothing to fit on, and the run must proceed
+    uncalibrated rather than applying a correction built from noise."""
+    cfg = Config(rank_sims=0, horizon_gw=2)
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.calibration is None
+
+
+def test_calibration_can_be_switched_off(tmp_path):
+    cfg = Config(rank_sims=0, horizon_gw=2, calibrate=False)
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.calibration is None
+
+
+def test_the_report_does_not_present_the_field_comparison_as_a_forecast(tmp_path):
+    """`p_beat_target` is computed by simulating BOTH sides from the model's
+    own projections, so it inherits any optimism in them. On real GW1-3 data
+    the simulation implied +15 pts/GW against a realised +1.3. It is valid for
+    ranking candidate squads against each other and must not be read as a
+    prediction of where you will finish."""
+    from fpl.report.weekly import render, Recommendation
+    cfg = Config(rank_sims=400, rank_candidates=2, horizon_gw=2)
+    rec, xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    text = render(rec, xp)
+    low = text.lower()
+    assert "own projection" in low or "not a forecast" in low
+    assert "relative" in low

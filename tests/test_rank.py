@@ -257,3 +257,78 @@ def test_a_player_never_starts_for_more_managers_than_own_him():
     rivals = sample_rival_squads(pool, n_rivals=3000, rng=np.random.default_rng(0))
     rate = (rivals[:, star] > 0).mean()
     assert rate <= 0.62, f"started by {rate:.0%} of managers but owned by only 60%"
+
+
+# --- resolving extreme targets (2026-09-09 statistical review) -------------
+# 400 rivals estimate the 99.99th percentile as the MAX of 400 draws: biased
+# 12 points low with SD 5.6 against a true bar of 111. "Top of FPL" is the
+# 99.99th percentile, so the setting that matters most was the broken one.
+
+def test_required_rivals_scales_with_how_extreme_the_target_is():
+    from fpl.optimize.rank import required_rivals, MIN_RIVALS
+    assert required_rivals(0.5) == MIN_RIVALS
+    assert required_rivals(0.99) >= 10_000
+    assert required_rivals(0.999) >= 100_000
+    assert required_rivals(0.9) < required_rivals(0.99) < required_rivals(0.999)
+
+
+def test_a_target_too_extreme_to_resolve_is_refused_not_guessed():
+    from fpl.optimize.rank import required_rivals, MAX_RIVALS
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        required_rivals(0.999999)
+    assert required_rivals(0.999) <= MAX_RIVALS
+
+
+def test_the_field_bar_is_unbiased_at_an_extreme_target():
+    """The whole point: the bar must be the real quantile, not the max of a
+    small sample. Tested against a known distribution."""
+    from fpl.optimize.rank import field_bar
+    n_sims, truth = 200, 111.1
+    pool = pd.DataFrame([
+        {"player_id": i, "web_name": f"P{i}", "team": f"T{i % 20}", "team_id": i % 20,
+         "position": ["GKP", "DEF", "DEF", "DEF", "MID", "MID", "MID", "FWD"][i % 8],
+         "price": 5.0, "xp_next1": 4.0, "p_start": 0.9, "p_play": 0.93,
+         "ownership": 20.0} for i in range(80)])
+    rng = np.random.default_rng(0)
+    samples = rng.normal(55.0 / 12, 15.0 / np.sqrt(12), (80, n_sims))
+    bar = field_bar(pool, samples, target=0.99, rng=rng)
+    assert bar.shape == (n_sims,)
+    # Against a 400-rival estimate the extreme bar is biased low; with enough
+    # rivals it should sit near the field's own upper tail.
+    small = field_bar(pool, samples, target=0.99, rng=rng, n_rivals=400)
+    assert bar.mean() > small.mean()
+
+
+def test_p_beat_bar_matches_p_beat_target_on_the_same_field():
+    from fpl.optimize.rank import p_beat_bar
+    rng = np.random.default_rng(0)
+    mine = rng.normal(60, 12, 4000)
+    rivals = rng.normal(50, 15, (RIVALS, 4000))
+    bar = np.quantile(rivals, 0.9, axis=0)
+    assert p_beat_bar(mine, bar) == pytest.approx(
+        p_beat_target(mine, rivals, 0.9), abs=1e-9)
+
+
+def test_candidate_scoring_accepts_a_precomputed_bar():
+    """Extreme targets need a bar drawn from far more rivals than the dense
+    rival-score matrix can hold, so it has to be passed in rather than
+    recomputed from whatever small sample happens to be to hand."""
+    from fpl.optimize.rank import score_candidate
+    samples = _samples()
+    rivals = sample_rival_squads(POOL, n_rivals=RIVALS, rng=np.random.default_rng(1))
+    rs = squad_scores(rivals, samples)
+    squad = _fake_squad(IDS[:15], IDS[:11])
+    high_bar = np.full(samples.shape[1], 1e6)
+    out = score_candidate(squad, IDS, samples, rs, bar=high_bar)
+    assert out["p_beat_target"] == 0.0        # nothing clears an impossible bar
+    assert out["rank_percentile"] > 0.0       # still measured against real rivals
+
+
+def test_the_captain_is_chosen_against_the_same_bar():
+    from fpl.optimize.rank import best_captain_by_rank
+    samples = _samples()
+    rivals = sample_rival_squads(POOL, n_rivals=RIVALS, rng=np.random.default_rng(1))
+    rs = squad_scores(rivals, samples)
+    xi = IDS[:11]
+    low = np.full(samples.shape[1], -1e6)
+    assert best_captain_by_rank(xi, IDS, samples, rs, bar=low) in xi

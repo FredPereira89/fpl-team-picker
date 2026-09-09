@@ -50,6 +50,10 @@ class Config:
     # tracks expected points closely; raise it toward 0.9 to chase a green
     # arrow, which is the only regime where taking variance is correct.
     rank_target: float = 0.5
+    # Recalibrate xP per position against scored gameweeks (model.calibration).
+    # Self-limiting: it refuses to fit below MIN_GAMEWEEKS, so early in a season
+    # this is a no-op rather than a correction built from noise.
+    calibrate: bool = True
 
 
 def load_config(path: Path) -> Config:
@@ -84,6 +88,7 @@ def load_config(path: Path) -> Config:
         rank_sims=int(opt.get("rank_sims", d.rank_sims)),
         rank_candidates=int(opt.get("rank_candidates", d.rank_candidates)),
         rank_diversity=int(opt.get("rank_diversity", d.rank_diversity)),
+        calibrate=bool(model.get("calibrate", d.calibrate)),
         rank_target=float(opt.get("rank_target", d.rank_target)),
         free_transfers=int(raw.get("free_transfers", d.free_transfers)),
     )
@@ -110,6 +115,12 @@ def load_config(path: Path) -> Config:
             f"beat and must be in (0, 1) -- 0.5 is the median manager, 0.9 a "
             f"top-tenth week, got {cfg.rank_target}"
         )
+    if cfg.rank_sims > 0:
+        # Fail here rather than twenty minutes into a run: locating an extreme
+        # quantile of the field needs rivals in proportion to 1/(1 - target),
+        # and past a point that draw costs more than the answer is worth.
+        from .optimize.rank import required_rivals
+        required_rivals(cfg.rank_target)
     if cfg.rank_sims < 0:
         raise ValueError(f"optimizer.rank_sims must be >= 0, got {cfg.rank_sims}")
     if not 1 <= cfg.rank_diversity <= 15:

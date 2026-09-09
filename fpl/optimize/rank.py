@@ -244,7 +244,8 @@ def p_beat_target(my_scores: np.ndarray, rival_scores: np.ndarray,
 
 
 def best_captain_by_rank(xi: list[int], ids: list[int], samples: np.ndarray,
-                         rival_scores: np.ndarray, target: float = 0.5) -> int:
+                         rival_scores: np.ndarray, target: float = 0.5,
+                         bar: np.ndarray | None = None) -> int:
     """The armband maximising P(beat the `target` quantile of the field).
 
     Evaluated exhaustively -- eleven candidates is nothing. At the default
@@ -257,7 +258,9 @@ def best_captain_by_rank(xi: list[int], ids: list[int], samples: np.ndarray,
     for pid in xi:
         if pid not in row:
             continue
-        p = p_beat_target(base + samples[row[pid]], rival_scores, target)
+        total = base + samples[row[pid]]
+        p = (p_beat_bar(total, bar) if bar is not None
+             else p_beat_target(total, rival_scores, target))
         if p > best_p:
             best, best_p = pid, p
     return best
@@ -276,19 +279,21 @@ def squad_indicator(starting_ids, captain, ids) -> np.ndarray:
 
 
 def score_candidate(squad, ids: list[int], samples: np.ndarray,
-                    rival_scores: np.ndarray, target: float = 0.5) -> dict:
+                    rival_scores: np.ndarray, target: float = 0.5,
+                    bar: np.ndarray | None = None) -> dict:
     """How one candidate squad actually fares against the simulated field.
 
     The armband is re-chosen per candidate, because the best captain in a
     squad is a property of that squad and not of the pool.
     """
     captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
-                                   rival_scores, target)
+                                   rival_scores, target, bar=bar)
     mine = squad_scores(squad_indicator(squad.starting_ids, captain, ids)[None, :],
                         samples)[0]
     return {
         "captain": captain,
-        "p_beat_target": p_beat_target(mine, rival_scores, target),
+        "p_beat_target": (p_beat_bar(mine, bar) if bar is not None
+                          else p_beat_target(mine, rival_scores, target)),
         "rank_percentile": rank_percentile(mine, rival_scores),
         "mean_points": float(mine.mean()),
         "sd_points": float(mine.std()),
@@ -296,7 +301,8 @@ def score_candidate(squad, ids: list[int], samples: np.ndarray,
 
 
 def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
-                    rival_scores: np.ndarray, target: float = 0.5):
+                    rival_scores: np.ndarray, target: float = 0.5,
+                    bar: np.ndarray | None = None):
     """(best squad, [scores for every candidate]) by P(beating the field).
 
     Ties break on expected points, so when the simulation cannot separate two
@@ -309,8 +315,77 @@ def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
             "no candidate squads to rank -- the solver returned nothing to "
             "choose between"
         )
-    scored = [score_candidate(c, ids, samples, rival_scores, target)
+    scored = [score_candidate(c, ids, samples, rival_scores, target, bar=bar)
               for c in candidates]
     best = max(range(len(candidates)),
                key=lambda i: (scored[i]["p_beat_target"], scored[i]["mean_points"]))
     return candidates[best], scored
+
+
+# --- resolving how good the field's BEST managers are ----------------------
+# `RIVALS` is enough to locate the median manager and useless for the tail.
+# Estimating the 99.99th percentile from 400 draws returns the maximum of 400,
+# which came out 12 points low with an SD of 5.6 against a true bar of 111 --
+# and "top of FPL" IS the 99.99th percentile, so the target that matters most
+# was the one the sampler could not represent.
+MIN_RIVALS = RIVALS
+# Above this the draw costs more than the answer is worth. 0.9999 needs a
+# million rivals; refusing is better than returning a number that is wrong by
+# ten points without saying so.
+MAX_RIVALS = 200_000
+# Rival managers wanted ABOVE the bar before the bar is trusted. The K-th
+# largest of R draws has a relative standard error near 1/sqrt(K), so 100 puts
+# it around 10%.
+RIVALS_ABOVE_BAR = 100
+RIVAL_CHUNK = 2_000
+
+
+def required_rivals(target: float) -> int:
+    """How many rivals are needed to locate the `target` quantile.
+
+    A quantile is only as well determined as the number of observations beyond
+    it, so this scales as 1/(1 - target). Refuses rather than guesses when the
+    answer would need more rivals than `MAX_RIVALS`.
+    """
+    target = float(target)
+    if not 0.0 < target < 1.0:
+        raise ValueError(f"target must be in (0, 1), got {target}")
+    need = int(np.ceil(RIVALS_ABOVE_BAR / (1.0 - target)))
+    if need > MAX_RIVALS:
+        raise ValueError(
+            f"a target of {target} cannot be resolved: it would need {need:,} "
+            f"rival managers to place the bar and the cap is {MAX_RIVALS:,}. "
+            f"The most extreme target this can measure is "
+            f"{1 - RIVALS_ABOVE_BAR / MAX_RIVALS:.5f}."
+        )
+    return max(MIN_RIVALS, need)
+
+
+def field_bar(xp_df: pd.DataFrame, samples: np.ndarray, target: float,
+              rng: np.random.Generator, n_rivals: int | None = None) -> np.ndarray:
+    """Per-simulation score the field's `target` quantile manager achieves.
+
+    Drawn in chunks, keeping only the running top-K scores per simulation --
+    the bar is the K-th largest, so nothing below it ever has to be stored.
+    That is what makes a 200,000-rival field affordable: the dense
+    (rivals x simulations) matrix it would otherwise need is gigabytes, while
+    the top-K buffer is (K x simulations) with K around a hundred.
+    """
+    n_rivals = int(n_rivals) if n_rivals else required_rivals(target)
+    n_sims = samples.shape[1]
+    k = max(1, int(np.ceil((1.0 - float(target)) * n_rivals)))
+    top = np.full((k, n_sims), -np.inf)
+    drawn = 0
+    while drawn < n_rivals:
+        size = min(RIVAL_CHUNK, n_rivals - drawn)
+        scores = squad_scores(sample_rival_squads(xp_df, size, rng), samples)
+        merged = np.concatenate([top, scores], axis=0)
+        # -k gives the k largest per column; their minimum is the bar.
+        top = np.partition(merged, -k, axis=0)[-k:]
+        drawn += size
+    return top.min(axis=0)
+
+
+def p_beat_bar(my_scores: np.ndarray, bar: np.ndarray) -> float:
+    """P(this squad clears a per-simulation bar), as returned by `field_bar`."""
+    return float(np.mean(np.asarray(my_scores, dtype=float) > np.asarray(bar, dtype=float)))

@@ -27,6 +27,9 @@ class Recommendation:
     # when the distributional layer is switched off. Expected points alone say
     # nothing about rank; this is the number that answers the actual question.
     rank: dict | None = None
+    # What the per-position recalibration was fitted on, or None when there is
+    # not yet enough scored history to fit one.
+    calibration: str | None = None
 
 
 def _name(df, pid) -> str:
@@ -92,6 +95,13 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
             f"Chosen from {r['n_candidates']} candidate squads by how often "
             f"each beat a simulated field, not by expected points alone — "
             f"points your rivals also score do not move your rank.",
+            "",
+            "> These percentages are **relative, not a forecast**. Both your "
+            "squad and the simulated field are drawn from this model's own "
+            "projections, so any optimism in them appears on both sides. "
+            "Replayed against real GW1–3 results the simulation implied "
+            "+15 pts/GW where the realised edge was +1.3. Use them to compare "
+            "candidate squads, not to predict your finishing rank.",
             "",
         ]
 

@@ -1,0 +1,174 @@
+"""Walk-forward backtesting: score the model on history instead of waiting.
+
+The ledger held ONE scored gameweek, and a single gameweek cannot distinguish
+a good model from a lucky one -- the weekly edge has an SD near 15 points, so
+n=3 gave a 95% CI of [-36, +39]. Everything else in the statistical review was
+blocked on that. This replays past gameweeks using only the data that existed
+before each one, which is the only way to get a sample without waiting years.
+"""
+import numpy as np
+import pandas as pd
+import pytest
+
+from fpl.backtest.walkforward import (realised_score, autosub, XI_MIN,
+                                      squad_ledger, weekly_edge)
+
+# 15 players: a legal squad. Player 1 is the keeper, 20 the reserve keeper.
+FRAME = pd.DataFrame([
+    {"player_id": 1,  "position": "GKP", "xp_next1": 4.0, "actual": 3.0,  "minutes": 90.0},
+    {"player_id": 2,  "position": "DEF", "xp_next1": 5.0, "actual": 2.0,  "minutes": 90.0},
+    {"player_id": 3,  "position": "DEF", "xp_next1": 4.5, "actual": 6.0,  "minutes": 90.0},
+    {"player_id": 4,  "position": "DEF", "xp_next1": 4.0, "actual": 0.0,  "minutes": 0.0},
+    {"player_id": 5,  "position": "MID", "xp_next1": 6.0, "actual": 9.0,  "minutes": 90.0},
+    {"player_id": 6,  "position": "MID", "xp_next1": 5.5, "actual": 2.0,  "minutes": 90.0},
+    {"player_id": 7,  "position": "MID", "xp_next1": 5.0, "actual": 1.0,  "minutes": 45},
+    {"player_id": 8,  "position": "MID", "xp_next1": 4.5, "actual": 5.0,  "minutes": 90.0},
+    {"player_id": 9,  "position": "FWD", "xp_next1": 8.0, "actual": 12.0, "minutes": 90.0},
+    {"player_id": 10, "position": "FWD", "xp_next1": 6.5, "actual": 2.0,  "minutes": 90.0},
+    {"player_id": 11, "position": "FWD", "xp_next1": 3.0, "actual": 0.0,  "minutes": 0.0},
+    # bench
+    {"player_id": 20, "position": "GKP", "xp_next1": 2.0, "actual": 5.0,  "minutes": 90.0},
+    {"player_id": 21, "position": "DEF", "xp_next1": 2.5, "actual": 7.0,  "minutes": 90.0},
+    {"player_id": 22, "position": "MID", "xp_next1": 2.2, "actual": 4.0,  "minutes": 90.0},
+    {"player_id": 23, "position": "FWD", "xp_next1": 1.0, "actual": 0.0,  "minutes": 0.0},
+]).set_index("player_id")
+
+SQUAD = list(FRAME.index)
+XI = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_a_starter_who_did_not_play_is_replaced_from_the_bench():
+    """FPL substitutes automatically. A backtest that ignores autosubs charges
+    the model for blanks it would never actually have taken."""
+    xi, subs = autosub(SQUAD, XI, FRAME)
+    assert 4 not in xi and 11 not in xi        # both blanked
+    assert 21 in xi                            # first eligible outfield sub
+    assert len(xi) == 11
+    assert len(subs) == 2
+
+
+def test_autosubs_never_break_the_formation():
+    xi, _ = autosub(SQUAD, XI, FRAME)
+    counts = FRAME.loc[xi, "position"].value_counts()
+    assert counts.get("GKP", 0) == 1
+    for pos, lo in XI_MIN.items():
+        assert counts.get(pos, 0) >= lo
+
+
+def test_a_bench_player_who_also_blanked_is_skipped():
+    xi, _ = autosub(SQUAD, XI, FRAME)
+    assert 23 not in xi                        # bench forward played 0 minutes
+
+
+def test_the_armband_can_only_go_to_someone_who_started():
+    """C and VC are named before the deadline, so a player substituted IN
+    cannot take the armband no matter how many points he scored."""
+    frame = FRAME.copy()
+    frame.loc[[9, 10], ["actual", "minutes"]] = 0.0
+    frame.loc[21, "actual"] = 20.0             # the sub hauls
+    out = realised_score(SQUAD, XI, frame)
+    assert out["captain"] in XI
+    assert out["captain"] != 21
+
+
+def test_the_armband_falls_to_the_vice_when_the_captain_blanks():
+    frame = FRAME.copy()
+    frame.loc[9, ["actual", "minutes"]] = 0.0     # top xP player blanks
+    out = realised_score(SQUAD, XI, frame)
+    assert out["captain"] != 9
+    assert out["captain"] == 10                # the vice, named before kick-off
+
+
+def test_realised_score_counts_the_captain_twice():
+    out = realised_score(SQUAD, XI, FRAME)
+    cap = out["captain"]
+    assert cap == 9
+    assert out["points"] == sum(FRAME.loc[p, "actual"] for p in out["xi"]) + 12.0
+
+
+def test_the_squad_ledger_reports_the_edge_against_the_real_field():
+    rows = squad_ledger({1: (60.0, 50), 2: (68.0, 81), 3: (53.0, 36)})
+    assert list(rows["edge"]) == [10.0, -13.0, 17.0]
+
+
+def test_the_weekly_edge_is_reported_with_an_interval_not_a_bare_mean():
+    """The single most misleading thing a 3-gameweek backtest can do is print
+    a mean edge with no interval. The SD of the weekly edge is near 15."""
+    out = weekly_edge([0.0, -13.0, 17.0])
+    assert out["n"] == 3
+    assert out["mean"] == pytest.approx(4.0 / 3)
+    assert out["ci_low"] < out["mean"] < out["ci_high"]
+    assert out["ci_high"] - out["ci_low"] > 40      # n=3 resolves nothing
+    assert out["detectable_edge"] > 15              # and says so
+
+
+def test_the_edge_verdict_refuses_to_call_a_tiny_sample():
+    out = weekly_edge([0.0, -13.0, 17.0])
+    assert "cannot" in out["verdict"].lower() or "not" in out["verdict"].lower()
+
+
+def test_a_season_of_gameweeks_narrows_the_interval():
+    rng = np.random.default_rng(0)
+    small = weekly_edge(list(rng.normal(5, 15, 3)))
+    big = weekly_edge(list(rng.normal(5, 15, 38)))
+    assert big["detectable_edge"] < small["detectable_edge"]
+    assert (big["ci_high"] - big["ci_low"]) < (small["ci_high"] - small["ci_low"])
+
+
+# --- the replay itself: no data from the future may reach a forecast -------
+
+def _summaries(rounds_by_player, past_season=True):
+    """element-summary shaped dicts with a stable prior season plus rounds."""
+    out = {}
+    for pid, rounds in rounds_by_player.items():
+        hist = [{"round": r, "minutes": m, "total_points": p, "starts": 1 if m >= 60 else 0,
+                 "goals_scored": 0, "assists": 0, "clean_sheets": 0, "goals_conceded": 1,
+                 "saves": 0, "bonus": 0, "bps": 10, "yellow_cards": 0, "red_cards": 0,
+                 "own_goals": 0, "expected_goals": "0.1", "expected_assists": "0.1",
+                 "defensive_contribution": 3} for r, m, p in rounds]
+        past = [{"season_name": "2025/26", "minutes": 2500, "total_points": 120,
+                 "goals_scored": 5, "assists": 4, "clean_sheets": 8, "goals_conceded": 30,
+                 "saves": 0, "bonus": 8, "bps": 400, "yellow_cards": 2, "red_cards": 0,
+                 "own_goals": 0, "expected_goals": "5.0", "expected_assists": "4.0",
+                 "defensive_contribution": 250, "starts": 28}] if past_season else []
+        out[int(pid)] = {"history": hist, "history_past": past}
+    return out
+
+
+def test_a_forecast_cannot_see_the_gameweek_it_is_forecasting():
+    """The property the whole harness rests on. If a replayed GW2 forecast
+    changes when GW2 and GW3 results are added to the input, the backtest is
+    scoring the model on its own answers."""
+    from fpl.backtest.walkforward import forecast_inputs
+    early = _summaries({1: [(1, 90, 6)]})
+    late = _summaries({1: [(1, 90, 6), (2, 90, 25), (3, 90, 30)]})
+    a = forecast_inputs(early, before_event=2)
+    b = forecast_inputs(late, before_event=2)
+    pd.testing.assert_frame_equal(a["current"], b["current"])
+    pd.testing.assert_frame_equal(a["rounds"], b["rounds"])
+
+
+def test_later_gameweeks_do_reach_a_later_forecast():
+    """The complement -- proving the previous test is not passing vacuously."""
+    from fpl.backtest.walkforward import forecast_inputs
+    late = _summaries({1: [(1, 90, 6), (2, 90, 25), (3, 90, 30)]})
+    gw2 = forecast_inputs(late, before_event=2)
+    gw4 = forecast_inputs(late, before_event=4)
+    assert len(gw4["rounds"]) > len(gw2["rounds"])
+    assert gw4["current"]["total_points"].sum() > gw2["current"]["total_points"].sum()
+
+
+def test_a_replay_never_overwrites_a_live_forecast(tmp_path):
+    """A replayed forecast is contaminated -- it is built from TODAY's price,
+    status and news rather than the deadline's. Letting it overwrite the real
+    pre-deadline record destroys the only honest thing in the ledger."""
+    from fpl.backtest.ledger import save_predictions, load_predictions
+    from fpl.backtest.walkforward import replayable_gameweeks
+    pred = pd.DataFrame({"player_id": [1], "web_name": ["A"], "team": ["T"],
+                         "position": ["MID"], "price": [7.0], "xp_next1": [5.0],
+                         "xp_next5": [25.0], "p_start": [0.9], "e_minutes": [80.0],
+                         "confidence": ["high"], "flags": [[]]})
+    save_predictions(pred, gw=2, root=tmp_path)
+    assert replayable_gameweeks([1, 2, 3], tmp_path) == [1, 3]
+    assert replayable_gameweeks([1, 2, 3], tmp_path, overwrite=True) == [1, 2, 3]
+    assert load_predictions(2, tmp_path)["xp_next1"].iloc[0] == 5.0
