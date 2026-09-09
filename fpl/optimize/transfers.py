@@ -60,7 +60,8 @@ class TransferPlan:
     gain: float = 0.0
 
 
-def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
+def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,
+           excluded=None, min_different=1):
     ids = [int(i) for i in xp_df["player_id"]]
     # Solve on the tilted score, report the untilted one -- see optimize.squad.
     tilted = tilted_frame(xp_df, cfg, xp_col)
@@ -96,6 +97,15 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
     # keep at least 15 - max_changes of the current squad
     prob += pulp.lpSum(squad[i] for i in ids if i in current_set) >= 15 - max_changes
 
+    # No-good cuts, so the caller can ask for several DIFFERENT plans rather
+    # than the same one repeatedly. See optimize.squad.enumerate_squads for why
+    # near-identical candidates make a rank comparison meaningless.
+    for combo in (excluded or []):
+        present = [i for i in combo if i in squad]
+        if present:
+            drop = min(int(min_different), len(present))
+            prob += pulp.lpSum(squad[i] for i in present) <= len(present) - drop
+
     if pulp.LpStatus[prob.solve(pulp.PULP_CBC_CMD(msg=False))] != "Optimal":
         return None
     chosen = [i for i in ids if squad[i].value() > 0.5]
@@ -105,6 +115,69 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None):
     gross = sum(raw_xp[i] for i in starters) + captain_bonus(
         cap_vars, captain_values(xp_df, ids, cfg, xp_col))
     return chosen, starters, gross
+
+
+def _plan(current_set, solved, free_transfers, cfg) -> TransferPlan:
+    chosen, starters, gross = solved
+    actual = len(current_set - set(chosen))
+    hit = max(0, actual - int(free_transfers)) * int(cfg.hit_cost)
+    return TransferPlan(
+        out_ids=sorted(current_set - set(chosen)),
+        in_ids=sorted(set(chosen) - current_set),
+        n_transfers=actual,
+        hit_cost=hit,
+        squad_ids=chosen,
+        starting_ids=starters,
+        gross_xp=round(gross, 3),
+        net_xp=round(gross - hit, 3),
+    )
+
+
+def _budget_and_cost(xp_df, current_set, bank, selling_prices):
+    price = dict(zip(xp_df["player_id"].astype(int), xp_df["price"].astype(float)))
+    cost = dict(price)
+    for pid in current_set:
+        cost[pid] = float((selling_prices or {}).get(pid, price[pid]))
+    return float(bank) + sum(cost[i] for i in current_set), cost
+
+
+def enumerate_transfer_plans(xp_df: pd.DataFrame, current_squad_ids: list[int],
+                             bank: float, free_transfers: int, cfg,
+                             xp_col: str = "xp_next5",
+                             selling_prices: dict[int, float] | None = None,
+                             k: int = 8, min_different: int = 1) -> list[TransferPlan]:
+    """Several plausible transfer plans, for the rank layer to choose between.
+
+    The weekly run had no equivalent of `optimize.squad.enumerate_squads`, so
+    the distributional layer was never applied to it -- the plain
+    expected-points objective it exists to replace was still deciding every
+    gameweek on its own, in the one mode anybody runs weekly.
+
+    Plans are enumerated across both axes that matter: how many transfers to
+    make (0 up to free plus paid hits) and, within a count, which players move.
+    `min_different` defaults to 1 rather than the 4 used for a squad rebuild --
+    a transfer plan IS a small change, and forcing candidates four players
+    apart would only return plans nobody would consider.
+    """
+    current_set = {int(i) for i in current_squad_ids}
+    budget, cost = _budget_and_cost(xp_df, current_set, bank, selling_prices)
+    plans, excluded = [], []
+    for n in range(0, int(free_transfers) + int(cfg.max_paid_hits) + 1):
+        for _ in range(int(k)):
+            solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost,
+                            excluded=excluded, min_different=int(min_different))
+            if solved is None:
+                break
+            plan = _plan(current_set, solved, free_transfers, cfg)
+            if any(set(plan.squad_ids) == set(p.squad_ids) for p in plans):
+                break
+            plans.append(plan)
+            excluded.append(list(plan.squad_ids))
+            if len(plans) >= int(k):
+                break
+        if len(plans) >= int(k):
+            break
+    return plans
 
 
 def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: float,
@@ -119,31 +192,14 @@ def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: 
     proceeds from selling him honest.
     """
     current_set = set(int(i) for i in current_squad_ids)
-    price = dict(zip(xp_df["player_id"].astype(int), xp_df["price"].astype(float)))
-    cost = dict(price)
-    for pid in current_set:
-        cost[pid] = float((selling_prices or {}).get(pid, price[pid]))
-    budget = float(bank) + sum(cost[i] for i in current_set)
+    budget, cost = _budget_and_cost(xp_df, current_set, bank, selling_prices)
 
     options: list[TransferPlan] = []
     for n in range(0, int(free_transfers) + int(cfg.max_paid_hits) + 1):
         solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost)
         if solved is None:
             continue
-        chosen, starters, gross = solved
-        actual = len(current_set - set(chosen))
-        paid = max(0, actual - int(free_transfers))
-        hit = paid * int(cfg.hit_cost)
-        options.append(TransferPlan(
-            out_ids=sorted(current_set - set(chosen)),
-            in_ids=sorted(set(chosen) - current_set),
-            n_transfers=actual,
-            hit_cost=hit,
-            squad_ids=chosen,
-            starting_ids=starters,
-            gross_xp=round(gross, 3),
-            net_xp=round(gross - hit, 3),
-        ))
+        options.append(_plan(current_set, solved, free_transfers, cfg))
 
     # options[0] is the 0-transfer baseline; always keep it visible
     baseline = options[0].net_xp if options else 0.0

@@ -177,3 +177,16 @@ def test_report_states_where_the_squad_lands_against_the_field():
 def test_report_omits_the_field_section_when_nothing_was_simulated():
     text = render(_rec(), XP)
     assert "against the field" not in text.lower()
+
+
+def test_a_no_transfer_verdict_names_the_objective_that_produced_it():
+    """When the rank layer is on, holding was chosen because no plan beat the
+    field by more than its hit cost -- not because of projected points."""
+    rec = _rec()
+    rec.mode = 2
+    rec.transfers = type("T", (), {"n_transfers": 0, "out_ids": [], "in_ids": [],
+                                   "hit_cost": 0, "gain": 0.0, "net_xp": 50.0,
+                                   "baseline_xp": 50.0})()
+    rec.rank = {"p_beat_target": 0.5, "rank_percentile": 0.5, "mean_points": 60.0,
+                "sd_points": 15.0, "n_candidates": 8, "target": 0.5, "captain": 1}
+    assert "beat the field" in render(rec, XP).lower()

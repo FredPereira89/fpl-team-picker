@@ -280,16 +280,21 @@ def squad_indicator(starting_ids, captain, ids) -> np.ndarray:
 
 def score_candidate(squad, ids: list[int], samples: np.ndarray,
                     rival_scores: np.ndarray, target: float = 0.5,
-                    bar: np.ndarray | None = None) -> dict:
+                    bar: np.ndarray | None = None, penalty: float = 0.0) -> dict:
     """How one candidate squad actually fares against the simulated field.
 
     The armband is re-chosen per candidate, because the best captain in a
     squad is a property of that squad and not of the pool.
+
+    `penalty` is subtracted from every simulated week. For a transfer plan it
+    is the points hit: without it a plan costing -4 would be compared against
+    the field on the same terms as one costing nothing, which quietly makes
+    hits free.
     """
     captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
                                    rival_scores, target, bar=bar)
     mine = squad_scores(squad_indicator(squad.starting_ids, captain, ids)[None, :],
-                        samples)[0]
+                        samples)[0] - float(penalty)
     return {
         "captain": captain,
         "p_beat_target": (p_beat_bar(mine, bar) if bar is not None
@@ -302,7 +307,7 @@ def score_candidate(squad, ids: list[int], samples: np.ndarray,
 
 def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
                     rival_scores: np.ndarray, target: float = 0.5,
-                    bar: np.ndarray | None = None):
+                    bar: np.ndarray | None = None, penalties=None):
     """(best squad, [scores for every candidate]) by P(beating the field).
 
     Ties break on expected points, so when the simulation cannot separate two
@@ -315,8 +320,10 @@ def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
             "no candidate squads to rank -- the solver returned nothing to "
             "choose between"
         )
-    scored = [score_candidate(c, ids, samples, rival_scores, target, bar=bar)
-              for c in candidates]
+    costs = list(penalties) if penalties is not None else [0.0] * len(candidates)
+    scored = [score_candidate(c, ids, samples, rival_scores, target, bar=bar,
+                              penalty=float(costs[i]))
+              for i, c in enumerate(candidates)]
     best = max(range(len(candidates)),
                key=lambda i: (scored[i]["p_beat_target"], scored[i]["mean_points"]))
     return candidates[best], scored

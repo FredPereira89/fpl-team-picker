@@ -136,7 +136,18 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     out.append("### Transfers this week")
     t = rec.transfers
     if t is None or t.n_transfers == 0:
-        out.append("No transfer recommended — the squad is already optimal on projected points.")
+        if rec.rank:
+            # Naming the objective matters: with the rank layer on, holding was
+            # chosen because no plan beat the field by more than its hit cost,
+            # which is a different test from "no plan gains projected points".
+            out.append(
+                f"No transfer recommended — of {rec.rank['n_candidates']} plans "
+                f"considered, none beat the field more often than holding once "
+                f"its points hit was charged against it."
+            )
+        else:
+            out.append("No transfer recommended — the squad is already optimal "
+                       "on projected points.")
     else:
         for o, i in _pair_by_position(df, t.out_ids, t.in_ids):
             out.append(f"{df.loc[o, 'web_name']} → {df.loc[i, 'web_name']}")

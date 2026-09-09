@@ -30,7 +30,8 @@ from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
                             field_bar, required_rivals, RIVALS)
 from .optimize.lineup import build_lineup
 from .optimize.chips import advise_chips
-from .optimize.transfers import optimize_transfers, selling_price, bank_after
+from .optimize.transfers import (optimize_transfers, enumerate_transfer_plans,
+                                 selling_price, bank_after)
 from .report.weekly import Recommendation, render
 
 # Backtest result (scripts/run_backtest.py, trained on 2024/25, tested on
@@ -95,6 +96,61 @@ def freshness_flags(client, fixtures: list[dict], checked_through: int) -> list[
     ]
 
 
+def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
+    """Simulated player points and the field to judge candidates against."""
+    ids, samples = simulate_event(players, rates, minutes, tfx, from_event,
+                                  n_sims=int(cfg.rank_sims))
+    rng = np.random.default_rng(0)
+    rivals = sample_rival_squads(xp, n_rivals=RIVALS, rng=rng)
+    rival_scores = squad_scores(rivals, samples)
+    target = float(cfg.rank_target)
+    n_needed = required_rivals(target)
+    bar = (field_bar(xp, samples, target, rng, n_rivals=n_needed)
+           if n_needed > RIVALS else None)
+    return ids, samples, rival_scores, target, n_needed, bar
+
+
+def _rank_stats(scored, index, n_candidates, target, n_rivals) -> dict:
+    stats = dict(scored[index])
+    stats["n_candidates"] = int(n_candidates)
+    stats["target"] = float(target)
+    stats["n_rivals"] = int(n_rivals)
+    return stats
+
+
+def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
+                      current_squad, bank, free_transfers, selling):
+    """This week's transfer plan, judged against the field rather than on xP.
+
+    The distributional layer was wired into the squad REBUILD only, so the mode
+    that runs every week -- deciding one or two transfers -- never used it, and
+    the expected-points objective it exists to replace was still deciding alone.
+
+    Each candidate is charged its own points hit inside the simulation, so a
+    -4 plan has to beat the field by more than a free one rather than being
+    compared on equal terms.
+    """
+    best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
+                                       xp_col=HORIZON_COL, selling_prices=selling)
+    if int(cfg.rank_sims) <= 0:
+        return best, options, None
+
+    plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
+                                     xp_col=HORIZON_COL, selling_prices=selling,
+                                     k=int(cfg.rank_candidates))
+    if not plans:
+        return best, options, None
+
+    ids, samples, rival_scores, target, n_needed, bar = _rank_context(
+        xp, players, rates, minutes, tfx, cfg, from_event)
+    chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
+                                     bar=bar, penalties=[p.hit_cost for p in plans])
+    index = plans.index(chosen)
+    stats = _rank_stats(scored, index, len(plans), target, n_needed)
+    stats["hit_cost"] = int(chosen.hit_cost)
+    return chosen, options, stats
+
+
 def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     """The squad to recommend, and how it fares against a simulated field.
 
@@ -114,25 +170,15 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     if not candidates:
         return optimize_squad(xp, cfg, xp_col=HORIZON_COL), None
 
-    ids, samples = simulate_event(players, rates, minutes, tfx, from_event,
-                                  n_sims=int(cfg.rank_sims))
-    rng = np.random.default_rng(0)
-    rivals = sample_rival_squads(xp, n_rivals=RIVALS, rng=rng)
-    rival_scores = squad_scores(rivals, samples)
     # The bar for the configured target is drawn from as many rivals as that
     # target needs -- 400 cannot locate anything past about the 99th
     # percentile, and "top of FPL" lives far beyond it.
-    target = float(cfg.rank_target)
-    n_needed = required_rivals(target)
-    bar = (field_bar(xp, samples, target, rng, n_rivals=n_needed)
-           if n_needed > RIVALS else None)
+    ids, samples, rival_scores, target, n_needed, bar = _rank_context(
+        xp, players, rates, minutes, tfx, cfg, from_event)
     best, scored = pick_best_squad(candidates, ids, samples, rival_scores,
                                    target=target, bar=bar)
-    stats = dict(scored[candidates.index(best)])
-    stats["n_candidates"] = len(candidates)
-    stats["target"] = target
-    stats["n_rivals"] = n_needed
-    return best, stats
+    return best, _rank_stats(scored, candidates.index(best), len(candidates),
+                             target, n_needed)
 
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
@@ -253,8 +299,9 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         }
         # xp_horizon, not xp_next5: the solver should discount gains it may
         # never collect, while the report still shows the honest raw total.
-        best, _options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
-                                            xp_col=HORIZON_COL, selling_prices=selling)
+        best, _options, rank_stats = _choose_transfers(
+            xp, players, rates, minutes, tfx, cfg, from_event,
+            current_squad, bank, free_transfers, selling)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
     else:
         actual_mode = 1

@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from fpl.config import Config
 from fpl.optimize.transfers import optimize_transfers, selling_price, TransferPlan
 
@@ -173,3 +174,57 @@ def test_holding_the_squad_stays_feasible_at_selling_prices():
     best, options = optimize_transfers(POOL, CURRENT, bank=0.0, free_transfers=1, cfg=cfg,
                                        selling_prices=selling)
     assert options[0].n_transfers == 0
+
+
+# --- rank-aware transfer choice (2026-09-09) -------------------------------
+# The distributional layer was wired into the squad build and NOT into the
+# weekly transfer run, which is the one anyone actually uses. So the objective
+# it exists to replace -- expected points -- was still deciding every week.
+
+def test_enumerate_transfer_plans_returns_genuinely_different_plans():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cur = list(CURRENT)
+    plans = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5), xp_col="xp_next5", k=4,
+                                     min_different=1)
+    assert len(plans) >= 2
+    seen = {frozenset(p.squad_ids) for p in plans}
+    assert len(seen) == len(plans)
+
+
+def test_every_enumerated_plan_is_a_legal_fifteen():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cur = list(CURRENT)
+    pos = POOL.set_index("player_id")["position"]
+    for plan in enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1,
+                                         cfg=Config(budget=100.0, horizon_gw=5), xp_col="xp_next5", k=4):
+        counts = pos.loc[plan.squad_ids].value_counts()
+        assert len(plan.squad_ids) == 15
+        assert counts.get("GKP", 0) == 2 and counts.get("DEF", 0) == 5
+        assert counts.get("MID", 0) == 5 and counts.get("FWD", 0) == 3
+
+
+def test_plans_carry_the_hit_they_would_cost():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cur = list(CURRENT)
+    plans = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=0,
+                                     cfg=Config(budget=100.0, horizon_gw=5), xp_col="xp_next5", k=5)
+    for plan in plans:
+        assert plan.hit_cost == max(0, plan.n_transfers - 0) * Config().hit_cost
+
+
+def test_rank_scoring_charges_a_plan_for_its_hit():
+    """A transfer costing -4 has to beat the field by MORE than one that does
+    not. Scoring the squads without the penalty silently makes hits free."""
+    import numpy as np
+    from fpl.optimize.rank import score_candidate
+    from fpl.optimize.squad import Squad
+    ids = [int(i) for i in POOL["player_id"]]
+    rng = np.random.default_rng(0)
+    samples = rng.poisson(3.0, (len(ids), 2000)).astype(float)
+    rivals = rng.normal(35.0, 8.0, (200, 2000))
+    squad = Squad(ids[:15], ids[:11], 100.0, 0.0)
+    free = score_candidate(squad, ids, samples, rivals)
+    hit = score_candidate(squad, ids, samples, rivals, penalty=4.0)
+    assert hit["p_beat_target"] < free["p_beat_target"]
+    assert hit["mean_points"] == pytest.approx(free["mean_points"] - 4.0)

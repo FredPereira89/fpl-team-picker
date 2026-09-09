@@ -568,3 +568,28 @@ def test_the_report_does_not_present_the_field_comparison_as_a_forecast(tmp_path
     low = text.lower()
     assert "own projection" in low or "not a forecast" in low
     assert "relative" in low
+
+
+def test_the_weekly_transfer_run_also_reports_against_the_field(tmp_path):
+    """The distributional layer was wired into the squad build only, so the
+    mode anyone actually runs every week never used it."""
+    cfg = Config(horizon_gw=2, rank_sims=600, rank_candidates=3)
+    current = [1, 20, 4, 5, 23, 24, 42, 48, 49, 67, 68, 69, 92, 93, 94]   # 2/5/5/3 across five clubs, 3 each
+    rec, _ = run(cfg, mode=2, from_event=1, root=tmp_path, client=FakeClient(),
+                 current_squad=current, bank=2.0, free_transfers=1)
+    assert rec.mode == 2
+    assert rec.rank is not None
+    assert 0.0 <= rec.rank["p_beat_target"] <= 1.0
+    assert rec.rank["n_candidates"] >= 1
+
+
+def test_the_weekly_run_is_unchanged_when_the_rank_layer_is_off(tmp_path):
+    """Regression guard: rank_sims=0 must reproduce the plain MILP plan."""
+    from fpl.optimize.transfers import optimize_transfers
+    cfg = Config(horizon_gw=2, rank_sims=0)
+    current = [1, 20, 4, 5, 23, 24, 42, 48, 49, 67, 68, 69, 92, 93, 94]   # 2/5/5/3 across five clubs, 3 each
+    rec, xp = run(cfg, mode=2, from_event=1, root=tmp_path, client=FakeClient(),
+                  current_squad=current, bank=2.0, free_transfers=1)
+    assert rec.rank is None
+    best, _ = optimize_transfers(xp, current, 2.0, 1, cfg, xp_col="xp_horizon")
+    assert set(rec.squad_ids) == set(best.squad_ids)
