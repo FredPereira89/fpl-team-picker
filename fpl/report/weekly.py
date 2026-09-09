@@ -23,6 +23,10 @@ class Recommendation:
     flags: list[str] = field(default_factory=list)
     stale: bool = False
     trust: str = ""
+    # Where this squad lands against a simulated field (optimize.rank), or None
+    # when the distributional layer is switched off. Expected points alone say
+    # nothing about rank; this is the number that answers the actual question.
+    rank: dict | None = None
 
 
 def _name(df, pid) -> str:
@@ -73,6 +77,23 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
             members.sort(key=lambda p: float(df.loc[p, "xp_next1"]), reverse=True)
             out.append(f"{pos}: " + ", ".join(_name(df, p) for p in members))
     out.append("")
+
+    if rec.rank:
+        r = rec.rank
+        bar = ("the median manager" if abs(float(r["target"]) - 0.5) < 1e-9
+               else f"the top {(1 - float(r['target'])) * 100:.0f}% of managers")
+        out += [
+            "### Against the field",
+            f"Projected {r['mean_points']:.1f} points (± {r['sd_points']:.1f}), "
+            f"which beats {bar} in **{r['p_beat_target']:.0%}** of simulated "
+            f"gameweeks and finishes ahead of "
+            f"**{r['rank_percentile']:.0%}** of rival squads on average.",
+            "",
+            f"Chosen from {r['n_candidates']} candidate squads by how often "
+            f"each beat a simulated field, not by expected points alone — "
+            f"points your rivals also score do not move your rank.",
+            "",
+        ]
 
     out.append("### Bench (in order)")
     for n, pid in enumerate(lu.bench, start=1):

@@ -160,3 +160,20 @@ def test_transfer_gain_says_it_is_discounted():
                         gross_xp=60.0, net_xp=60.0, baseline_xp=57.5, gain=2.5)
     text = render(_rec(transfers=plan), XP)
     assert "discounted" in text.lower()
+
+
+def test_report_states_where_the_squad_lands_against_the_field():
+    """Expected points alone never answer the question the user is actually
+    asking, which is whether this team beats the people they play against."""
+    rec = _rec()
+    rec.rank = {"p_beat_target": 0.63, "rank_percentile": 0.71, "mean_points": 58.4,
+                "sd_points": 14.2, "n_candidates": 8, "target": 0.5,
+                "captain": rec.lineup.captain}
+    text = render(rec, XP)
+    assert "63%" in text
+    assert "58.4" in text
+
+
+def test_report_omits_the_field_section_when_nothing_was_simulated():
+    text = render(_rec(), XP)
+    assert "against the field" not in text.lower()

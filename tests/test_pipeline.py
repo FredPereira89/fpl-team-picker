@@ -74,7 +74,7 @@ class FakeClient:
 
 
 def test_mode_one_produces_a_valid_recommendation(tmp_path):
-    rec, xp = run(Config(budget=100.0), mode=1, from_event=1, root=tmp_path,
+    rec, xp = run(Config(rank_sims=0, budget=100.0), mode=1, from_event=1, root=tmp_path,
                   client=FakeClient())
     assert isinstance(rec, Recommendation)
     assert len(rec.squad_ids) == 15
@@ -84,14 +84,14 @@ def test_mode_one_produces_a_valid_recommendation(tmp_path):
 
 
 def test_mode_one_respects_budget(tmp_path):
-    rec, _ = run(Config(budget=100.0), mode=1, from_event=1, root=tmp_path,
+    rec, _ = run(Config(rank_sims=0, budget=100.0), mode=1, from_event=1, root=tmp_path,
                  client=FakeClient())
     assert rec.squad_value <= 100.0 + 1e-6
 
 
 def test_returns_contract_frame(tmp_path):
     from fpl.model.xp import CONTRACT_COLUMNS
-    cfg = Config(horizon_gw=5)
+    cfg = Config(rank_sims=0, horizon_gw=5)
     _, xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
     # The fixed contract, then the per-gameweek breakdown the optimizers use to
     # move the armband week by week.
@@ -111,7 +111,7 @@ def test_stale_flag_propagates_to_report(tmp_path):
     class StaleClient(FakeClient):
         stale = True
 
-    rec, _ = run(Config(), mode=1, from_event=1, root=tmp_path, client=StaleClient())
+    rec, _ = run(Config(rank_sims=0), mode=1, from_event=1, root=tmp_path, client=StaleClient())
     assert rec.stale is True
 
 
@@ -133,7 +133,7 @@ def test_mode_two_bank_reflects_pre_transfer_squad_value(tmp_path):
         if all(v == 0 for v in need.values()):
             break
 
-    rec, xp = run(Config(max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
+    rec, xp = run(Config(rank_sims=0, max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
                   client=FakeClient(), current_squad=current, bank=5.0, free_transfers=2)
     prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
     value_before = round(sum(prices[i] for i in current), 1)
@@ -149,7 +149,7 @@ def test_mode_falls_back_honestly_when_no_current_squad_available(tmp_path):
     fetches one today) must report BOTH mode and trust as reflecting the
     Mode 1 rebuild that actually ran, not the requested mode=2 label with
     the trust caveat silently dropped."""
-    rec, _ = run(Config(), mode=2, from_event=1, root=tmp_path, client=FakeClient())
+    rec, _ = run(Config(rank_sims=0), mode=2, from_event=1, root=tmp_path, client=FakeClient())
     assert rec.mode == 1
     assert rec.trust != ""
     assert rec.transfers is None
@@ -162,7 +162,7 @@ def test_news_override_reaches_the_minutes_model(tmp_path):
     that the pipeline forwards `news` at all -- so a broken wire here would be
     invisible: the run still succeeds and just silently ignores the correction.
     """
-    cfg = Config(budget=100.0)
+    cfg = Config(rank_sims=0, budget=100.0)
     _, base = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
     _, cut = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient(),
                  news={5: {"p_start_override": 0.0, "note": "benched",
@@ -203,7 +203,7 @@ def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
                 for pid in player_ids if int(pid) in by_id
             }
 
-    cfg = Config(budget=100.0, horizon_gw=3)
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
     _, base_xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
     _, leaky_xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=LeakyClient())
 
@@ -216,7 +216,7 @@ def test_every_run_records_its_forecast_for_later_scoring(tmp_path):
     """Nothing else in the pipeline persists the xP frame, so without this the
     week's forecast is gone before the gameweek it predicts is played."""
     from fpl.backtest.ledger import load_predictions
-    cfg = Config(budget=100.0, horizon_gw=3)
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
     _, xp = run(cfg, mode=1, from_event=4, root=tmp_path, client=FakeClient())
 
     ledger = load_predictions(gw=4, root=tmp_path)
@@ -229,7 +229,7 @@ def test_trust_text_prefers_a_real_measurement_over_the_hard_coded_note(tmp_path
     real gameweek has been scored, that measurement is what the user should see."""
     from fpl.backtest.ledger import save_scored_summary
     save_scored_summary("GW1 scored: rank quality +0.472 overall.", root=tmp_path)
-    cfg = Config(budget=100.0, horizon_gw=3)
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
     rec, _ = run(cfg, mode=1, from_event=2, root=tmp_path, client=FakeClient())
     assert rec.trust == "GW1 scored: rank quality +0.472 overall."
 
@@ -260,7 +260,7 @@ def test_mode_two_bank_credits_selling_value_not_market_value(tmp_path):
     # every player bought 0.4 below today's price -> sells 0.2 below it
     purchase = {pid: round(price[pid] - 0.4, 1) for pid in current}
 
-    rec, xp = run(Config(max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
+    rec, xp = run(Config(rank_sims=0, max_paid_hits=2), mode=2, from_event=1, root=tmp_path,
                   client=FakeClient(), current_squad=current, bank=5.0,
                   free_transfers=2, purchase_prices=purchase)
 
@@ -294,8 +294,8 @@ def test_squad_prefers_points_available_sooner_when_the_horizon_is_discounted(tm
     """A double gameweek five weeks out is worth less than one this week — the
     squad can be changed before then. Without a discount the solver treats them
     as identical."""
-    patient = Config(budget=100.0, horizon_gw=5, horizon_decay=1.0)
-    impatient = Config(budget=100.0, horizon_gw=5, horizon_decay=0.3)
+    patient = Config(rank_sims=0, budget=100.0, horizon_gw=5, horizon_decay=1.0)
+    impatient = Config(rank_sims=0, budget=100.0, horizon_gw=5, horizon_decay=0.3)
 
     rec_p, xp_p = run(patient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
     rec_i, xp_i = run(impatient, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
@@ -351,7 +351,7 @@ def test_pipeline_requires_summaries_newer_than_the_last_finished_match(tmp_path
     upcoming = [f for f in FIXTURES if f["event"] > 2]
     client = NotBeforeRecordingClient(played + upcoming)
 
-    run(Config(budget=100.0, horizon_gw=3), mode=1, from_event=3, root=tmp_path,
+    run(Config(rank_sims=0, budget=100.0, horizon_gw=3), mode=1, from_event=3, root=tmp_path,
         client=client)
 
     last_ko = max(datetime.fromisoformat(f["kickoff_time"].replace("Z", "+00:00"))
@@ -363,7 +363,7 @@ def test_pipeline_leaves_ttl_in_charge_before_any_match_is_played(tmp_path):
     """Pre-season there is nothing to be stale against — demanding a floor here
     would force a needless refetch of every player."""
     client = NotBeforeRecordingClient(FIXTURES)
-    run(Config(budget=100.0, horizon_gw=3), mode=1, from_event=1, root=tmp_path,
+    run(Config(rank_sims=0, budget=100.0, horizon_gw=3), mode=1, from_event=1, root=tmp_path,
         client=client)
     assert client.not_before is None
 
@@ -375,7 +375,7 @@ def test_a_spent_chip_is_never_recommended_again(tmp_path):
     know a chip was gone and cheerfully suggested it every week."""
     # SkewedClient gives teams 1 and 2 a double gameweek in event 1, which is
     # what makes the advisor reach for a Triple Captain.
-    cfg = Config(budget=100.0, horizon_gw=3)
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
     rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
     assert rec.chip.chip is not None, "fixture must advise some chip to be a test"
 
@@ -399,7 +399,7 @@ def test_a_matchday_shortens_the_cache_ttl(tmp_path):
             return [dict(f, kickoff_time=today) for f in FIXTURES]
 
     client = TodayClient()
-    run(Config(budget=100.0, horizon_gw=3, cache_ttl_hours=6,
+    run(Config(rank_sims=0, budget=100.0, horizon_gw=3, cache_ttl_hours=6,
                cache_ttl_matchday_hours=1), mode=1, from_event=1, root=tmp_path,
         client=client)
     assert client.ttl_hours == 1.0
@@ -410,7 +410,7 @@ def test_off_matchday_the_ordinary_ttl_stands(tmp_path):
         ttl_hours = 6.0
 
     client = QuietClient()
-    run(Config(budget=100.0, horizon_gw=3, cache_ttl_hours=6,
+    run(Config(rank_sims=0, budget=100.0, horizon_gw=3, cache_ttl_hours=6,
                cache_ttl_matchday_hours=1), mode=1, from_event=1, root=tmp_path,
         client=client)
     assert client.ttl_hours == 6.0
@@ -419,7 +419,7 @@ def test_off_matchday_the_ordinary_ttl_stands(tmp_path):
 def test_current_season_form_reaches_the_projection(tmp_path):
     """blend_form existed and was unit-tested for a month while nothing called
     it — the model ran on last season alone."""
-    cfg = Config(budget=100.0, horizon_gw=3)
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
     _, cold = run(cfg, mode=1, from_event=5, root=tmp_path, client=FakeClient())
     _, hot = run(cfg, mode=1, from_event=5, root=tmp_path, client=InFormClient())
 
@@ -444,7 +444,7 @@ def test_no_refresh_survives_a_matchday(tmp_path):
 
     client = TodayClient()
     # what run_gameweek.py --no-refresh builds
-    cfg = Config(budget=100.0, horizon_gw=3, cache_ttl_hours=24 * 365,
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3, cache_ttl_hours=24 * 365,
                  cache_ttl_matchday_hours=24 * 365)
     run(cfg, mode=1, from_event=1, root=tmp_path, client=client)
     assert client.ttl_hours == 24 * 365
@@ -508,3 +508,34 @@ def test_fallback_trust_note_does_not_repeat_the_refuted_goalkeeper_claim():
     assert "no measurable skill" not in TRUST_SUMMARY.lower()
     # It must still say the fallback is not a measurement of this model.
     assert "proxy" in TRUST_SUMMARY.lower()
+
+
+# --- the distributional layer in the pipeline (2026-09-09) -----------------
+
+def test_the_report_says_how_often_the_squad_beats_the_field(tmp_path):
+    """A squad's expected points mean nothing on their own -- the user needs to
+    know where that lands against the people they are competing with."""
+    cfg = Config(horizon_gw=2, rank_sims=600, rank_candidates=3)
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.rank is not None
+    assert 0.0 <= rec.rank["p_beat_target"] <= 1.0
+    assert 0.0 <= rec.rank["rank_percentile"] <= 1.0
+    assert rec.rank["sd_points"] > 0
+    assert rec.rank["n_candidates"] == 3
+
+
+def test_turning_the_simulation_off_falls_back_to_the_plain_optimum(tmp_path):
+    cfg = Config(horizon_gw=2, rank_sims=0)
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.rank is None
+    assert len(rec.squad_ids) == 15
+
+
+def test_the_rank_chosen_squad_is_still_a_legal_fifteen(tmp_path):
+    cfg = Config(horizon_gw=2, rank_sims=600, rank_candidates=4)
+    rec, xp = run(cfg, mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    pos = xp.set_index("player_id").loc[rec.squad_ids, "position"].value_counts()
+    assert len(rec.squad_ids) == 15
+    assert pos.get("GKP", 0) == 2 and pos.get("DEF", 0) == 5
+    assert pos.get("MID", 0) == 5 and pos.get("FWD", 0) == 3
+    assert len(rec.lineup.xi) == 11

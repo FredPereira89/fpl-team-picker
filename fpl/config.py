@@ -34,6 +34,22 @@ class Config:
     cache_ttl_matchday_hours: int = 1
     entry_id: int | None = None
     free_transfers: int = 1
+    # The distributional layer (model.simulate + optimize.rank). Squads are
+    # compared by how often they beat a simulated field rather than by
+    # expected points alone, which is the only way correlated bets -- three
+    # defenders sharing one clean sheet -- get priced as the single bet they
+    # are. 0 sims turns it off and falls back to the plain MILP optimum.
+    rank_sims: int = 4000
+    rank_candidates: int = 8
+    # How many of the fifteen must change between candidate squads. At 1 the
+    # candidates are one swap apart and the choice between them is noise; 4
+    # makes them genuinely different teams, which is the only setting at which
+    # rank selection changed the answer on real data.
+    rank_diversity: int = 4
+    # Which slice of the field to try to beat. 0.5 is the median manager and
+    # tracks expected points closely; raise it toward 0.9 to chase a green
+    # arrow, which is the only regime where taking variance is correct.
+    rank_target: float = 0.5
 
 
 def load_config(path: Path) -> Config:
@@ -65,6 +81,10 @@ def load_config(path: Path) -> Config:
         cache_ttl_hours=int(data.get("cache_ttl_hours", d.cache_ttl_hours)),
         cache_ttl_matchday_hours=int(data.get("cache_ttl_matchday_hours", d.cache_ttl_matchday_hours)),
         entry_id=raw.get("entry_id", d.entry_id),
+        rank_sims=int(opt.get("rank_sims", d.rank_sims)),
+        rank_candidates=int(opt.get("rank_candidates", d.rank_candidates)),
+        rank_diversity=int(opt.get("rank_diversity", d.rank_diversity)),
+        rank_target=float(opt.get("rank_target", d.rank_target)),
         free_transfers=int(raw.get("free_transfers", d.free_transfers)),
     )
 
@@ -84,6 +104,21 @@ def load_config(path: Path) -> Config:
             f"nothing. Leave it null (team_ratings still takes an injected "
             f"provider object for tests and future use)."
         )
+    if not 0.0 < cfg.rank_target < 1.0:
+        raise ValueError(
+            f"optimizer.rank_target is the quantile of the field to try to "
+            f"beat and must be in (0, 1) -- 0.5 is the median manager, 0.9 a "
+            f"top-tenth week, got {cfg.rank_target}"
+        )
+    if cfg.rank_sims < 0:
+        raise ValueError(f"optimizer.rank_sims must be >= 0, got {cfg.rank_sims}")
+    if not 1 <= cfg.rank_diversity <= 15:
+        raise ValueError(
+            f"optimizer.rank_diversity is how many of the fifteen must differ "
+            f"between candidate squads and must be in 1..15, got {cfg.rank_diversity}")
+    if cfg.rank_candidates < 1:
+        raise ValueError(
+            f"optimizer.rank_candidates must be at least 1, got {cfg.rank_candidates}")
     if not 0.0 <= cfg.ownership_weight <= 1.0:
         raise ValueError(
             f"risk.ownership_weight scales the ownership tilt from 0 (pure "

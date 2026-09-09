@@ -330,3 +330,55 @@ def test_reported_score_values_the_armband_across_the_whole_horizon():
     assert armband == pytest.approx(expected, rel=1e-6)
     # And that is strictly less than handing over a whole undiscounted horizon.
     assert armband < pool.set_index("player_id").loc[squad.captain_id, "xp_next5"]
+
+
+# --- candidate enumeration for rank selection (2026-09-09) -----------------
+# A MILP maximises one linear objective. Rank is not linear in the squad, so
+# it cannot be maximised directly -- the solver instead proposes its best few
+# squads and the simulation picks between them.
+
+def test_enumerate_returns_distinct_squads_best_first():
+    from fpl.optimize.squad import enumerate_squads
+    squads = enumerate_squads(POOL, Config(budget=100.0, horizon_gw=1), k=5)
+    assert len(squads) == 5
+    seen = {frozenset(s.player_ids) for s in squads}
+    assert len(seen) == 5, "no-good cuts must exclude squads already returned"
+    assert [round(s.xp, 6) for s in squads] == sorted(
+        (round(s.xp, 6) for s in squads), reverse=True)
+
+
+def test_the_first_enumerated_squad_is_the_plain_optimum():
+    from fpl.optimize.squad import enumerate_squads
+    cfg = Config(budget=100.0, horizon_gw=1)
+    assert (set(enumerate_squads(POOL, cfg, k=3)[0].player_ids)
+            == set(optimize_squad(POOL, cfg).player_ids))
+
+
+def test_enumeration_stops_cleanly_when_the_pool_runs_out():
+    """Exactly fifteen legal players across five clubs: one possible squad, so
+    the second no-good cut makes the problem infeasible and enumeration has to
+    stop rather than raise."""
+    from fpl.optimize.squad import enumerate_squads
+    positions = ["GKP"] * 2 + ["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3
+    exact = pd.DataFrame([
+        {"player_id": i, "web_name": f"X{i}", "team": f"C{i % 5}",
+         "position": pos, "price": 4.0, "xp_next1": 2.0, "xp_next5": 10.0,
+         "p_start": 0.9, "e_minutes": 80.0, "confidence": "high", "flags": []}
+        for i, pos in enumerate(positions)
+    ])
+    squads = enumerate_squads(exact, Config(budget=200.0, horizon_gw=1), k=50)
+    assert len(squads) == 1
+
+
+def test_enumerated_squads_can_be_forced_genuinely_far_apart():
+    """A no-good cut of one player produces near-identical squads, and on real
+    data that made rank selection re-pick the plain optimum every time -- 7s of
+    search that changed nothing. Candidates only inform the choice if they are
+    actually different teams."""
+    from fpl.optimize.squad import enumerate_squads
+    cfg = Config(budget=100.0, horizon_gw=1)
+    near = enumerate_squads(POOL, cfg, k=4, min_different=1)
+    far = enumerate_squads(POOL, cfg, k=4, min_different=5)
+    first = set(near[0].player_ids)
+    assert len(first - set(near[1].player_ids)) == 1
+    assert len(first - set(far[1].player_ids)) >= 5

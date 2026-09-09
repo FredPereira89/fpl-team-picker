@@ -5,6 +5,7 @@ headless cron invocation works by construction.
 """
 from datetime import datetime, timezone
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 from .config import Config
@@ -22,7 +23,10 @@ from .model.scoring import blended_rates
 from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
 from .backtest.ledger import save_predictions, load_scored_summary
-from .optimize.squad import optimize_squad
+from .model.simulate import simulate_event
+from .optimize.squad import optimize_squad, enumerate_squads
+from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
+                            RIVALS)
 from .optimize.lineup import build_lineup
 from .optimize.chips import advise_chips
 from .optimize.transfers import optimize_transfers, selling_price, bank_after
@@ -88,6 +92,38 @@ def freshness_flags(client, fixtures: list[dict], checked_through: int) -> list[
         f"stat corrections since then are not in this forecast — delete "
         f"data/cache/element-summary-*.json to force a refresh."
     ]
+
+
+def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
+    """The squad to recommend, and how it fares against a simulated field.
+
+    With `optimizer.rank_sims` at 0 this is the plain MILP optimum and nothing
+    is simulated. Otherwise the solver proposes its best `rank_candidates`
+    squads and the simulation picks between them by how often they beat the
+    field -- the step that lets a correlated bet (three defenders, one clean
+    sheet) be priced as the single bet it actually is, which no linear
+    objective can do.
+    """
+    if int(cfg.rank_sims) <= 0:
+        return optimize_squad(xp, cfg, xp_col=HORIZON_COL), None
+
+    candidates = enumerate_squads(xp, cfg, xp_col=HORIZON_COL,
+                                  k=int(cfg.rank_candidates),
+                                  min_different=int(cfg.rank_diversity))
+    if not candidates:
+        return optimize_squad(xp, cfg, xp_col=HORIZON_COL), None
+
+    ids, samples = simulate_event(players, rates, minutes, tfx, from_event,
+                                  n_sims=int(cfg.rank_sims))
+    rng = np.random.default_rng(0)
+    rivals = sample_rival_squads(xp, n_rivals=RIVALS, rng=rng)
+    rival_scores = squad_scores(rivals, samples)
+    best, scored = pick_best_squad(candidates, ids, samples, rival_scores,
+                                   target=float(cfg.rank_target))
+    stats = dict(scored[candidates.index(best)])
+    stats["n_candidates"] = len(candidates)
+    stats["target"] = float(cfg.rank_target)
+    return best, stats
 
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
@@ -182,6 +218,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # actually is, never silently mislabelled as a transfer recommendation.
     prices = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
     transfers = None
+    rank_stats = None
     selling = {}
     if mode == 2 and current_squad:
         actual_mode = 2
@@ -200,7 +237,8 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
     else:
         actual_mode = 1
-        squad = optimize_squad(xp, cfg, xp_col=HORIZON_COL)
+        squad, rank_stats = _choose_squad(xp, players, rates, minutes, tfx, cfg,
+                                          from_event)
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
 
     from .optimize.squad import Squad
@@ -227,6 +265,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         cash = round(cfg.budget - value, 1)
 
     rec = Recommendation(
+        rank=rank_stats,
         gw=from_event, deadline=deadline, mode=actual_mode, lineup=lineup,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         flags=freshness_flags(client, raw_fixtures, checked_through),

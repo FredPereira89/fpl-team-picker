@@ -29,9 +29,51 @@ class Squad:
     captains: dict = field(default_factory=dict)
 
 
+def enumerate_squads(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5", k: int = 8,
+                     must_include: list[int] | None = None,
+                     banned: list[int] | None = None,
+                     min_different: int = 4) -> list[Squad]:
+    """The solver's `k` best squads, best first.
+
+    A MILP maximises a LINEAR objective, and rank is not linear in the squad --
+    P(beat the field) depends on the joint distribution of fifteen correlated
+    players, which no objective row can express. So the solver is used for what
+    it is good at, proposing strong squads, and `optimize.rank` chooses between
+    them by simulation.
+
+    Successive solutions are forced apart by a no-good cut: having returned a
+    squad, require at least `min_different` of its fifteen to be dropped.
+
+    `min_different` is the setting that decides whether any of this is worth
+    doing. At 1 the candidates are the same team with one player swapped, and
+    on real GW4 data rank selection then re-picked the plain optimum at every
+    target -- seven seconds of search that changed nothing. At 4 the candidates
+    are genuinely different teams, and the choice starts to matter: the same
+    data gave up 0.5 xP to move P(a top-tenth week) from 0.593 to 0.651.
+
+    Returns fewer than `k` if the pool runs out of squads that far apart.
+    """
+    out: list[Squad] = []
+    excluded: list[list[int]] = []
+    for _ in range(int(k)):
+        squad = _solve_squad(xp_df, cfg, xp_col, must_include, banned, excluded,
+                             min_different=int(min_different))
+        if squad is None:
+            break
+        out.append(squad)
+        excluded.append(list(squad.player_ids))
+    return out
+
+
 def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
                    must_include: list[int] | None = None,
                    banned: list[int] | None = None) -> Squad:
+    """The single best squad by expected points."""
+    return _solve_squad(xp_df, cfg, xp_col, must_include, banned, excluded=None)
+
+
+def _solve_squad(xp_df, cfg, xp_col, must_include, banned, excluded,
+                 min_different: int = 1):
     pool = xp_df[~xp_df["player_id"].isin(banned or [])].reset_index(drop=True)
     ids = [int(i) for i in pool["player_id"]]
     # The solver optimises the ownership-tilted score; everything reported back
@@ -74,8 +116,16 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
             raise ValueError(f"must_include player {i} is not in the pool")
         prob += squad[i] == 1
 
+    for combo in (excluded or []):
+        present = [i for i in combo if i in squad]
+        if present:
+            drop = min(int(min_different), len(present))
+            prob += pulp.lpSum(squad[i] for i in present) <= len(present) - drop
+
     status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
     if pulp.LpStatus[status] != "Optimal":
+        if excluded:
+            return None          # the pool ran out of distinct squads
         raise ValueError(
             f"squad selection infeasible under the given constraints "
             f"(budget £{cfg.budget}m, status={pulp.LpStatus[status]})"

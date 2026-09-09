@@ -85,3 +85,25 @@ def test_ownership_weight_outside_zero_to_one_is_rejected(tmp_path):
     p.write_text("budget: 100\nrisk:\n  profile: differential\n  ownership_weight: 4\n")
     with pytest.raises(ValueError, match="ownership_weight"):
         load_config(p)
+
+
+def test_rank_settings_load_with_sane_defaults(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("budget: 100\n")
+    cfg = load_config(p)
+    assert cfg.rank_sims > 0          # the distributional layer is on
+    assert cfg.rank_candidates >= 1
+    assert cfg.rank_target == 0.5     # "beat the median manager"
+
+
+def test_rank_target_must_be_a_quantile(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("budget: 100\noptimizer:\n  rank_target: 1.4\n")
+    with pytest.raises(ValueError, match="rank_target"):
+        load_config(p)
+
+
+def test_rank_can_be_switched_off(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("budget: 100\noptimizer:\n  rank_sims: 0\n")
+    assert load_config(p).rank_sims == 0
