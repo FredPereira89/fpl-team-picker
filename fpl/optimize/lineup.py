@@ -15,6 +15,12 @@ class Lineup:
     xp: float
 
 
+def bench_order(bench_ids: list[int], position: dict[int, str],
+                xp: dict[int, float]) -> list[int]:
+    """Reserve keeper first -- he can only cover the keeper -- then by projection."""
+    return sorted(bench_ids, key=lambda p: (position[p] != "GKP", -float(xp[p])))
+
+
 def choose_captain(xi: list[int], xp: dict[int, float],
                    p_play: dict[int, float]) -> tuple[int, int]:
     """(captain, vice) maximising what the armband is actually worth.
@@ -51,11 +57,7 @@ def build_lineup(squad: Squad, xp_df: pd.DataFrame, xp_col: str = "xp_next1") ->
     xi = list(squad.starting_ids)
     bench_ids = [i for i in squad.player_ids if i not in set(xi)]
 
-    # The reserve keeper can only replace the keeper, so it always sits in slot 1.
-    keepers = [i for i in bench_ids if df.loc[i, "position"] == "GKP"]
-    outfield = [i for i in bench_ids if df.loc[i, "position"] != "GKP"]
-    outfield.sort(key=lambda i: float(df.loc[i, xp_col]), reverse=True)
-    bench = keepers + outfield
+    bench = bench_order(bench_ids, df["position"].to_dict(), df[xp_col].to_dict())
 
     counts = df.loc[xi, "position"].value_counts()
     formation = f"{counts.get('DEF', 0)}-{counts.get('MID', 0)}-{counts.get('FWD', 0)}"

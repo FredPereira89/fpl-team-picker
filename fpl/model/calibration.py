@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from .xp import EVENT_PREFIX
+
 # Below this the correction is not distinguishable from noise. The review's
 # sensitivity analysis put the smallest detectable weekly edge at ~13 pts on
 # ten gameweeks, so this is already a generous floor.
@@ -123,12 +125,21 @@ def apply_calibration(xp: pd.DataFrame, cal: Calibration | None) -> pd.DataFrame
     slope = pos.map(cal.slope).fillna(cal.pooled_slope).astype(float)
     inter = pos.map(cal.intercept).fillna(cal.pooled_intercept).astype(float)
     base = out["xp_next1"].astype(float).replace(0.0, np.nan)
+    # The true ceiling on how many matches any column can cover: the number of
+    # per-event columns actually in this frame. A rotation-risk player with a
+    # fixture doubt THIS week (xp_next1 near zero) but a normal horizon
+    # otherwise inflates the values/base ratio far past his real match count,
+    # so bounding it to an arbitrary constant either over-applies the
+    # per-match offset for him or truncates it for a genuinely long horizon.
+    # Bounding to the real number of event columns fixes both.
+    n_events = sum(1 for c in out.columns if str(c).startswith(EVENT_PREFIX))
+    ceiling = float(n_events) if n_events else 20.0
     for col in projection_columns(out):
         values = out[col].astype(float)
         # How many matches this column covers, inferred from its size relative
         # to the single-gameweek projection, so the offset is not applied once
         # to a five-gameweek total.
-        windows = (values / base).fillna(1.0).clip(lower=0.0, upper=20.0)
+        windows = (values / base).fillna(1.0).clip(lower=0.0, upper=ceiling)
         out[col] = (slope * values + inter * windows).clip(lower=0.0)
     return out
 

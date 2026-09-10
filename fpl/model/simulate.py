@@ -21,7 +21,7 @@ distribution without moving the projection underneath it.
 import numpy as np
 import pandas as pd
 
-from .minutes import M_SUB
+from .minutes import M_START, M_SUB
 from .xp import (GOAL_PTS, CS_PTS, ASSIST_PTS, DC_PTS, DC_THRESHOLD,
                  SAVES_PER_POINT, CONCEDED_PER_PENALTY, CONCEDED_PENALTY_POSITIONS)
 from .bps import FIXTURE_SENSITIVITY, MAX_BONUS_PER_MATCH
@@ -62,7 +62,7 @@ def simulate_event(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataF
     M = _aligned(minutes, ids, mins_cols if has_m_start
                  else [c for c in mins_cols if c != "m_start"])
     if not has_m_start:  # frames from outside model.minutes
-        M = np.insert(M, 3, M[:, 2] * 0 + 80.0, axis=1)
+        M = np.insert(M, 3, M[:, 2] * 0 + M_START, axis=1)
     positions = players.set_index("player_id").reindex(ids)["position"].to_numpy()
     team_of = players.set_index("player_id").reindex(ids)["team_id"].astype(int).to_numpy()
 

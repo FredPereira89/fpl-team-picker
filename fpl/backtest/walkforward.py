@@ -28,10 +28,9 @@ import pandas as pd
 from scipy import stats
 
 from ..data.normalize import history_current_frame, history_rounds_frame
+from ..optimize.lineup import bench_order
+from ..optimize.squad import XI_MIN
 
-XI_SIZE = 11
-XI_MIN = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
-CAPTAIN_MULTIPLIER = 2
 # Power to detect an edge, and the two-sided alpha it is detected at. Used to
 # report what a given number of gameweeks could actually have shown.
 POWER = 0.80
@@ -96,9 +95,8 @@ def autosub(squad_ids, starting_ids, frame) -> tuple[list[int], list[tuple[int, 
     mins = frame["minutes"].to_dict()
     xp = frame["xp_next1"].to_dict()
     xi = [int(p) for p in starting_ids]
-    bench = [int(p) for p in squad_ids if int(p) not in set(xi)]
-    # Bench order: the reserve keeper covers only the keeper, then by projection.
-    bench.sort(key=lambda p: (pos[p] != "GKP", -float(xp[p])))
+    bench_ids = [int(p) for p in squad_ids if int(p) not in set(xi)]
+    bench = bench_order(bench_ids, pos, xp)
 
     subs = []
     for out in [p for p in list(xi) if float(mins.get(p, 0)) <= 0]:

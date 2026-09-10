@@ -36,11 +36,12 @@ expectation-only model prices them as three independent bets no matter what.
 import numpy as np
 import pandas as pd
 
+from .squad import XI_SIZE
+
 # Rival managers drawn per evaluation. A rank percentile is a mean over these,
 # so the standard error goes as 1/sqrt(RIVALS); 400 puts it near 2.5%, which
 # is finer than the differences worth acting on.
 RIVALS = 400
-XI_SIZE = 11
 CAPTAIN_MULTIPLIER = 2
 # Legal FPL formations as (DEF, MID, FWD). One goalkeeper always.
 FORMATIONS = [(3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 5, 1), (4, 3, 3),
@@ -60,7 +61,7 @@ def field_weights(xp_df: pd.DataFrame) -> np.ndarray:
                if "p_play" in xp_df.columns else np.ones(len(xp_df)))
     raw = own * playing
     total = raw.sum()
-    if total <= 0:
+    if not (total > 0):
         return np.zeros(len(xp_df))
     starters = raw / total * XI_SIZE
     return starters + _captain_shares(xp_df)
@@ -92,7 +93,7 @@ def _inclusion_probabilities(weights: np.ndarray, k: int,
     """
     w = np.asarray(weights, dtype=float).clip(min=0.0)
     k = int(min(k, len(w)))
-    if k <= 0 or w.sum() <= 0:
+    if k <= 0 or not (w.sum() > 0):
         return np.zeros(len(w))
     cap = (np.ones(len(w)) if ceiling is None
            else np.clip(np.asarray(ceiling, dtype=float), 0.0, 1.0))
@@ -104,7 +105,7 @@ def _inclusion_probabilities(weights: np.ndarray, k: int,
         spare = k - cap[over].sum()
         rest = ~over
         rest_total = w[rest].sum()
-        if rest_total <= 0 or spare <= 0:
+        if not (rest_total > 0) or not (spare > 0):
             break
         scaled = pi.copy()
         scaled[over] = cap[over]
@@ -131,7 +132,7 @@ def _systematic_pps(pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndar
     silently inflates everyone before it.
     """
     total = float(pi.sum())
-    if k <= 0 or total <= 0:
+    if k <= 0 or not (total > 0):
         return np.array([], dtype=int)
     step = total / k
     order = rng.permutation(len(pi))

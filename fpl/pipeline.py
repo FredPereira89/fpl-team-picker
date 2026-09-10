@@ -130,25 +130,28 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
     -4 plan has to beat the field by more than a free one rather than being
     compared on equal terms.
     """
+    # optimize_transfers solves the same unconstrained n=0 plan that
+    # enumerate_transfer_plans's own sweep produces, so with the rank layer on
+    # it is only run as a fallback for the (rare) case the enumeration finds
+    # no candidate plans -- not unconditionally, which paid for that solve
+    # twice on every weekly run.
+    if int(cfg.rank_sims) > 0:
+        plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
+                                         xp_col=HORIZON_COL, selling_prices=selling,
+                                         k=int(cfg.rank_candidates))
+        if plans:
+            ids, samples, rival_scores, target, n_needed, bar = _rank_context(
+                xp, players, rates, minutes, tfx, cfg, from_event)
+            chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
+                                             bar=bar, penalties=[p.hit_cost for p in plans])
+            index = plans.index(chosen)
+            stats = _rank_stats(scored, index, len(plans), target, n_needed)
+            stats["hit_cost"] = int(chosen.hit_cost)
+            return chosen, None, stats
+
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
                                        xp_col=HORIZON_COL, selling_prices=selling)
-    if int(cfg.rank_sims) <= 0:
-        return best, options, None
-
-    plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
-                                     xp_col=HORIZON_COL, selling_prices=selling,
-                                     k=int(cfg.rank_candidates))
-    if not plans:
-        return best, options, None
-
-    ids, samples, rival_scores, target, n_needed, bar = _rank_context(
-        xp, players, rates, minutes, tfx, cfg, from_event)
-    chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
-                                     bar=bar, penalties=[p.hit_cost for p in plans])
-    index = plans.index(chosen)
-    stats = _rank_stats(scored, index, len(plans), target, n_needed)
-    stats["hit_cost"] = int(chosen.hit_cost)
-    return chosen, options, stats
+    return best, options, None
 
 
 def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):

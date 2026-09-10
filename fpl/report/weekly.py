@@ -136,7 +136,7 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     out.append("### Transfers this week")
     t = rec.transfers
     if t is None or t.n_transfers == 0:
-        if rec.rank:
+        if rec.mode == 2 and rec.rank:
             # Naming the objective matters: with the rank layer on, holding was
             # chosen because no plan beat the field by more than its hit cost,
             # which is a different test from "no plan gains projected points".

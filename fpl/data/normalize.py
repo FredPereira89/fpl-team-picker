@@ -35,8 +35,9 @@ def normalize_players(bootstrap: dict) -> pd.DataFrame:
     df["price"] = df["now_cost"] / 10.0
     df["available"] = df["status"] == AVAILABLE
     df["news"] = df["news"].fillna("")
-    for c in FLOAT_COLS + ["selected_by_percent"]:
+    for c in FLOAT_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["selected_by_percent"] = pd.to_numeric(df["selected_by_percent"], errors="coerce").fillna(0.0)
     for c in PLAYER_INT_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
     for c in SET_PIECE_COLS:
