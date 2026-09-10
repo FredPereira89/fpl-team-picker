@@ -1,8 +1,10 @@
 {
-  "free_transfers": 0,
-  "last_event": 3,
+  "free_transfers": 1,
+  "last_event": 4,
   "chips_used": [],
+  "chip_events": [],
   "purchase_prices": {
+    "1": 6.0,
     "8": 5.6,
     "68": 6.0,
     "106": 8.0,
@@ -20,21 +22,22 @@
   },
   "squad": [
     1,
-    497,
     8,
+    68,
+    106,
     113,
+    163,
+    165,
+    212,
     229,
     356,
-    388,
-    68,
-    163,
-    212,
     368,
+    388,
     397,
-    106,
-    165,
-    411
+    411,
+    497
   ],
   "squad_event": 4,
-  "bank": 0.0
+  "bank": 0.0,
+  "free_transfers_remaining": 0
 }
