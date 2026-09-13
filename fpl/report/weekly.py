@@ -159,8 +159,14 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     out.append("")
 
     out.append("### Chip watch")
-    if rec.chip is None or rec.chip.chip is None:
-        out.append(rec.chip.reason if rec.chip else "No chip recommended this week.")
+    if rec.chip is None:
+        out.append("No chip recommended this week.")
+    elif rec.chip.chip is None:
+        # Saving a chip for a named week is a decision to act on, not the
+        # absence of one -- it must not read like the "nothing doing" fallback.
+        hold = rec.chip.hold_until
+        prefix = f"**Hold until GW{hold}** — " if hold else ""
+        out.append(prefix + rec.chip.reason)
     else:
         out.append(f"**{rec.chip.chip}** — {rec.chip.reason}")
     out.append("")

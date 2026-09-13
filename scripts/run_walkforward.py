@@ -32,7 +32,7 @@ from fpl.data.normalize import (normalize_players, normalize_teams, normalize_fi
 from fpl.model.strength import team_ratings, league_goals_per_team_match
 from fpl.model.minutes import minutes_model
 from fpl.model.scoring import blended_rates
-from fpl.model.fixtures import team_fixture_frame, fixture_counts
+from fpl.model.fixtures import team_fixture_frame
 from fpl.model.xp import build_xp
 from fpl.model.calibration import fit_calibration, apply_calibration, scored_history
 from fpl.backtest.ledger import save_predictions
@@ -112,10 +112,9 @@ def main() -> int:
         ratings = team_ratings(players, teams, current=seen["current"])
         tfx = team_fixture_frame(fixtures, ratings, gw, 1,
                                  league_gc=league_goals_per_team_match(players))
-        counts = fixture_counts(fixtures, list(teams["team_id"]), gw, 1)
         rates = blended_rates(players, seen["current"], cfg, rounds=seen["rounds"])
         mins = minutes_model(players, cfg, current=seen["current"], rounds=seen["rounds"])
-        xp = build_xp(players, rates, mins, tfx, counts, cfg, gw)
+        xp = build_xp(players, rates, mins, tfx, cfg, gw)
 
         # Calibrate on gameweeks strictly before this one, exactly as a live run
         # would -- fitting on the gameweek being predicted would be circular.

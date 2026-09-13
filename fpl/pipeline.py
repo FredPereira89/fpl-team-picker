@@ -118,6 +118,21 @@ def _rank_stats(scored, index, n_candidates, target, n_rivals) -> dict:
     return stats
 
 
+def _last_event(bootstrap: dict, fixtures) -> int:
+    """The final gameweek of the season.
+
+    Bootstrap is authoritative when it carries an event list; a fixture frame
+    is the fallback, and 38 the last resort. Chip patience is measured against
+    this, so getting it wrong makes the advisor either too precious or too
+    hasty at the end of a season.
+    """
+    events = [int(e["id"]) for e in bootstrap.get("events", []) if e.get("id")]
+    if events:
+        return max(events)
+    ev = pd.to_numeric(fixtures["event"], errors="coerce").dropna()
+    return int(ev.max()) if len(ev) else 38
+
+
 def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                       current_squad, bank, free_transfers, selling):
     """This week's transfer plan, judged against the field rather than on xP.
@@ -253,14 +268,21 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     league_gc = league_goals_per_team_match(players)
     tfx = team_fixture_frame(fixtures, ratings, from_event, cfg.horizon_gw,
                              league_gc=league_gc)
-    counts = fixture_counts(fixtures, list(teams["team_id"]), from_event, cfg.horizon_gw)
+    # Fixture STRUCTURE for the whole rest of the season, not just the
+    # projection horizon. Chip timing is a season-long decision -- holding a
+    # Bench Boost for a GW29 double is the entire point of having one -- and
+    # counting fixtures stays cheap in gameweeks where projecting points does
+    # not. model.xp never used this frame; only the chip advisor does.
+    last_event = _last_event(bootstrap, fixtures)
+    counts = fixture_counts(fixtures, list(teams["team_id"]), from_event,
+                            max(1, last_event - from_event + 1))
     # The same history match by match. Totals cannot say WHEN the output came,
     # how often a start lasted the hour, or how long a start lasts -- and all
     # three were being answered with constants.
     rounds = history_rounds_frame(summaries, before_event=from_event)
     rates = blended_rates(players, current, cfg, rounds=rounds)
     minutes = minutes_model(players, cfg, news=news, current=current, rounds=rounds)
-    xp = build_xp(players, rates, minutes, tfx, counts, cfg, from_event)
+    xp = build_xp(players, rates, minutes, tfx, cfg, from_event)
 
     # Recalibrate per position against gameweeks already scored. Position is
     # the axis that matters: a GLOBAL affine correction cannot change any pick,
@@ -320,7 +342,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # was a literal [] until 2026-09-07, so the advisor happily recommended a
     # Wildcard that had been played weeks earlier.
     chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event,
-                        list(chips_used or []))
+                        list(chips_used or []), last_event=last_event)
 
     value = round(sum(prices[i] for i in squad_ids), 1)
     deadline = next(

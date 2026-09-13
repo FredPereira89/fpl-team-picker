@@ -147,7 +147,7 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
 
 
 def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
-             tfx: pd.DataFrame, counts: pd.DataFrame, cfg, from_event: int) -> pd.DataFrame:
+             tfx: pd.DataFrame, cfg, from_event: int) -> pd.DataFrame:
     r = rates.set_index("player_id")
     m = minutes.set_index("player_id")
     horizon_events = list(range(from_event, from_event + cfg.horizon_gw))

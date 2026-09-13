@@ -190,3 +190,18 @@ def test_a_no_transfer_verdict_names_the_objective_that_produced_it():
     rec.rank = {"p_beat_target": 0.5, "rank_percentile": 0.5, "mean_points": 60.0,
                 "sd_points": 15.0, "n_candidates": 8, "target": 0.5, "captain": 1}
     assert "beat the field" in render(rec, XP).lower()
+
+
+def test_a_held_chip_is_labelled_as_a_hold_not_as_no_advice():
+    """A chip being saved for a named gameweek is a decision, not an absence of
+    one. Rendering it identically to 'nothing doing this week' loses the only
+    part the manager has to act on -- remembering not to spend it."""
+    rec = _rec(chip=ChipAdvice(None, "Holding Triple Captain for GW29, a double "
+                                     "gameweek for 11 of your 15.", hold_until=29))
+
+    out = render(rec, XP)
+
+    # A recommended chip renders as "**triplecaptain** - ...". A hold must be
+    # just as visually distinct from the "nothing doing" fallback, which is a
+    # bare unmarked sentence.
+    assert "**Hold until GW29**" in out

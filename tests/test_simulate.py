@@ -82,7 +82,7 @@ def test_simulated_mean_agrees_with_the_analytic_projection():
     different routes -- one in closed form, one by drawing outcomes. If their
     means disagree, one of them has the rules wrong."""
     ids, samples = _sim(n_sims=20000)
-    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, CFG,
+    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG,
                         from_event=1).set_index("player_id")["xp_next1"]
     for i, pid in enumerate(ids):
         assert samples[i].mean() == pytest.approx(float(analytic.loc[pid]), abs=0.15), \

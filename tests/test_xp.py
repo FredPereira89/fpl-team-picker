@@ -52,7 +52,7 @@ COUNTS = pd.DataFrame(
 
 
 def _build():
-    return build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, CFG, from_event=1)
+    return build_xp(PLAYERS, RATES, MINUTES, TFX, CFG, from_event=1)
 
 
 def test_contract_columns_exact():
@@ -101,10 +101,10 @@ def test_double_gameweek_sums_both_fixtures():
     # Give the Beta player real minutes so the double is visible
     mins = MINUTES.copy()
     mins.loc[mins.player_id == 3, ["p_start", "p_play", "p_60", "e_minutes"]] = [0.9, 0.95, 0.9, 80.0]
-    single = build_xp(PLAYERS, RATES, mins, TFX, COUNTS, CFG, from_event=2)
+    single = build_xp(PLAYERS, RATES, mins, TFX, CFG, from_event=2)
     alpha = single.set_index("player_id").loc[2, "xp_next1"]  # Alpha keeper, 1 fixture
     beta = single.set_index("player_id").loc[3, "xp_next1"]   # Beta mid, 2 fixtures
-    per_fixture = build_xp(PLAYERS, RATES, mins, TFX, COUNTS, CFG, from_event=3)
+    per_fixture = build_xp(PLAYERS, RATES, mins, TFX, CFG, from_event=3)
     beta_single = per_fixture.set_index("player_id").loc[3, "xp_next1"]
     assert beta == pytest.approx(2 * beta_single, rel=0.02)
     assert alpha > 0
@@ -146,7 +146,7 @@ def test_horizon_score_discounts_later_gameweeks():
     """A gain five weeks out is not worth the same as one this week: the squad
     can be changed before then, and the projection is far less certain."""
     cfg = Config(horizon_gw=5, horizon_decay=0.5)
-    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, cfg, from_event=1).set_index("player_id")
     # Alpha plays once per event with identical fixtures, so each event's xP is equal
     per_event = df.loc[1, "xp_next1"]
     expected = per_event * sum(0.5 ** n for n in range(5))
@@ -157,14 +157,14 @@ def test_undiscounted_total_is_still_reported_for_the_user():
     """xp_next5 is what the report shows a human. It must stay a real
     points total, not a discounted score that only the solver understands."""
     cfg = Config(horizon_gw=5, horizon_decay=0.5)
-    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, cfg, from_event=1).set_index("player_id")
     assert df.loc[1, "xp_next5"] == pytest.approx(df.loc[1, "xp_next1"] * 5, abs=1e-3)
     assert df.loc[1, "xp_horizon"] < df.loc[1, "xp_next5"]
 
 
 def test_no_decay_leaves_the_horizon_score_equal_to_the_total():
     cfg = Config(horizon_gw=5, horizon_decay=1.0)
-    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, cfg, from_event=1).set_index("player_id")
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, cfg, from_event=1).set_index("player_id")
     assert df.loc[1, "xp_horizon"] == pytest.approx(df.loc[1, "xp_next5"], rel=1e-9)
 
 
@@ -288,12 +288,12 @@ def test_a_frame_without_p_start_is_treated_as_certain_minutes():
 
 def test_xp_frame_carries_ownership():
     players = PLAYERS.assign(selected_by_percent=[55.0, 3.0, 0.4])
-    df = build_xp(players, RATES, MINUTES, TFX, COUNTS, CFG, from_event=1).set_index("player_id")
+    df = build_xp(players, RATES, MINUTES, TFX, CFG, from_event=1).set_index("player_id")
     assert "ownership" in df.columns
     assert df.loc[1, "ownership"] == pytest.approx(55.0)
 
 
 def test_a_frame_without_ownership_reads_as_zero_not_missing():
     """Older bootstraps and hand-built frames must still price."""
-    df = build_xp(PLAYERS, RATES, MINUTES, TFX, COUNTS, CFG, from_event=1).set_index("player_id")
+    df = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG, from_event=1).set_index("player_id")
     assert df.loc[1, "ownership"] == 0.0

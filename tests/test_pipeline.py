@@ -373,13 +373,15 @@ def test_pipeline_leaves_ttl_in_charge_before_any_match_is_played(tmp_path):
 def test_a_spent_chip_is_never_recommended_again(tmp_path):
     """pipeline.run passed a literal [] for chips_used, so the advisor could not
     know a chip was gone and cheerfully suggested it every week."""
-    # SkewedClient gives teams 1 and 2 a double gameweek in event 1, which is
-    # what makes the advisor reach for a Triple Captain.
+    # NearDoubleClient gives teams 1 and 2 a double gameweek in event 1, which
+    # is what makes the advisor reach for a Triple Captain. SkewedClient no
+    # longer works here: its event-5 double is beyond a 3-gameweek horizon, so
+    # the advisor now correctly HOLDS the chip rather than advising one.
     cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
-    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=SkewedClient())
+    rec, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient())
     assert rec.chip.chip is not None, "fixture must advise some chip to be a test"
 
-    spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=SkewedClient(),
+    spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient(),
                    chips_used=[rec.chip.chip])
     assert spent.chip.chip != rec.chip.chip
     assert "already used" in spent.chip.reason
@@ -593,3 +595,61 @@ def test_the_weekly_run_is_unchanged_when_the_rank_layer_is_off(tmp_path):
     assert rec.rank is None
     best, _ = optimize_transfers(xp, current, 2.0, 1, cfg, xp_col="xp_horizon")
     assert set(rec.squad_ids) == set(best.squad_ids)
+
+
+# --- Chip timing sees past the xP horizon (2026-09-13) ---
+
+# Teams 1 and 2 double in event 1 and nothing else is unusual. SKEWED_FIXTURES
+# is unsuitable as a baseline here: it also doubles teams 7 and 8 in event 5,
+# which is itself beyond a 3-gameweek horizon and would hold the chip.
+NEAR_DOUBLE_FIXTURES = FIXTURES + [
+    {"id": 900, "event": 1, "team_h": 1, "team_a": 2, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-08-21T19:00:00Z", "finished": False},
+]
+
+# The same, plus a full-squad double in event 10 -- seven gameweeks past what a
+# 3-gameweek projection can see.
+FAR_DOUBLE_FIXTURES = NEAR_DOUBLE_FIXTURES + [
+    {"id": 950 + i, "event": 10, "team_h": h, "team_a": a, "team_h_difficulty": 3,
+     "team_a_difficulty": 3, "kickoff_time": "2026-11-21T19:00:00Z", "finished": False}
+    for i, (h, a) in enumerate([(1, 2), (3, 4), (5, 6), (7, 8),
+                                (1, 3), (2, 4), (5, 7), (6, 8)])
+]
+
+
+class NearDoubleClient(FakeClient):
+    def fixtures(self):
+        return NEAR_DOUBLE_FIXTURES
+
+
+class FarDoubleClient(FakeClient):
+    def fixtures(self):
+        return FAR_DOUBLE_FIXTURES
+
+
+def test_a_double_beyond_the_projection_horizon_holds_the_chip(tmp_path):
+    """An event-1 double is enough to trigger a Triple Captain. The same squad
+    facing a FULL-SQUAD double in event 10 must hold the chip instead of
+    burning it now -- which the advisor could not see before, because it was
+    handed fixture counts for the projection horizon only."""
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
+
+    now, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient())
+    later, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FarDoubleClient())
+
+    assert now.chip.chip == "triplecaptain", "baseline must play the chip now"
+    assert now.chip.hold_until is None
+    assert later.chip.chip != "triplecaptain"
+    assert later.chip.hold_until == 10
+
+
+def test_a_structural_hold_never_claims_to_have_a_projection(tmp_path):
+    """The two hold reasons must read differently. A gameweek 7 weeks past the
+    horizon has a fixture COUNT and nothing else, and saying it 'projects
+    better' would invent a number the model never computed."""
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
+
+    later, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=FarDoubleClient())
+
+    assert "no projection" in later.chip.reason
+    assert "projects better" not in later.chip.reason
