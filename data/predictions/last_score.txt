@@ -1,12 +1,17 @@
-GW2 forecast scored against 614 players (307 of them appeared):
-  rank quality (Spearman)  +0.595 overall, +0.349 among players who appeared
-  ...in its own top 60       +0.114  <- the pool every pick comes from
-  error                    MAE 1.35, RMSE 2.25, bias +0.03 pts/player
-  bias split               -0.77 among players who appeared, +0.84 handed to the 307 who did not play
-  top-20 overlap           20%
+PROVISIONAL: GW4 is not fully checked by FPL yet, so these numbers will still move. Re-score once it is final.
+GW4 forecast scored against 655 players (307 of them appeared):
+  rank quality (Spearman)  +0.673 overall (95% CI +0.629..+0.715), +0.332 among players who appeared
+  ...in its own top 60       +0.188  <- RANGE-RESTRICTED, not a skill estimate; see the comparison below
+  vs baselines on one shared pool of 119 players:
+    THIS MODEL   +0.513  (95% CI +0.355..+0.644)
+    p_start      +0.397  (95% CI +0.226..+0.548)
+    price        -0.050  (95% CI -0.238..+0.140)
+  error                    MAE 1.29, RMSE 2.23, bias -0.03 pts/player
+  bias split               -0.77 among players who appeared, +0.61 handed to the 348 who did not play
+  top-20 overlap           15%
   by position:
-    DEF  rank +0.592   bias +0.07
-    FWD  rank +0.563   bias +0.00
-    GKP  rank +0.529   bias +0.72
-    MID  rank +0.635   bias -0.16
-  WARNING: over-predicting GKP by more than 0.4 pts/player. Look at the minutes model — most of it is points handed to players who did not play, not inflated scoring.
+    DEF  rank +0.620   bias -0.15
+    FWD  rank +0.707   bias -0.13
+    GKP  rank +0.671   bias -0.05
+    MID  rank +0.690   bias +0.08
+  Read this as one gameweek, not a verdict: the intervals overlap heavily and 5+ scored gameweeks are needed before a change in these numbers means anything.

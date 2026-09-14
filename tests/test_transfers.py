@@ -228,3 +228,49 @@ def test_rank_scoring_charges_a_plan_for_its_hit():
     hit = score_candidate(squad, ids, samples, rivals, penalty=4.0)
     assert hit["p_beat_target"] < free["p_beat_target"]
     assert hit["mean_points"] == pytest.approx(free["mean_points"] - 4.0)
+
+
+# The weekly report quotes `plan.gain` as "suggested net gain of N xP across
+# the horizon". Only optimize_transfers ever filled it in; enumerate_transfer_plans
+# left it at the dataclass default, so once the rank layer was wired into mode 2
+# (which enumerates rather than optimizes) EVERY weekly run reported a gain of
+# exactly 0.0 -- a real +2.9 xP transfer read as buying nothing. Found on the
+# real GW5 2026/27 run, 2026-09-14.
+
+def test_enumerated_plans_report_their_gain_over_holding():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cur = list(CURRENT)
+    plans = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5),
+                                     xp_col="xp_next5", k=4)
+    hold = [p for p in plans if p.n_transfers == 0]
+    assert hold, "the 0-transfer baseline should always be among the candidates"
+    baseline = hold[0].net_xp
+    assert all(p.baseline_xp == baseline for p in plans)
+    for p in plans:
+        assert p.gain == round(p.net_xp - baseline, 3)
+
+
+def test_the_hold_plan_reports_no_gain_over_itself():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cur = list(CURRENT)
+    plans = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5),
+                                     xp_col="xp_next5", k=4)
+    hold = [p for p in plans if p.n_transfers == 0][0]
+    assert hold.gain == 0.0
+
+
+def test_a_real_upgrade_is_not_reported_as_zero_gain():
+    """The regression that mattered: a plan that genuinely improves the squad
+    must report the improvement, not the dataclass default."""
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    pool, _star = _pool_with_star()
+    plans = enumerate_transfer_plans(pool, list(CURRENT), bank=5.0, free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5),
+                                     xp_col="xp_next5", k=4)
+    best = max(plans, key=lambda p: p.net_xp)
+    assert best.n_transfers > 0
+    assert best.gain > 0.0
+    hold = [p for p in plans if p.n_transfers == 0][0]
+    assert best.gain == round(best.net_xp - hold.net_xp, 3)

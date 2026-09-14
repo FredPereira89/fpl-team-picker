@@ -141,6 +141,22 @@ def _budget_and_cost(xp_df, current_set, bank, selling_prices):
     return float(bank) + sum(cost[i] for i in current_set), cost
 
 
+def _attribute_gain(plans: list["TransferPlan"]) -> None:
+    """Record what each plan buys over simply holding, in place.
+
+    The report quotes `gain`, so a plan that never has it filled in advertises
+    itself as worth exactly nothing. The baseline is the 0-transfer plan, found
+    by its transfer count rather than its position in the list: both callers
+    happen to enumerate n=0 first, but a plan list that did not would otherwise
+    silently measure every gain against the wrong squad.
+    """
+    hold = next((p for p in plans if p.n_transfers == 0), None)
+    baseline = hold.net_xp if hold is not None else (plans[0].net_xp if plans else 0.0)
+    for p in plans:
+        p.baseline_xp = baseline
+        p.gain = round(p.net_xp - baseline, 3)
+
+
 def enumerate_transfer_plans(xp_df: pd.DataFrame, current_squad_ids: list[int],
                              bank: float, free_transfers: int, cfg,
                              xp_col: str = "xp_next5",
@@ -177,6 +193,7 @@ def enumerate_transfer_plans(xp_df: pd.DataFrame, current_squad_ids: list[int],
                 break
         if len(plans) >= int(k):
             break
+    _attribute_gain(plans)
     return plans
 
 
@@ -201,10 +218,8 @@ def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: 
             continue
         options.append(_plan(current_set, solved, free_transfers, cfg))
 
-    # options[0] is the 0-transfer baseline; always keep it visible
-    baseline = options[0].net_xp if options else 0.0
-    for o in options:
-        o.baseline_xp = baseline
-        o.gain = round(o.net_xp - baseline, 3)
+    # The 0-transfer baseline is always solved and kept visible, so holding is
+    # a candidate the others have to beat rather than an unpriced default.
+    _attribute_gain(options)
     best = max(options, key=lambda o: o.net_xp)
     return best, options

@@ -384,6 +384,19 @@ def test_a_spent_chip_is_never_recommended_again(tmp_path):
     spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient(),
                    chips_used=[rec.chip.chip])
     assert spent.chip.chip != rec.chip.chip
+
+
+def test_a_spent_chip_is_explained_when_nothing_is_left_to_advise(tmp_path):
+    """The "already used" note is the fallback for advising NOTHING, so it only
+    appears once every qualifying chip is gone. Asserting it right after a
+    single chip was spent conflated two behaviours, and broke the moment a
+    fixture change let a second chip qualify -- the advisor was then correctly
+    recommending that one instead of explaining itself."""
+    cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
+    all_chips = ["wildcard", "freehit", "benchboost", "triplecaptain"]
+    spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient(),
+                   chips_used=all_chips)
+    assert spent.chip.chip is None
     assert "already used" in spent.chip.reason
 
 

@@ -151,7 +151,7 @@ def test_an_unavailable_player_is_still_zeroed_whatever_his_form():
 
 def _rounds(pid, minutes_per_start):
     return pd.DataFrame([
-        {"player_id": pid, "round": r, "starts": 1, "minutes": m,
+        {"player_id": pid, "round": r, "starts": 1 if m > 0 else 0, "minutes": m,
          "goals_scored": 0, "assists": 0, "clean_sheets": 0, "goals_conceded": 0,
          "saves": 0, "bonus": 0, "bps": 0, "yellow_cards": 0, "red_cards": 0,
          "own_goals": 0, "defensive_contribution": 0, "total_points": 2}
@@ -205,3 +205,175 @@ def test_m_start_follows_the_players_own_substitution_pattern():
     hooked = minutes_model(PLAYERS, CFG, rounds=_rounds(1, [55] * 10)).set_index("player_id")
     lasted = minutes_model(PLAYERS, CFG, rounds=_rounds(1, [90] * 10)).set_index("player_id")
     assert hooked.loc[1, "m_start"] < lasted.loc[1, "m_start"]
+
+
+# --- established starter dropped from the matchday squad (2026-09-13) ------
+# A player with a full established season last year (37/38 starts) whose
+# CLUB has played several games this season with him recording zero minutes
+# every time is not "a bit rotated" -- he has lost his place. The plain
+# season-long blend cannot see this: it sums current starts over current
+# games played, so one early start followed by three unused games (1/4) reads
+# almost the same as even, healthy rotation, and last season's 37/38 still
+# dominates the shrinkage. p_start came out at 0.88 for exactly this player
+# (Bournemouth's Senesi, real GW1-4 2026/27 data) -- he was then picked as a
+# starting XI defender by the optimizer.
+
+ESTABLISHED = PLAYERS.copy()
+ESTABLISHED.loc[ESTABLISHED.player_id == 1, ["minutes", "starts"]] = [3288, 37]
+
+
+def test_a_trailing_absence_streak_overrides_an_established_reputation():
+    """One start (round 1) then three straight unused games: last season's
+    37/38 record must not be allowed to carry him as a likely starter."""
+    rounds = pd.concat([_rounds(1, [90]), _rounds(1, [0, 0, 0])], ignore_index=True)
+    rounds["round"] = range(1, 5)
+    df = minutes_model(ESTABLISHED, CFG, rounds=rounds).set_index("player_id")
+    assert df.loc[1, "p_start"] < 0.4
+    assert df.loc[1, "confidence"] == "low"
+    assert any("lost his place" in f.lower() or "unused" in f.lower()
+              for f in df.loc[1, "flags"])
+
+
+def test_a_single_rested_game_does_not_trigger_the_flag():
+    """One missed game is normal rotation or a rest, not evidence of exclusion.
+    Flagging on a single absence would fire on almost every squad player."""
+    rounds = pd.concat([_rounds(1, [90, 90, 90]), _rounds(1, [0])], ignore_index=True)
+    rounds["round"] = range(1, 5)
+    df = minutes_model(ESTABLISHED, CFG, rounds=rounds).set_index("player_id")
+    assert df.loc[1, "p_start"] > 0.7
+    assert not any("lost his place" in f.lower() for f in df.loc[1, "flags"])
+
+
+def test_a_player_still_starting_every_current_game_is_unaffected():
+    rounds = _rounds(1, [90, 88, 90, 90])
+    df = minutes_model(ESTABLISHED, CFG, rounds=rounds).set_index("player_id")
+    assert df.loc[1, "p_start"] > 0.8
+    assert not any("lost his place" in f.lower() for f in df.loc[1, "flags"])
+
+
+def test_the_absence_streak_only_counts_the_MOST_RECENT_games():
+    """Missing the start of the season and returning to nail down a place must
+    not be punished for early absences that are no longer representative."""
+    rounds = pd.concat([_rounds(1, [0, 0, 0]), _rounds(1, [90, 90, 90])], ignore_index=True)
+    rounds["round"] = range(1, 7)
+    df = minutes_model(ESTABLISHED, CFG, rounds=rounds).set_index("player_id")
+    assert df.loc[1, "p_start"] > 0.7
+
+
+# --- last season's denominator must reflect AVAILABILITY (2026-09-14) -------
+# `past_games` charged a flat 38 to anyone with a single minute last season, so
+# a player who missed most of it injured read as "had 38 chances to start and
+# took 4". Wissa (517 mins / 4 starts in 2025/26, then 4/4 starts in GW1-4
+# 2026/27) came out at p_start 0.225 -- while an OTHERWISE IDENTICAL player
+# with zero minutes last season routed to the price prior and got 0.791. Having
+# been injured was punished 3.5x harder than never having played. 44 players
+# who had started every game of 2026/27 were rated below 0.60, including Isak
+# (0.31) and Odegaard (0.49).
+
+_AVAIL_COLS = ["player_id", "web_name", "position", "team_id", "price", "status",
+               "chance_of_playing", "news", "available", "minutes", "starts"]
+
+
+def _avail_players(rows):
+    return pd.DataFrame(rows, columns=_AVAIL_COLS)
+
+
+def _current(pid, starts, games):
+    return pd.DataFrame([{"player_id": pid, "gws_played": games, "starts": starts}])
+
+
+RETURNEE = _avail_players([
+    # injured most of last season, nailed this one
+    [1, "Returnee", "FWD", 1, 6.2, "a", None, "", True, 517, 4],
+    # identical, but no Premier League history at all
+    [2, "Newcomer", "FWD", 2, 6.2, "a", None, "", True, 0, 0],
+    # last season's ever-present, for the regression guard
+    [3, "EverPresent", "FWD", 3, 7.9, "a", None, "", True, 3282, 37],
+])
+
+_CUR = pd.concat([_current(1, 4, 4), _current(2, 4, 4), _current(3, 4, 4)],
+                 ignore_index=True)
+
+
+def test_an_injured_season_is_not_worse_than_no_history_at_all():
+    """The discontinuity that made this a bug: 517 minutes of evidence must not
+    rate a player BELOW an identical player the model knows nothing about."""
+    df = minutes_model(RETURNEE, CFG, current=_CUR).set_index("player_id")
+    # Not parity: 4 starts from 38 IS weaker evidence than an unknown player at
+    # the same price, so rating him somewhat lower is correct. What must not
+    # survive is the CLIFF -- 0.225 against 0.791, a factor of 3.5 -- so the bar
+    # is that history costs him a fraction, not a multiple.
+    assert df.loc[1, "p_start"] >= df.loc[2, "p_start"] * 0.8
+
+
+def test_a_returning_starter_is_rated_as_a_starter():
+    """Four starts from four games, fully available, is a starter -- last
+    season's injury must not cap him near the rotation band."""
+    df = minutes_model(RETURNEE, CFG, current=_CUR).set_index("player_id")
+    assert df.loc[1, "p_start"] > 0.6
+
+
+def test_an_ever_present_is_essentially_unchanged():
+    """The fix must target the injured cohort and leave established players
+    alone, or it is just a global loosening of the shrinkage."""
+    df = minutes_model(RETURNEE, CFG, current=_CUR).set_index("player_id")
+    assert df.loc[3, "p_start"] > 0.90
+
+
+def test_p_start_stays_a_probability():
+    from fpl.model.minutes import TEAM_GAMES
+    huge = _avail_players([[1, "Iron", "DEF", 1, 5.0, "a", None, "", True,
+                           TEAM_GAMES * 95, 38]])
+    df = minutes_model(huge, CFG).set_index("player_id")
+    assert 0.0 <= df.loc[1, "p_start"] <= 1.0
+
+
+# --- this season decides; last season is only a prior (2026-09-14) ---------
+# Pooling both seasons into one ratio gave last season a 38-game denominator
+# against this season's 4, so current evidence was ~9% of the signal and a
+# player's ACTUAL current role could barely move him. Roles change between
+# seasons -- transfers, new managers, new signings -- so recent starts are the
+# better evidence, and last season belongs in the prior.
+
+DROPPED = _avail_players([
+    # last season's regular who has not started a game this season
+    [1, "Dropped", "MID", 1, 5.0, "a", None, "", True, 1560, 19],
+    # last season's ever-present, still starting
+    [2, "Nailed", "MID", 2, 7.9, "a", None, "", True, 3282, 37],
+    # thin last season through injury, starting every game now
+    [3, "Returned", "MID", 3, 6.2, "a", None, "", True, 517, 4],
+])
+
+
+def test_starting_every_game_this_season_reads_as_a_starter():
+    """The user's rule: 4 starts from 4 games means he is most likely starting,
+    whatever last season looked like."""
+    cur = pd.concat([_current(1, 0, 4), _current(2, 4, 4), _current(3, 4, 4)],
+                    ignore_index=True)
+    df = minutes_model(DROPPED, CFG, current=cur).set_index("player_id")
+    assert df.loc[3, "p_start"] > 0.65
+    assert df.loc[2, "p_start"] > 0.85
+
+
+def test_not_starting_this_season_outweighs_last_seasons_reputation():
+    """The mirror of the same rule, and the case the availability estimator got
+    backwards: 0 starts from 4 games is not a nailed starter."""
+    cur = pd.concat([_current(1, 0, 4), _current(2, 4, 4), _current(3, 4, 4)],
+                    ignore_index=True)
+    df = minutes_model(DROPPED, CFG, current=cur).set_index("player_id")
+    assert df.loc[1, "p_start"] < 0.40
+    assert df.loc[1, "p_start"] < df.loc[3, "p_start"]
+
+
+def test_before_a_ball_is_kicked_last_season_is_all_there_is():
+    """With no current-season games the prior must still separate an
+    ever-present from a squad player."""
+    df = minutes_model(DROPPED, CFG).set_index("player_id")
+    assert df.loc[2, "p_start"] > df.loc[1, "p_start"] > df.loc[3, "p_start"]
+
+
+def test_a_thin_last_season_is_pulled_toward_the_positional_average():
+    """4 starts in 517 minutes is a small sample, so it must not be taken at
+    face value as a 10% start rate -- that is what buried the injured cohort."""
+    df = minutes_model(DROPPED, CFG).set_index("player_id")
+    assert df.loc[3, "p_start"] > 4.0 / 38.0 * 1.5
