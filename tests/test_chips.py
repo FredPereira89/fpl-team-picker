@@ -281,3 +281,58 @@ def test_free_hit_is_held_for_a_worse_blank_week():
 
     assert a.chip != "freehit"
     assert a.hold_until == 20
+
+
+# --- Wildcard on squad QUALITY, not just squad health (2026-09-15) ---------
+# The Wildcard fired only on a count of injury/doubt flags, so "my squad has
+# drifted well below what my money could buy" -- the reason most managers
+# actually play it -- could never trigger it. Measured on the real GW5 squad:
+# an unconstrained rebuild projected 257.4 against 233.3 for holding, a gap of
+# 24.1, of which free transfers could reach only 2.8.
+
+from fpl.optimize.chips import SquadQuality
+
+
+def test_wildcard_fires_when_a_rebuild_beats_what_transfers_can_reach():
+    """Surplus clears the hits the same rebuild would otherwise cost."""
+    q = SquadQuality(surplus=45.0, changes=10, hit_equivalent=40.0)
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+                     quality=q)
+    assert a.chip == "wildcard"
+    assert "45" in a.reason or "45.0" in a.reason
+
+
+def test_wildcard_holds_when_the_rebuild_is_not_worth_the_hits():
+    """The real GW5 case: a 21.4 surplus against 10 changes (40 points of
+    hits) is not yet worth the chip."""
+    q = SquadQuality(surplus=21.4, changes=10, hit_equivalent=40.0)
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+                     quality=q)
+    assert a.chip != "wildcard"
+
+
+def test_quality_alone_cannot_resurrect_a_spent_wildcard():
+    q = SquadQuality(surplus=45.0, changes=10, hit_equivalent=40.0)
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1,
+                     ["wildcard"], quality=q)
+    assert a.chip != "wildcard"
+    assert "already used" in a.reason
+
+
+def test_omitting_quality_leaves_the_advisor_exactly_as_it_was():
+    """Mode 1 has no squad to compare against, and every existing caller
+    passes nothing -- behaviour must be unchanged."""
+    before = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [])
+    after = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+                         quality=None)
+    assert before.chip == after.chip and before.reason == after.reason
+
+
+def test_the_injury_trigger_still_fires_without_any_quality_signal():
+    """The two reasons are independent: four flagged players is a Wildcard
+    whatever the rebuild says."""
+    flags = [["Unavailable (i): knee"] for _ in range(4)] + [[] for _ in range(11)]
+    a = advise_chips(_xp(flags=flags), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER,
+                     1, [], quality=SquadQuality(surplus=0.0, changes=0,
+                                                 hit_equivalent=0.0))
+    assert a.chip == "wildcard"

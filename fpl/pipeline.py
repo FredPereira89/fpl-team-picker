@@ -133,6 +133,37 @@ def _last_event(bootstrap: dict, fixtures) -> int:
     return int(ev.max()) if len(ev) else 38
 
 
+def _squad_quality(xp, cfg, current_squad, bank, selling, best_plan):
+    """How far the squad sits below what its own money could buy.
+
+    A Wildcard is unlimited transfers, which is exactly `_solve` with every one
+    of the fifteen in play -- same objective, same budget, same selling prices
+    as the weekly plans, so the two totals are directly comparable. Routing
+    this through optimize_squad instead would have compared against a fresh
+    cfg.budget the manager does not have.
+
+    The surplus is net of `best_plan.gain`: a squad one good transfer away from
+    its own optimum has nothing here for the chip to buy.
+    """
+    from .optimize.transfers import _budget_and_cost, _plan, _solve
+    from .optimize.chips import SquadQuality
+
+    current = {int(i) for i in current_squad}
+    budget, cost = _budget_and_cost(xp, current, bank, selling)
+    solved = _solve(xp, current, budget, len(current), cfg, HORIZON_COL, cost=cost)
+    if solved is None:
+        return None
+    rebuild = _plan(current, solved, len(current), cfg)
+    # The hold baseline is already solved -- every enumerated plan carries it as
+    # baseline_xp -- so this costs one solve, not two.
+    surplus = (rebuild.net_xp - float(best_plan.baseline_xp)) - float(best_plan.gain)
+    return SquadQuality(
+        surplus=round(surplus, 3),
+        changes=int(rebuild.n_transfers),
+        hit_equivalent=float(rebuild.n_transfers * int(cfg.hit_cost)),
+    )
+
+
 def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                       current_squad, bank, free_transfers, selling):
     """This week's transfer plan, judged against the field rather than on xP.
@@ -328,8 +359,10 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
             xp, players, rates, minutes, tfx, cfg, from_event,
             current_squad, bank, free_transfers, selling)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
+        quality = _squad_quality(xp, cfg, current_squad, bank, selling, best)
     else:
         actual_mode = 1
+        quality = None   # no existing squad to have drifted
         squad, rank_stats = _choose_squad(xp, players, rates, minutes, tfx, cfg,
                                           from_event)
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
@@ -342,7 +375,8 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # was a literal [] until 2026-09-07, so the advisor happily recommended a
     # Wildcard that had been played weeks earlier.
     chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event,
-                        list(chips_used or []), last_event=last_event)
+                        list(chips_used or []), last_event=last_event,
+                        quality=quality)
 
     value = round(sum(prices[i] for i in squad_ids), 1)
     deadline = next(

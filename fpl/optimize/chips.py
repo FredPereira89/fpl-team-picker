@@ -11,6 +11,35 @@ WILDCARD_MIN_PROBLEMS = 4
 PROBLEM_MARKERS = ("Unavailable", "Doubtful")
 
 
+@dataclass
+class SquadQuality:
+    """How far the squad has drifted below what its own money could buy.
+
+    The Wildcard used to fire only on a count of injury and doubt flags, which
+    is squad HEALTH. The reason most managers actually play the chip is squad
+    QUALITY -- the fifteen have drifted, and no sequence of free transfers
+    catches up. That gap was invisible to the advisor however large it grew.
+
+    `surplus` is already NET of what free transfers could reach, so a squad one
+    good transfer away from its own optimum scores ~0 here by construction and
+    cannot trip the trigger.
+
+    There is no tuned threshold: the chip is worth playing when it beats doing
+    the same rebuild through the transfer market, which costs `hit_equivalent`
+    points in hits. That keeps the test denominated in real points rather than
+    in a constant nobody can calibrate -- and this model's simulated edge is
+    known to run ~10x its realised one, so a tuned constant would be the least
+    trustworthy part of the decision.
+    """
+    surplus: float
+    changes: int
+    hit_equivalent: float
+
+    @property
+    def worth_the_chip(self) -> bool:
+        return self.changes > 0 and self.surplus >= self.hit_equivalent
+
+
 def squad_exposure(counts: pd.DataFrame, squad_ids: list[int],
                    team_by_player: dict[int, int]) -> dict[int, dict]:
     """{event: {"doubles": n, "blanks": n}} over every event in `counts`.
@@ -127,7 +156,8 @@ def _timing(value_now: float, by_event: dict[int, float], from_event: int,
 def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
                  counts: pd.DataFrame, team_by_player: dict[int, int],
                  from_event: int, chips_used: list[str],
-                 last_event: int = 38) -> ChipAdvice:
+                 last_event: int = 38,
+                 quality: "SquadQuality | None" = None) -> ChipAdvice:
     df = xp_df.set_index("player_id")
     used = set(chips_used or [])
     ids = [int(i) for i in squad_ids]
@@ -168,7 +198,10 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     fh_target = (max(future_blanks, key=lambda e: (future_blanks[e], -e))
                  if future_blanks else None)
     free_hit_ok = blanks >= FREE_HIT_MIN_BLANKS and fh_target is None
-    wildcard_ok = problems >= WILDCARD_MIN_PROBLEMS
+    # Either reason justifies the chip: too many players unavailable, or a
+    # squad too far below its own budget to transfer its way back.
+    quality_ok = quality is not None and quality.worth_the_chip
+    wildcard_ok = problems >= WILDCARD_MIN_PROBLEMS or quality_ok
 
     triple_now, triple_target, triple_why = _timing(
         cap_xp, cap_by_event, from_event, horizon_last, exposure, "doubles",
@@ -199,10 +232,19 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
         ))
 
     if wildcard_ok and "wildcard" not in used:
+        # Say WHICH reason fired. "Wildcard recommended" means something quite
+        # different when the squad is injured than when it has simply drifted.
+        if problems >= WILDCARD_MIN_PROBLEMS:
+            why = (f"{problems} players carry injury or rotation flags. A Wildcard "
+                   f"fixes them all at once with unlimited free transfers")
+        else:
+            why = (f"a rebuild of your squad projects {quality.surplus:.1f} xP more "
+                   f"over the horizon than free transfers can reach, and would change "
+                   f"{quality.changes} of your 15 — {quality.hit_equivalent:.0f} points "
+                   f"of hits to do the same through the transfer market. A Wildcard "
+                   f"buys that for nothing")
         return ChipAdvice("wildcard", (
-            f"{problems} players carry injury or rotation flags. A Wildcard fixes them "
-            f"all at once with unlimited free transfers, but spends a chip you may want "
-            f"later for a fixture swing."
+            f"{why}, but spends a chip you may want later for a fixture swing."
         ))
 
     if triple_ok and "triplecaptain" not in used:
@@ -245,7 +287,10 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     if free_hit_ok and "freehit" in used:
         blocked.append(f"{blanks} players have a blank fixture — Free Hit-worthy, but already used")
     if wildcard_ok and "wildcard" in used:
-        blocked.append(f"{problems} players carry injury/rotation flags — Wildcard-worthy, but already used")
+        detail = (f"{problems} players carry injury/rotation flags"
+                  if problems >= WILDCARD_MIN_PROBLEMS
+                  else f"a rebuild projects {quality.surplus:.1f} xP beyond your transfers")
+        blocked.append(f"{detail} — Wildcard-worthy, but already used")
     if triple_ok and "triplecaptain" in used:
         blocked.append("your captain has a standout week — Triple-Captain-worthy, but already used")
     if bench_ok and "benchboost" in used:
