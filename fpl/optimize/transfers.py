@@ -9,6 +9,7 @@ import pandas as pd
 import pulp
 
 from .squad import SQUAD_SPLIT, XI_MIN, XI_MAX, XI_SIZE, MAX_PER_CLUB
+from .squad import BENCH_FLOOR_COL
 from .objective import (add_bench, add_captaincy, captain_bonus, captain_values,
                         tilted_frame)
 
@@ -61,7 +62,7 @@ class TransferPlan:
 
 
 def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,
-           excluded=None, min_different=1):
+           excluded=None, min_different=1, bench_floor: float = 0.0):
     ids = [int(i) for i in xp_df["player_id"]]
     # Solve on the tilted score, report the untilted one -- see optimize.squad.
     tilted = tilted_frame(xp_df, cfg, xp_col)
@@ -94,6 +95,15 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,
         prob += pulp.lpSum(squad[i] for i in ids if club[i] == c) <= MAX_PER_CLUB
     for i in ids:
         prob += start[i] <= squad[i]
+    # Opt-in only, and only the wildcard rebuild opts in: a player below the
+    # floor may be owned, but then he has to start. Weekly plans leave this at
+    # 0 -- one free transfer cannot repair a bench, so a floor there would just
+    # make the solve infeasible or force a worse move.
+    if bench_floor > 0 and BENCH_FLOOR_COL in xp_df.columns:
+        week = dict(zip(ids, xp_df[BENCH_FLOOR_COL].astype(float)))
+        for i in ids:
+            if week[i] < bench_floor:
+                prob += squad[i] - start[i] <= 0
     # keep at least 15 - max_changes of the current squad
     prob += pulp.lpSum(squad[i] for i in ids if i in current_set) >= 15 - max_changes
 

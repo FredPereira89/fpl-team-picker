@@ -150,7 +150,13 @@ def _squad_quality(xp, cfg, current_squad, bank, selling, best_plan):
 
     current = {int(i) for i in current_squad}
     budget, cost = _budget_and_cost(xp, current, bank, selling)
-    solved = _solve(xp, current, budget, len(current), cfg, HORIZON_COL, cost=cost)
+    # A wildcard really does rebuild all fifteen, so it is measured against the
+    # squad the BUILDER would produce -- bench floor included -- not against one
+    # the weekly optimizer would never pick.
+    solved = _solve(xp, current, budget, len(current), cfg, HORIZON_COL, cost=cost,
+                    bench_floor=float(getattr(cfg, "bench_floor_xp", 0.0) or 0.0))
+    if solved is None:   # floor unaffordable on this budget -- measure without it
+        solved = _solve(xp, current, budget, len(current), cfg, HORIZON_COL, cost=cost)
     if solved is None:
         return None
     rebuild = _plan(current, solved, len(current), cfg)

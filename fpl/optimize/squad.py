@@ -3,12 +3,20 @@
 Single joint MILP over squad and starting-XI membership. A two-stage
 "pick 15 then pick 11" would spend budget on bench players who score nothing.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import pandas as pd
 import pulp
 
 from .objective import (add_bench, add_captaincy, captain_bonus, captain_values,
                         chosen_captains, first_captain, tilted_frame)
+
+# The bench floor is judged on ONE gameweek, whatever horizon the solver is
+# optimising. Bench Boost pays out in a single week and chips.py tests it on
+# xp_next1, so a floor compared against a decayed five-gameweek total is simply
+# a different question: Zetterer projected 0.74 for the week and 2.58 over the
+# horizon, clearing a 2.5 floor while remaining exactly the non-playing reserve
+# keeper the floor exists to reject.
+BENCH_FLOOR_COL = "xp_next1"
 
 SQUAD_SPLIT = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
 XI_MIN = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
@@ -74,6 +82,28 @@ def optimize_squad(xp_df: pd.DataFrame, cfg, xp_col: str = "xp_next5",
 
 def _solve_squad(xp_df, cfg, xp_col, must_include, banned, excluded,
                  min_different: int = 1):
+    """Solve, and if a bench floor makes the squad impossible, drop it and retry.
+
+    A floor no pool can satisfy -- too tight a budget, too thin a position --
+    must not take the weekly recommendation down with it: the bench is being
+    prepared for a chip, and the chip matters less than the team. Only the
+    PRIMARY solve falls back; with `excluded` set, None means "no more distinct
+    squads", which enumerate_squads depends on, and retrying without the floor
+    there would manufacture duplicates it has already rejected.
+    """
+    floor = float(getattr(cfg, "bench_floor_xp", 0.0) or 0.0)
+    if floor > 0 and not excluded:
+        try:
+            return _solve_squad_once(xp_df, cfg, xp_col, must_include, banned,
+                                     excluded, min_different)
+        except ValueError:
+            cfg = replace(cfg, bench_floor_xp=0.0)
+    return _solve_squad_once(xp_df, cfg, xp_col, must_include, banned,
+                             excluded, min_different)
+
+
+def _solve_squad_once(xp_df, cfg, xp_col, must_include, banned, excluded,
+                      min_different: int = 1):
     pool = xp_df[~xp_df["player_id"].isin(banned or [])].reset_index(drop=True)
     ids = [int(i) for i in pool["player_id"]]
     # The solver optimises the ownership-tilted score; everything reported back
@@ -111,6 +141,14 @@ def _solve_squad(xp_df, cfg, xp_col, must_include, banned, excluded,
         prob += pulp.lpSum(squad[i] for i in ids if club[i] == c) <= MAX_PER_CLUB
     for i in ids:
         prob += start[i] <= squad[i]
+    # A player below the floor may be OWNED, but only if he starts: the
+    # constraint is about who may sit on the bench, not who may be in the squad.
+    floor = float(getattr(cfg, "bench_floor_xp", 0.0) or 0.0)
+    if floor > 0 and BENCH_FLOOR_COL in pool.columns:
+        week = dict(zip(ids, pool[BENCH_FLOOR_COL].astype(float)))
+        for i in ids:
+            if week[i] < floor:
+                prob += squad[i] - start[i] <= 0
     for i in (must_include or []):
         if i not in squad:
             raise ValueError(f"must_include player {i} is not in the pool")

@@ -382,3 +382,90 @@ def test_enumerated_squads_can_be_forced_genuinely_far_apart():
     first = set(near[0].player_ids)
     assert len(first - set(near[1].player_ids)) == 1
     assert len(first - set(far[1].player_ids)) >= 5
+
+
+# --- a bench that can actually be boosted (2026-09-15) ---------------------
+# bench_weight's fourth slot is 0.02, so the solver always bought a ~£4.0m
+# reserve keeper who never plays. Three of the four bench slots already cleared
+# 2.5 xP naturally; that one slot alone kept Bench Boost permanently below its
+# threshold, so the advisor waited for a bench the optimizer could not build.
+# Measured on the real GW5 pool: forcing every bench slot over 2.5 cost 0.07 xP
+# of XI strength and gained 9.94 xP of bench.
+
+FLOOR_CFG = Config(budget=100.0, bench_floor_xp=2.5)
+
+
+def make_pool_with_fodder():
+    """Good players who all cost real money, plus £4.0m fodder who never plays.
+
+    The saving is the whole point: benching a £4.0m non-player instead of a
+    £5.0m starter frees £1.0m for the XI, which is exactly the trade the 0.02
+    bench weight makes look attractive. Priced flat, the solver has no reason
+    to prefer fodder and the floor has nothing to bind against.
+    """
+    rows, pid = [], 1
+    for t in range(10):
+        for i in range(8):
+            pos = ["GKP", "DEF", "DEF", "DEF", "MID", "MID", "MID", "FWD"][i % 8]
+            rows.append({
+                "player_id": pid, "web_name": f"P{pid}", "team": f"T{t}",
+                "position": pos, "price": 5.0 + (i % 5) * 1.5,
+                "xp_next1": 1.0 + (pid % 7) * 0.4, "xp_next5": 5.0 + (pid % 7) * 1.3,
+                "p_start": 0.9, "e_minutes": 80.0, "confidence": "high", "flags": [],
+            })
+            pid += 1
+    for t in range(10):
+        for pos in ("GKP", "DEF", "MID", "FWD"):
+            rows.append({
+                "player_id": pid, "web_name": f"Fodder{pid}", "team": f"T{t}",
+                "position": pos, "price": 4.0,
+                "xp_next1": 0.2, "xp_next5": 0.5,
+                "p_start": 0.05, "e_minutes": 5.0, "confidence": "low", "flags": [],
+            })
+            pid += 1
+    return pd.DataFrame(rows)
+
+
+FODDER_POOL = make_pool_with_fodder()
+
+
+def _bench_xp(pool, squad, col="xp_next5"):
+    v = pool.set_index("player_id")[col]
+    bench = [i for i in squad.player_ids if i not in squad.starting_ids]
+    return [float(v.loc[i]) for i in bench]
+
+
+def test_without_a_floor_the_solver_benches_players_who_never_play():
+    """The behaviour being fixed: cheap non-players are free bench filler."""
+    s = optimize_squad(FODDER_POOL, Config(budget=100.0, bench_floor_xp=0.0))
+    assert min(_bench_xp(FODDER_POOL, s)) < 2.5
+
+
+def test_every_bench_slot_clears_the_floor_when_it_is_affordable():
+    s = optimize_squad(FODDER_POOL, FLOOR_CFG)
+    assert len(s.player_ids) == 15
+    assert min(_bench_xp(FODDER_POOL, s)) >= 2.5
+
+
+def test_a_zero_floor_leaves_the_solver_exactly_as_it_was():
+    off = optimize_squad(POOL, Config(budget=100.0, bench_floor_xp=0.0))
+    base = optimize_squad(POOL, Config(budget=100.0))
+    assert set(off.player_ids) == set(base.player_ids)
+    assert set(off.starting_ids) == set(base.starting_ids)
+
+
+def test_an_unaffordable_floor_falls_back_rather_than_failing():
+    """A floor no squad can satisfy must not blow up the run -- the bench is
+    being prepared for a chip, and the chip matters less than the team."""
+    s = optimize_squad(FODDER_POOL, Config(budget=100.0, bench_floor_xp=999.0))
+    assert len(s.player_ids) == 15
+
+
+def test_the_floor_governs_benching_not_ownership():
+    """A player below the floor may still be owned -- he just has to start.
+    Banning him from the pool outright would be a different, worse rule."""
+    s = optimize_squad(FODDER_POOL, FLOOR_CFG)
+    v = FODDER_POOL.set_index("player_id")["xp_next5"]
+    for i in s.player_ids:
+        if float(v.loc[i]) < 2.5:
+            assert i in s.starting_ids

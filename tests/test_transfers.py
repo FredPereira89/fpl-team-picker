@@ -274,3 +274,57 @@ def test_a_real_upgrade_is_not_reported_as_zero_gain():
     assert best.gain > 0.0
     hold = [p for p in plans if p.n_transfers == 0][0]
     assert best.gain == round(best.net_xp - hold.net_xp, 3)
+
+
+# --- the bench floor belongs to squad BUILDS, not weekly transfers ---------
+# With one free transfer a bench floor is either infeasible or forces a bad
+# move: a bench cannot be repaired one player at a time. It applies to the
+# wildcard rebuild, which really does restructure all fifteen.
+
+def test_weekly_transfer_plans_ignore_the_bench_floor():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    cfg = Config(budget=100.0, horizon_gw=5, bench_floor_xp=2.5)
+    plain = Config(budget=100.0, horizon_gw=5, bench_floor_xp=0.0)
+    cur = list(CURRENT)
+    a = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1, cfg=cfg,
+                                 xp_col="xp_next5", k=4)
+    b = enumerate_transfer_plans(POOL, cur, bank=5.0, free_transfers=1, cfg=plain,
+                                 xp_col="xp_next5", k=4)
+    assert [set(p.squad_ids) for p in a] == [set(p.squad_ids) for p in b]
+
+
+def test_a_rebuild_can_be_asked_to_respect_the_bench_floor():
+    """The wildcard path opts in explicitly, so the surplus it reports is
+    measured against a squad the builder would actually produce."""
+    from fpl.optimize.transfers import _solve, _budget_and_cost
+    # POOL's xp_next1 is flat, so the floor would have nothing to bind against:
+    # give a third of the pool a non-playing week, as bench fodder really has.
+    pool = POOL.copy()
+    weak = pool.index % 3 == 0
+    pool.loc[weak, "xp_next1"] = 0.3
+    cfg = Config(budget=100.0, horizon_gw=5, bench_floor_xp=1.5)
+    cur = set(CURRENT)
+    budget, cost = _budget_and_cost(pool, cur, 5.0, None)
+    solved = _solve(pool, cur, budget, 15, cfg, "xp_next5", cost=cost,
+                    bench_floor=1.5)
+    assert solved is not None
+    chosen, starters, _ = solved
+    v = pool.set_index("player_id")["xp_next1"]
+    benched = [i for i in chosen if i not in starters]
+    assert benched, "a 15 always has a bench"
+    assert all(float(v.loc[i]) >= 1.5 for i in benched)
+
+
+def test_the_floor_is_judged_on_one_gameweek_not_the_horizon():
+    """Zetterer projected 0.74 for the week and 2.58 over the horizon: judged on
+    the horizon he clears a 2.5 floor while still never playing."""
+    from fpl.optimize.transfers import _solve, _budget_and_cost
+    pool = POOL.copy()
+    pool["xp_next1"] = 0.5      # nobody plays this week
+    pool["xp_next5"] = 40.0     # but everyone looks fine over the horizon
+    cfg = Config(budget=100.0, horizon_gw=5, bench_floor_xp=2.5)
+    cur = set(CURRENT)
+    budget, cost = _budget_and_cost(pool, cur, 5.0, None)
+    solved = _solve(pool, cur, budget, 15, cfg, "xp_next5", cost=cost,
+                    bench_floor=2.5)
+    assert solved is None, "the floor must read the gameweek, not the horizon"

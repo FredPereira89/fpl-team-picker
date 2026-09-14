@@ -29,6 +29,14 @@ class Config:
     max_paid_hits: int = 2
     hit_cost: int = 4
     bench_weight: list[float] = field(default_factory=lambda: [0.15, 0.10, 0.05, 0.02])
+    # Lowest projection allowed to SIT on the bench in a squad build. The bench
+    # weights above price the fourth slot at 0.02, which is right for an
+    # ordinary week -- the reserve keeper plays only when the first does not --
+    # but it also means the solver always buys a non-playing ~£4.0m keeper, and
+    # that one slot held Bench Boost below its threshold permanently. Measured
+    # on the real GW5 pool, forcing every bench slot over 2.5 cost 0.07 xP of XI
+    # strength and gained 9.94 xP of bench. Set to 0 to disable.
+    bench_floor_xp: float = 2.5
     odds_provider: str | None = None
     cache_ttl_hours: int = 6
     cache_ttl_matchday_hours: int = 1
@@ -81,6 +89,7 @@ def load_config(path: Path) -> Config:
         max_paid_hits=int(opt.get("max_paid_hits", d.max_paid_hits)),
         hit_cost=int(opt.get("hit_cost", d.hit_cost)),
         bench_weight=list(opt.get("bench_weight", d.bench_weight)),
+        bench_floor_xp=float(opt.get("bench_floor_xp", d.bench_floor_xp)),
         odds_provider=odds.get("provider", d.odds_provider),
         cache_ttl_hours=int(data.get("cache_ttl_hours", d.cache_ttl_hours)),
         cache_ttl_matchday_hours=int(data.get("cache_ttl_matchday_hours", d.cache_ttl_matchday_hours)),
@@ -152,4 +161,8 @@ def load_config(path: Path) -> Config:
         raise ValueError(f"budget must be positive, got {cfg.budget}")
     if len(cfg.bench_weight) != 4:
         raise ValueError(f"optimizer.bench_weight needs exactly 4 values, got {len(cfg.bench_weight)}")
+    if cfg.bench_floor_xp < 0:
+        raise ValueError(
+            f"optimizer.bench_floor_xp is the lowest projection allowed to sit on "
+            f"the bench and cannot be negative, got {cfg.bench_floor_xp}")
     return cfg
