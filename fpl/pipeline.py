@@ -17,6 +17,7 @@ from .data.normalize import (normalize_players, normalize_teams, normalize_fixtu
                              history_rounds_frame, apply_season_baseline,
                              latest_season)
 from .data.store import save_table
+from .data import snapshots
 from .model.strength import team_ratings, league_goals_per_team_match
 from .model.minutes import minutes_model
 from .model.scoring import blended_rates
@@ -410,6 +411,14 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     deadline = next(
         (e["deadline_time"] for e in bootstrap.get("events", [])
          if e["id"] == from_event), None)
+    # And record what this run could SEE, so a later replay of this gameweek
+    # does not have to read today's prices, availability and club assignments.
+    # The first capture wins, because a later run in the same gameweek has seen
+    # team news the deadline had not.
+    snapshots.capture(root, from_event, bootstrap=bootstrap, fixtures=raw_fixtures,
+                      deadline=deadline, final_through=checked_through,
+                      sources=client.source_summary()
+                      if hasattr(client, "source_summary") else {})
     save_predictions(xp, from_event, root, cfg=cfg,
                      sources=client.source_summary()
                      if hasattr(client, "source_summary") else {},
