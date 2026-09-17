@@ -71,6 +71,10 @@ def tier1(client: FplClient, cache: Cache) -> dict:
     print(f"  n={result['n']}  MAE={result['mae']:.2f}  RMSE={result['rmse']:.2f}  "
           f"Spearman={result['spearman']:.3f}")
     print(f"  naive MAE={result['naive_mae']:.2f}  beats_naive={result['beats_naive']}")
+    # Pooled numbers can hide a model that only works on one cutoff, and the
+    # replay now produces a target season at a time, so report each of them.
+    for season, stats in sorted(result.get("by_cutoff", {}).items()):
+        print(f"    cutoff {season}: MAE={stats['mae']:.2f}  n={stats['n']}")
     return result
 
 

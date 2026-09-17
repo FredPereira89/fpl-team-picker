@@ -13,33 +13,68 @@ def _pts90(row) -> float:
 
 
 def walk_forward_aggregate(past: pd.DataFrame, cfg) -> dict:
-    """Predict each season's points-per-90 from the player's prior seasons."""
+    """Predict every eligible season's points-per-90 from strictly earlier ones.
+
+    Two leaks made the old version useless as evidence. It predicted only each
+    player's FINAL season, discarding most of the out-of-sample data; and both
+    the shrinkage prior and the "naive" baseline were computed over the WHOLE
+    frame, target seasons included. Shrinking toward a mean that already
+    contains the answer, and comparing against a baseline that IS the mean of
+    the answers, can approve a worse rate model -- which then affects every
+    weekly decision the tool makes.
+
+    So the frame is replayed by season cutoff: for target season `t`, both the
+    player's history and the population prior come only from seasons before `t`.
+    """
     df = past.sort_values(["player_id", "season_name"]).copy()
     df["pts90"] = df.apply(_pts90, axis=1)
+    k = float(cfg.shrinkage_minutes)
 
-    preds, actuals = [], []
-    for _, group in df.groupby("player_id"):
-        rows = group.to_dict("records")
-        if len(rows) < 2:
+    seasons = sorted(df["season_name"].unique())
+    preds, actuals, naive, by_cutoff = [], [], [], {}
+
+    for target in seasons[1:]:
+        prior = df[df["season_name"] < target]
+        if prior.empty:
             continue
-        history = rows[:-1]
-        target = rows[-1]
-        mins = sum(float(r["minutes"]) for r in history)
-        weighted = sum(_pts90(r) * float(r["minutes"]) for r in history)
-        k = float(cfg.shrinkage_minutes)
-        pop_mean = float(df["pts90"].mean())
-        pred = (weighted + k * pop_mean) / (mins + k)
-        preds.append(pred)
-        actuals.append(float(target["pts90"]))
+        # The prior population, weighted by exposure so a one-minute cameo does
+        # not count as much as a full season.
+        prior_minutes = float(prior["minutes"].sum())
+        pop_mean = (float((prior["pts90"] * prior["minutes"]).sum()) / prior_minutes
+                    if prior_minutes > 0 else 0.0)
+
+        season_preds, season_actuals = [], []
+        for pid, group in df[df["season_name"] == target].groupby("player_id"):
+            history = prior[prior["player_id"] == pid]
+            if history.empty:
+                continue          # no pre-cutoff history: nothing to predict from
+            mins = float(history["minutes"].sum())
+            weighted = float((history["pts90"] * history["minutes"]).sum())
+            season_preds.append((weighted + k * pop_mean) / (mins + k))
+            season_actuals.append(float(group["pts90"].iloc[0]))
+            # The honest baseline: what a forecaster who knew only the past
+            # would have guessed. Not the mean of the answers.
+            naive.append(pop_mean)
+
+        if not season_preds:
+            continue
+        preds += season_preds
+        actuals += season_actuals
+        by_cutoff[str(target)] = {
+            "mae": float(np.mean(np.abs(np.array(season_preds)
+                                        - np.array(season_actuals)))),
+            "n": len(season_preds),
+        }
 
     if not preds:
         return {"mae": 0.0, "rmse": 0.0, "spearman": 0.0, "n": 0,
-                "naive_mae": 0.0, "beats_naive": False}
+                "naive_mae": 0.0, "beats_naive": False, "by_cutoff": {}}
 
-    preds_a, actual_a = np.array(preds), np.array(actuals)
+    preds_a, actual_a, naive_a = np.array(preds), np.array(actuals), np.array(naive)
     mae = float(np.mean(np.abs(preds_a - actual_a)))
     rmse = float(np.sqrt(np.mean((preds_a - actual_a) ** 2)))
     rho = float(spearmanr(preds_a, actual_a).statistic) if len(preds_a) > 2 else 0.0
-    naive = float(np.mean(np.abs(np.full_like(actual_a, actual_a.mean()) - actual_a)))
+    naive_mae = float(np.mean(np.abs(naive_a - actual_a)))
     return {"mae": mae, "rmse": rmse, "spearman": 0.0 if np.isnan(rho) else rho,
-            "n": len(preds), "naive_mae": naive, "beats_naive": mae < naive}
+            "n": len(preds), "naive_mae": naive_mae, "beats_naive": mae < naive_mae,
+            "by_cutoff": by_cutoff}

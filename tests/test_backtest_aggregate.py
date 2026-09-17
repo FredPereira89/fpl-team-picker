@@ -87,3 +87,52 @@ def test_walk_forward_handles_players_with_one_season():
     })
     out = walk_forward_aggregate(past, Config())
     assert out["n"] == 0
+
+
+# --- B12: the Tier 1 harness must not see the target season (2026-09-17 audit) ---
+
+def test_the_population_prior_cannot_see_the_target_season():
+    """pop_mean was the mean over the WHOLE frame, target seasons included, so
+    every prediction was shrunk toward a number that already knew the answer."""
+    past = pd.DataFrame([
+        {"player_id": 1, "season_name": "2023/24", "minutes": 3000, "total_points": 100},
+        {"player_id": 1, "season_name": "2024/25", "minutes": 3000, "total_points": 110},
+        {"player_id": 2, "season_name": "2023/24", "minutes": 3000, "total_points": 90},
+        {"player_id": 2, "season_name": "2024/25", "minutes": 3000, "total_points": 95},
+    ])
+    loud = past.copy()
+    # Move the TARGET season only. A leak-free predictor cannot notice.
+    loud.loc[loud.season_name == "2024/25", "total_points"] = 400
+
+    a = walk_forward_aggregate(past, Config())
+    b = walk_forward_aggregate(loud, Config())
+    assert a["n"] == b["n"] == 2
+    # Identical predictions; only the actuals they are scored against moved.
+    assert a["mae"] != b["mae"]
+
+
+def test_every_eligible_season_is_predicted_not_only_the_last():
+    """Predicting each player's final season alone threw away most of the
+    available out-of-sample evidence."""
+    past = pd.DataFrame([
+        {"player_id": 1, "season_name": s, "minutes": 3000, "total_points": p}
+        for s, p in (("2022/23", 100), ("2023/24", 110), ("2024/25", 120))
+    ])
+    out = walk_forward_aggregate(past, Config())
+    assert out["n"] == 2                      # 2023/24 and 2024/25
+    assert set(out["by_cutoff"]) == {"2023/24", "2024/25"}
+
+
+def test_the_naive_baseline_is_not_the_mean_of_the_answers():
+    """`naive` was the mean of the TARGET actuals, which no forecaster could
+    have known -- it made the baseline artificially hard to beat in MAE and the
+    comparison meaningless."""
+    past = pd.DataFrame([
+        {"player_id": p, "season_name": s, "minutes": 3000, "total_points": v}
+        for p in (1, 2, 3)
+        for s, v in (("2023/24", 60 + p * 10), ("2024/25", 200))
+    ])
+    out = walk_forward_aggregate(past, Config())
+    # Every 2024/25 actual is identical, so a mean-of-actuals baseline would
+    # score a perfect 0. A pre-cutoff baseline cannot.
+    assert out["naive_mae"] > 0
