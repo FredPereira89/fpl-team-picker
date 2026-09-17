@@ -213,18 +213,26 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
                 f"team news before trusting his projection."
             )
 
+        # Availability is a CAP on every route onto the pitch, not a discount on
+        # one of them. Zeroing p_start alone left the generic cameo rule below
+        # to hand a ruled-out player a 35% chance of appearing: deterministic xP
+        # read e_minutes and returned zero, while the simulator read p_play and
+        # put him on -- so the two disagreed exactly where the shared rank
+        # scenarios are most sensitive to a phantom appearance.
+        availability = 1.0
         status = str(p["status"])
         if status in UNAVAILABLE:
-            p_start = 0.0
+            availability = 0.0
             note = str(p["news"]).strip() or "unavailable"
             flags.append(f"Unavailable ({status}): {note}")
         elif status == DOUBTFUL:
             chance = p["chance_of_playing"]
             pct = 50.0 if pd.isna(chance) else float(chance)
-            p_start *= pct / 100.0
+            availability = pct / 100.0
             confidence = "low"
             note = str(p["news"]).strip()
             flags.append(f"Doubtful: {int(pct)}% chance of playing" + (f" — {note}" if note else ""))
+        p_start *= availability
 
         override = news.get(int(p["player_id"]))
         if override and cfg.news_weight > 0 and p_start > 0:
@@ -233,7 +241,11 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             flags.append(f"Team news: {override['note']} (source: {override['source']})")
 
         p_start = float(min(1.0, max(0.0, p_start)))
-        p_play = p_start + (1 - p_start) * P_SUB_APPEAR
+        # The chance he would start if fully fit, recovered from the capped
+        # value so the cameo branch can be capped by the SAME availability --
+        # a 25% doubt takes a quarter of the cameo as well as of the start.
+        fit_start = min(1.0, p_start / availability) if availability > 0 else 0.0
+        p_play = availability * (fit_start + (1.0 - fit_start) * P_SUB_APPEAR)
 
         # Reaching 60 minutes needs a start AND the hour: a player who starts
         # every week but is routinely withdrawn on 55 is not a clean-sheet
@@ -247,7 +259,10 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
         else:
             p60_given_start, m_start = league_p60, league_m_start
         p_60 = p_start * p60_given_start
-        e_minutes = p_start * m_start + (p_play - p_start) * M_SUB if p_start > 0 else 0.0
+        # No `if p_start > 0` guard: availability already zeroes an unavailable
+        # player through p_play, and a genuine cameo-only player does log
+        # minutes. The old guard made e_minutes disagree with p_play.
+        e_minutes = p_start * m_start + (p_play - p_start) * M_SUB
 
         rows.append({
             "player_id": int(p["player_id"]),

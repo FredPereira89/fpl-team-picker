@@ -133,3 +133,13 @@ def test_a_double_gameweek_scores_twice():
                             n_sims=6000, seed=0)
     idx = {p: i for i, p in enumerate(ids)}
     assert two[idx[2]].mean() == pytest.approx(2 * one[idx[2]].mean(), rel=0.08)
+
+
+def test_an_unavailable_player_scores_zero_in_every_scenario():
+    """Shared scenarios feed the rank layer, so one phantom cameo distorts
+    captain, autosub and rank results for every candidate at once."""
+    mins = MINUTES.copy()
+    mins.loc[mins.player_id == 4,
+             ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
+    ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=400)
+    assert samples[ids.index(4)].max() == 0.0

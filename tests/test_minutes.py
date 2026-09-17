@@ -377,3 +377,29 @@ def test_a_thin_last_season_is_pulled_toward_the_positional_average():
     face value as a 10% start rate -- that is what buried the injured cohort."""
     df = minutes_model(DROPPED, CFG).set_index("player_id")
     assert df.loc[3, "p_start"] > 4.0 / 38.0 * 1.5
+
+
+# --- B9: availability caps every route onto the pitch (2026-09-17 audit) ---
+
+def test_an_unavailable_player_has_no_route_onto_the_pitch():
+    """p_start was zeroed and p_play then rebuilt from the generic cameo rule,
+    leaving a ruled-out player a 35% chance of appearing. Deterministic xP read
+    e_minutes and returned zero; the simulator read p_play and put him on."""
+    m = minutes_model(PLAYERS, CFG).set_index("player_id").loc[3]
+    assert m.p_start == 0.0
+    assert m.p_play == 0.0
+    assert m.p_60 == 0.0
+    assert m.e_minutes == 0.0
+
+
+def test_a_doubtful_player_loses_the_cameo_too():
+    """A 25% chance of playing is 25% of BOTH ways he could play, not a quarter
+    of a start plus a full cameo."""
+    fit = PLAYERS.copy()
+    fit.loc[fit.player_id == 4, "status"] = "a"
+    fit.loc[fit.player_id == 4, "chance_of_playing"] = None
+
+    healthy = minutes_model(fit, CFG).set_index("player_id").loc[4]
+    doubt = minutes_model(PLAYERS, CFG).set_index("player_id").loc[4]
+    assert doubt.p_start == pytest.approx(healthy.p_start * 0.25)
+    assert doubt.p_play == pytest.approx(healthy.p_play * 0.25)
