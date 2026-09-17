@@ -1,6 +1,6 @@
 # Handoff — FPL audit remediation
 
-**Status:** this pass **complete**. 15/15 tasks done, suite at **576 passed** (from 510).
+**Status:** P0 complete (576 tests). **P1 in progress** — 5 of 7 tasks done, suite at **609 passed**.
 **Last updated:** 2026-09-17
 **Branch:** `master` — 14 commits, `370de0e..22ff9ba`
 
@@ -85,6 +85,40 @@ Chip handling is split three ways, and the split is load-bearing:
 3. **`data/state.json` has no `base_*` fields yet.** They are written the next
    time a Free Hit is confirmed. Until then `freehit_event` is `None` and the
    restoration branch is inert, which is correct.
+
+## P1 progress (plan: `docs/superpowers/plans/2026-09-17-audit-p1-honest-validation.md`)
+
+| # | Task | Audit | Status |
+|---|---|---|---|
+| 1 | Append-only forecast manifest (`fpl/backtest/manifest.py`) | B14 | **done** |
+| 2 | Ledger serves the acted-on forecast; replays never served | B14 | **done** |
+| 3 | Tier 2 keeps DNPs, uses training-season minutes, cannot gate trust | B15 | **done** |
+| 4 | Failed fetch ≠ newcomer; `coverage_gate` aborts the run | B16 | **done** |
+| 5 | Point-in-time snapshots (`fpl/data/snapshots.py`) | B13 | **done** |
+| 6 | Sequential manager-state replay (`fpl/backtest/replay.py`) | B13 | **IN PROGRESS** — module + `tests/test_replay.py` written, tests not yet run |
+| 7 | Wire replay into `scripts/run_walkforward.py` above the oracle ceiling | B13 | not started |
+
+### P1 design notes worth keeping
+
+- **`fpl/backtest/manifest.py`** is append-only JSONL. `select_version` order of
+  authority: explicitly actioned → newest live version strictly before the
+  deadline → newest live. A `origin="replay"` version is **never** selected.
+  `--confirm` calls `mark_actioned`. `MODEL_VERSION` is now the git short SHA
+  plus `-dirty`, not a hand-set date.
+- Ledger version ids are sub-second (`%Y%m%dT%H%M%S%fZ`); second resolution
+  collided when a planning run and a confirmation ran in the same second.
+- **`trust_gate(..., full_pipeline=False)` is the default** and always returns
+  `trusted=False`. Existing callers had to be updated to assert `True`.
+- **`coverage_gate`** raises `DataCoverageError` (defined in `fpl/data/client.py`)
+  when an *owned* player's summary is unreadable, or pool coverage < 99%.
+- **Snapshots**: first capture per gameweek wins. `is_point_in_time` is False
+  unless `captured_at < deadline`. GW1–4 of this season can never be
+  point-in-time — that data is gone — so `contamination_note()` exists to say so.
+- **`fpl/backtest/replay.py`** deliberately reaches the live rules through the
+  live functions (`ft_after_moves`, `selling_price`, `chip_available`,
+  `realised_score`) so a rule cannot be right in the replay and wrong in
+  production. `oracle_rebuild_policy` is the old free-weekly-rebuild behaviour,
+  kept but marked `executable=False`.
 
 ## Still open from the audit — each needs its own plan
 
