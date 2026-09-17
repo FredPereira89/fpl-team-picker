@@ -239,7 +239,7 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         news=None, current_squad=None, bank: float = 0.0, free_transfers: int = 1,
         progress=None, purchase_prices: dict[int, float] | None = None,
-        chips_used: list[str] | None = None):
+        chip_events: list[dict] | None = None, first_event: int = 1):
     root = Path(root)
     client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours)
 
@@ -377,12 +377,13 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
 
     team_by_player = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
-    # Chips already spent, from local state merged with FPL's own record. This
-    # was a literal [] until 2026-09-07, so the advisor happily recommended a
-    # Wildcard that had been played weeks earlier.
+    # Chips already spent, DATED, from local state merged with FPL's own record.
+    # This was a literal [] until 2026-09-07, so the advisor happily recommended
+    # a Wildcard that had been played weeks earlier -- and a bare name list then
+    # suppressed the second-half copy of every chip for the rest of the season.
     chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event,
-                        list(chips_used or []), last_event=last_event,
-                        quality=quality)
+                        list(chip_events or []), last_event=last_event,
+                        quality=quality, first_event=first_event)
 
     value = round(sum(prices[i] for i in squad_ids), 1)
     deadline = next(

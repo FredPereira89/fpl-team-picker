@@ -6,6 +6,14 @@ SQUAD = list(range(1, 16))
 TEAM_BY_PLAYER = {i: 1 for i in SQUAD}
 LINEUP = Lineup(xi=list(range(1, 12)), bench=[12, 13, 14, 15],
                 formation="4-4-2", captain=1, vice=2, xp=60.0)
+# Chip tests run from GW2, not GW1: Wildcard and Free Hit are illegal in an
+# entry's opening gameweek, so a GW1 fixture cannot exercise either of them.
+EVENT = 2
+
+
+def _used(*names, event=1):
+    """Chip uses as the DATED records advise_chips now takes."""
+    return [{"chip": n, "event": event} for n in names]
 
 
 def _xp(bench_xp=1.0, captain_xp=8.0, flags=None):
@@ -24,12 +32,12 @@ def _xp(bench_xp=1.0, captain_xp=8.0, flags=None):
     })
 
 
-def _counts(n=1):
-    return pd.DataFrame([{"team_id": 1, "event": 1, "n_fixtures": n}])
+def _counts(n=1, event=EVENT):
+    return pd.DataFrame([{"team_id": 1, "event": event, "n_fixtures": n}])
 
 
 def test_no_chip_recommended_in_a_normal_week():
-    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [])
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [])
     assert isinstance(a, ChipAdvice)
     assert a.chip is None
     assert a.reason
@@ -37,54 +45,58 @@ def test_no_chip_recommended_in_a_normal_week():
 
 def test_bench_boost_when_bench_is_strong():
     a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
-                     _counts(), TEAM_BY_PLAYER, 1, [])
+                     _counts(), TEAM_BY_PLAYER, EVENT, [])
     assert a.chip == "benchboost"
 
 
 def test_no_bench_boost_when_one_bench_player_is_weak():
     xp = _xp(bench_xp=BENCH_BOOST_MIN_XP + 1)
     xp.loc[xp.player_id == 15, "xp_next1"] = 0.1
-    a = advise_chips(xp, LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [])
+    a = advise_chips(xp, LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [])
     assert a.chip != "benchboost"
 
 
 def test_triple_captain_on_a_double_gameweek():
     a = advise_chips(_xp(captain_xp=12.0), LINEUP, SQUAD, _counts(n=2),
-                     TEAM_BY_PLAYER, 1, [])
+                     TEAM_BY_PLAYER, EVENT, [])
     assert a.chip == "triplecaptain"
 
 
 def test_free_hit_when_several_players_blank():
-    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(n=0), TEAM_BY_PLAYER, 1, [])
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(n=0), TEAM_BY_PLAYER, EVENT, [])
     assert a.chip == "freehit"
 
 
 def test_wildcard_when_squad_riddled_with_problems():
     flags = [["Unavailable (i): injured"]] * 5 + [[] for _ in range(10)]
     a = advise_chips(_xp(flags=flags), LINEUP, SQUAD, _counts(),
-                     TEAM_BY_PLAYER, 1, [])
+                     TEAM_BY_PLAYER, EVENT, [])
     assert a.chip == "wildcard"
 
 
 def test_used_chips_are_never_suggested_again():
     a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
-                     _counts(), TEAM_BY_PLAYER, 1, ["benchboost"])
+                     _counts(), TEAM_BY_PLAYER, EVENT, _used("benchboost"))
     assert a.chip != "benchboost"
 
 
 def test_reason_always_explains_the_tradeoff():
     a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
-                     _counts(), TEAM_BY_PLAYER, 1, [])
+                     _counts(), TEAM_BY_PLAYER, EVENT, [])
     assert len(a.reason) > 20
 
 
 def test_fallback_is_honest_when_a_triggered_chip_is_already_used():
     """Bench qualifies for Bench Boost, but it's already been used -- the
-    fallback reason must say so, not falsely claim the bench is weak."""
+    fallback reason must say so, not falsely claim the bench is weak.
+
+    It names the gameweek and the window too: under the two-set rules "already
+    used" is ambiguous, because a chip spent in the first half is back in the
+    second."""
     a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
-                     _counts(), TEAM_BY_PLAYER, 1, ["benchboost"])
+                     _counts(), TEAM_BY_PLAYER, EVENT, _used("benchboost"))
     assert a.chip is None
-    assert "already used" in a.reason
+    assert "was played in GW1" in a.reason
     assert "too weak" not in a.reason
 
 
@@ -296,7 +308,7 @@ from fpl.optimize.chips import SquadQuality
 def test_wildcard_fires_when_a_rebuild_beats_what_transfers_can_reach():
     """Surplus clears the hits the same rebuild would otherwise cost."""
     q = SquadQuality(surplus=45.0, changes=10, hit_equivalent=40.0)
-    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [],
                      quality=q)
     assert a.chip == "wildcard"
     assert "45" in a.reason or "45.0" in a.reason
@@ -306,24 +318,24 @@ def test_wildcard_holds_when_the_rebuild_is_not_worth_the_hits():
     """The real GW5 case: a 21.4 surplus against 10 changes (40 points of
     hits) is not yet worth the chip."""
     q = SquadQuality(surplus=21.4, changes=10, hit_equivalent=40.0)
-    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [],
                      quality=q)
     assert a.chip != "wildcard"
 
 
 def test_quality_alone_cannot_resurrect_a_spent_wildcard():
     q = SquadQuality(surplus=45.0, changes=10, hit_equivalent=40.0)
-    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1,
-                     ["wildcard"], quality=q)
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT,
+                     _used("wildcard"), quality=q)
     assert a.chip != "wildcard"
-    assert "already used" in a.reason
+    assert "was played in GW1" in a.reason
 
 
 def test_omitting_quality_leaves_the_advisor_exactly_as_it_was():
     """Mode 1 has no squad to compare against, and every existing caller
     passes nothing -- behaviour must be unchanged."""
-    before = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [])
-    after = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, 1, [],
+    before = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [])
+    after = advise_chips(_xp(), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER, EVENT, [],
                          quality=None)
     assert before.chip == after.chip and before.reason == after.reason
 
@@ -333,6 +345,31 @@ def test_the_injury_trigger_still_fires_without_any_quality_signal():
     whatever the rebuild says."""
     flags = [["Unavailable (i): knee"] for _ in range(4)] + [[] for _ in range(11)]
     a = advise_chips(_xp(flags=flags), LINEUP, SQUAD, _counts(), TEAM_BY_PLAYER,
-                     1, [], quality=SquadQuality(surplus=0.0, changes=0,
+                     EVENT, [], quality=SquadQuality(surplus=0.0, changes=0,
                                                  hit_equivalent=0.0))
     assert a.chip == "wildcard"
+
+
+# --- P0/B1: two sets of chips a season (2026-09-17 audit) ---
+
+def test_a_first_half_wildcard_does_not_block_the_second_half_one():
+    """Two Wildcards a season. The advisor used to see a single name and
+    suppress the second for good."""
+    flags = [["Unavailable (i): injured"]] * 5 + [[] for _ in range(10)]
+    a = advise_chips(_xp(flags=flags), LINEUP, SQUAD, _counts(event=25),
+                     TEAM_BY_PLAYER, 25, _used("wildcard", event=5))
+    assert a.chip == "wildcard"
+
+
+def test_the_advisor_never_offers_a_chip_in_the_opening_gameweek():
+    a = advise_chips(_xp(), LINEUP, SQUAD, _counts(n=0, event=1),
+                     TEAM_BY_PLAYER, 1, [])
+    assert a.chip != "freehit"
+
+
+def test_a_blocked_chip_is_explained_by_the_rule_that_blocked_it():
+    a = advise_chips(_xp(bench_xp=BENCH_BOOST_MIN_XP + 1), LINEUP, SQUAD,
+                     _counts(), TEAM_BY_PLAYER, EVENT,
+                     _used("benchboost", event=1))
+    assert a.chip is None
+    assert "benchboost" in a.reason

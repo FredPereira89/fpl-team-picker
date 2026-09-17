@@ -382,7 +382,7 @@ def test_a_spent_chip_is_never_recommended_again(tmp_path):
     assert rec.chip.chip is not None, "fixture must advise some chip to be a test"
 
     spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient(),
-                   chips_used=[rec.chip.chip])
+                   chip_events=[{"chip": rec.chip.chip, "event": 1}])
     assert spent.chip.chip != rec.chip.chip
 
 
@@ -393,11 +393,13 @@ def test_a_spent_chip_is_explained_when_nothing_is_left_to_advise(tmp_path):
     fixture change let a second chip qualify -- the advisor was then correctly
     recommending that one instead of explaining itself."""
     cfg = Config(rank_sims=0, budget=100.0, horizon_gw=3)
-    all_chips = ["wildcard", "freehit", "benchboost", "triplecaptain"]
+    # Dated to GW1 so they land in the same chip window as the run.
+    all_chips = [{"chip": c, "event": 1} for c in
+                 ("wildcard", "freehit", "benchboost", "triplecaptain")]
     spent, _ = run(cfg, mode=1, from_event=1, root=tmp_path, client=NearDoubleClient(),
-                   chips_used=all_chips)
+                   chip_events=all_chips)
     assert spent.chip.chip is None
-    assert "already used" in spent.chip.reason
+    assert "was played in GW1" in spent.chip.reason
 
 
 def test_a_matchday_shortens_the_cache_ttl(tmp_path):

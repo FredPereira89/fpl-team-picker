@@ -75,10 +75,10 @@ def main() -> int:
     bank = 0.0
     free_transfers = cfg.free_transfers
     purchase_prices: dict[int, float] = {}
-    # Chips spent so far. Mode 1 has no live squad to resolve, but a chip is
-    # gone whichever mode notices, so local state is read either way.
-    chips_used = load_state(state_path, cfg).chips_used
-    chip_events: list[dict] = []
+    # Chips spent so far, DATED. Mode 1 has no live squad to resolve, but a
+    # chip is gone whichever mode notices, so local state is read either way.
+    chip_events: list[dict] = load_state(state_path, cfg).chip_events
+    first_event = 1
 
     if args.mode == 2:
         client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours)
@@ -92,7 +92,7 @@ def main() -> int:
                 print(f"Note: {msg}")
             current_squad, bank, free_transfers = live.current_squad, live.bank, live.free_transfers
             purchase_prices = live.purchase_prices
-            chips_used, chip_events = live.chips_used, live.chip_events
+            chip_events, first_event = live.chip_events, live.first_event
 
     def progress(done: int, total: int) -> None:
         # Player history is fetched one request per second on a cold cache, so a
@@ -113,7 +113,7 @@ def main() -> int:
     rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
                   current_squad=current_squad, bank=bank, free_transfers=free_transfers,
                   news=news, progress=progress, purchase_prices=purchase_prices,
-                  chips_used=chips_used)
+                  chip_events=chip_events, first_event=first_event)
     print(render(rec, xp))
 
     # A run is a PROPOSAL, not an execution. Recording unconditionally spent

@@ -30,6 +30,10 @@ class LiveSquad:
     # True when the squad above was restored from base state because a Free
     # Hit expired, rather than read from the previous gameweek's picks.
     restored_from_freehit: bool = False
+    # The entry's OWN opening gameweek. Neither a Wildcard nor a Free Hit may be
+    # played in it, and an entry that joined in GW7 has a different one from an
+    # entry that started the season.
+    first_event: int = 1
 
 
 def resolve_current_squad(cfg, gw: int, state_path: Path, client):
@@ -114,6 +118,12 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
             f"{free_transfers} from local tracking."
         )
 
+    # An entry that joined mid-season has its own opening gameweek, and neither
+    # a Wildcard nor a Free Hit may be played in it.
+    entry_events = [int(e["event"]) for e in (history or {}).get("current", [])
+                    if e.get("event")]
+    first_event = min(entry_events) if entry_events else 1
+
     chips_used, chip_events = merge_chip_events(state, chips_from_history(history or {}))
     new_to_state = [c for c in chips_used if c not in state.chips_used]
     if new_to_state:
@@ -132,7 +142,8 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
 
     return LiveSquad(current_squad, bank, free_transfers, warnings,
                      purchase_prices, chips_used, chip_events,
-                     restored_from_freehit=restored), []
+                     restored_from_freehit=restored,
+                     first_event=first_event), []
 
 
 def record_transfers(state_path: Path, cfg, gw: int, transfers_made: int,

@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import pandas as pd
 
+from ..chips import chip_available, chip_blocked_reason
 from .objective import event_columns
 
 BENCH_BOOST_MIN_XP = 2.5
@@ -155,11 +156,27 @@ def _timing(value_now: float, by_event: dict[int, float], from_event: int,
 
 def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
                  counts: pd.DataFrame, team_by_player: dict[int, int],
-                 from_event: int, chips_used: list[str],
+                 from_event: int, chip_events: list[dict],
                  last_event: int = 38,
-                 quality: "SquadQuality | None" = None) -> ChipAdvice:
+                 quality: "SquadQuality | None" = None,
+                 first_event: int = 1) -> ChipAdvice:
+    """Which chip, if any, to play this gameweek.
+
+    `chip_events` is the DATED record from `State.chip_events`, not a list of
+    names: a name alone cannot say which half of the season a Wildcard belongs
+    to, and 2026/27 gives two of every chip -- one per half. Legality lives in
+    `fpl.chips`; everything below is about whether a LEGAL chip is worth
+    playing now.
+    """
     df = xp_df.set_index("player_id")
-    used = set(chips_used or [])
+    events = list(chip_events or [])
+
+    def usable(name: str) -> bool:
+        return chip_available(name, from_event, events, first_event)
+
+    def why_not(name: str) -> str:
+        return chip_blocked_reason(name, from_event, events, first_event) or ""
+
     ids = [int(i) for i in squad_ids]
     n_by_team = {
         int(r["team_id"]): int(r["n_fixtures"])
@@ -217,21 +234,21 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     # different bench from three blanks and a haul, and the sum hides that.
     bench_ok = bool(bench_xp) and min(bench_xp) >= BENCH_BOOST_MIN_XP and bench_now
 
-    if blanks >= FREE_HIT_MIN_BLANKS and fh_target is not None             and "freehit" not in used:
+    if blanks >= FREE_HIT_MIN_BLANKS and fh_target is not None             and usable("freehit"):
         holds.append(("Free Hit", fh_target, "blanks"))
-    if not triple_ok and triple_target is not None and "triplecaptain" not in used:
+    if not triple_ok and triple_target is not None and usable("triplecaptain"):
         holds.append(("Triple Captain", triple_target, triple_why))
-    if not bench_ok and bench_target is not None and "benchboost" not in used             and bool(bench_xp) and min(bench_xp) >= BENCH_BOOST_MIN_XP:
+    if not bench_ok and bench_target is not None and usable("benchboost")             and bool(bench_xp) and min(bench_xp) >= BENCH_BOOST_MIN_XP:
         holds.append(("Bench Boost", bench_target, bench_why))
 
-    if free_hit_ok and "freehit" not in used:
+    if free_hit_ok and usable("freehit"):
         return ChipAdvice("freehit", (
             f"{blanks} of your 15 have no fixture this gameweek. A Free Hit fields a "
             f"one-week replacement squad, but you lose it for a future blank or double "
             f"— only worth it if you can't cover the gap with transfers."
         ))
 
-    if wildcard_ok and "wildcard" not in used:
+    if wildcard_ok and usable("wildcard"):
         # Say WHICH reason fired. "Wildcard recommended" means something quite
         # different when the squad is injured than when it has simply drifted.
         if problems >= WILDCARD_MIN_PROBLEMS:
@@ -247,7 +264,7 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
             f"{why}, but spends a chip you may want later for a fixture swing."
         ))
 
-    if triple_ok and "triplecaptain" not in used:
+    if triple_ok and usable("triplecaptain"):
         detail = "a double gameweek" if cap_fixtures >= 2 else "an outstanding single fixture"
         return ChipAdvice("triplecaptain", (
             f"{df.loc[lineup.captain, 'web_name']} has {detail} (xP {cap_xp:.1f}), and no "
@@ -256,7 +273,7 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
             f"wastes the chip entirely."
         ))
 
-    if bench_ok and "benchboost" not in used:
+    if bench_ok and usable("benchboost"):
         return ChipAdvice("benchboost", (
             f"All four bench players project at {min(bench_xp):.1f}+ xP "
             f"({bench_total:.1f} total), the best bench week visible through "
@@ -283,18 +300,24 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
         return ChipAdvice(None, "Holding " + "; ".join(parts) + ".",
                           hold_until=holds[0][1])
 
+    # Say WHICH rule stopped a chip the squad otherwise qualified for. "Already
+    # used" and "not until GW20" are different pieces of news, and under the
+    # two-set rules the second is the common one.
     blocked = []
-    if free_hit_ok and "freehit" in used:
-        blocked.append(f"{blanks} players have a blank fixture — Free Hit-worthy, but already used")
-    if wildcard_ok and "wildcard" in used:
+    if free_hit_ok and not usable("freehit"):
+        blocked.append(f"{blanks} players have a blank fixture — Free Hit-worthy, "
+                       f"but {why_not('freehit')}")
+    if wildcard_ok and not usable("wildcard"):
         detail = (f"{problems} players carry injury/rotation flags"
                   if problems >= WILDCARD_MIN_PROBLEMS
                   else f"a rebuild projects {quality.surplus:.1f} xP beyond your transfers")
-        blocked.append(f"{detail} — Wildcard-worthy, but already used")
-    if triple_ok and "triplecaptain" in used:
-        blocked.append("your captain has a standout week — Triple-Captain-worthy, but already used")
-    if bench_ok and "benchboost" in used:
-        blocked.append("your bench projects strongly — Bench-Boost-worthy, but already used")
+        blocked.append(f"{detail} — Wildcard-worthy, but {why_not('wildcard')}")
+    if triple_ok and not usable("triplecaptain"):
+        blocked.append(f"your captain has a standout week — Triple-Captain-worthy, "
+                       f"but {why_not('triplecaptain')}")
+    if bench_ok and not usable("benchboost"):
+        blocked.append(f"your bench projects strongly — Bench-Boost-worthy, "
+                       f"but {why_not('benchboost')}")
 
     if blocked:
         return ChipAdvice(None, "No chip available this week — " + "; ".join(blocked) + ".")
