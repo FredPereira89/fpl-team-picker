@@ -59,6 +59,20 @@ class State:
     # next week's balance -- the +1 had already accrued -- and the optimizer was
     # handed a free transfer that does not exist.
     free_transfers_remaining: int = 0
+    # The PERMANENT squad a Free Hit is temporarily replacing.
+    #
+    # A Free Hit lasts one gameweek: at the next deadline FPL silently restores
+    # the squad, bank and purchase prices from before the chip. Local state held
+    # the only copy of those purchase prices -- no public endpoint reports them
+    # -- and `--confirm` was overwriting all three with the temporary fifteen.
+    # After that every later budget and transfer started from a team the
+    # manager does not own, and nothing in the tool could notice.
+    base_squad: list[int] = field(default_factory=list)
+    base_bank: float = 0.0
+    base_purchase_prices: dict[int, float] = field(default_factory=dict)
+    # The gameweek a Free Hit is active for, or None. Planning any LATER
+    # gameweek must ignore that week's picks and restore the base above.
+    freehit_event: int | None = None
 
 
 def _chip_records(raw: dict) -> list[dict]:
@@ -96,6 +110,12 @@ def load_state(path: Path, cfg) -> State:
         squad_event=int(raw.get("squad_event", 0)),
         bank=float(raw.get("bank", 0.0)),
         free_transfers_remaining=int(raw.get("free_transfers_remaining", 0)),
+        base_squad=[int(i) for i in (raw.get("base_squad") or [])],
+        base_bank=float(raw.get("base_bank", 0.0)),
+        base_purchase_prices={int(k): float(v) for k, v
+                              in (raw.get("base_purchase_prices") or {}).items()},
+        freehit_event=(None if raw.get("freehit_event") is None
+                       else int(raw["freehit_event"])),
     )
 
 

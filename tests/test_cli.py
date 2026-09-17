@@ -293,3 +293,69 @@ def test_confirming_persists_a_chip_fpl_played_outside_this_tool(tmp_path):
     back = load_state(path, cfg)
     assert back.chips_used == ["benchboost"]
     assert back.chip_events == [{"chip": "benchboost", "event": 1}]
+
+
+# --- P0/B3: a Free Hit must not destroy the permanent squad (2026-09-17 audit) ---
+
+def test_a_free_hit_preserves_the_permanent_squad_and_its_prices(tmp_path):
+    """FPL restores the pre-chip squad, bank and purchase prices at the next
+    deadline. The local state held the ONLY copy of the purchase prices, and
+    --confirm was overwriting it with the temporary Free Hit 15."""
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    permanent = list(range(1, 16))
+    temporary = list(range(101, 116))
+    prices = {i: 5.0 for i in permanent}
+
+    record_transfers(path, cfg, gw=8, transfers_made=9, chip="freehit",
+                     purchase_prices={i: 6.0 for i in temporary},
+                     squad=temporary, bank=0.3,
+                     base_squad=permanent, base_bank=1.2,
+                     base_purchase_prices=prices)
+
+    written = load_state(path, cfg)
+    assert written.squad == temporary          # this week you field the FH 15
+    assert written.freehit_event == 8
+    assert written.base_squad == permanent     # and you keep the real one
+    assert written.base_bank == 1.2
+    assert written.base_purchase_prices == prices
+
+
+def test_the_gameweek_after_a_free_hit_plans_from_the_restored_squad(tmp_path):
+    """resolve_current_squad reads the PREVIOUS gameweek's picks, which after a
+    Free Hit is the temporary team FPL has already taken away."""
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=7, free_transfers=1)
+    permanent = list(range(1, 16))
+    temporary = list(range(101, 116))
+    record_transfers(path, cfg, gw=8, transfers_made=9, chip="freehit",
+                     purchase_prices={i: 6.0 for i in temporary},
+                     squad=temporary, bank=0.3,
+                     base_squad=permanent, base_bank=1.2,
+                     base_purchase_prices={i: 5.0 for i in permanent})
+
+    picks = {"entry_history": {"bank": 3},
+             "picks": [{"element": i} for i in temporary]}
+    client = FakeClient(picks, {"current": [], "chips": []})
+    live, errors = resolve_current_squad(cfg, 9, path, client)
+
+    assert errors == []
+    assert live.current_squad == permanent
+    assert live.bank == 1.2
+    assert live.purchase_prices == {i: 5.0 for i in permanent}
+    assert live.restored_from_freehit is True
+    assert any("Free Hit" in w for w in live.warnings)
+
+
+def test_an_ordinary_confirmation_clears_the_free_hit_marker(tmp_path):
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    record_transfers(path, cfg, gw=8, transfers_made=9, chip="freehit",
+                     squad=list(range(101, 116)), bank=0.3,
+                     base_squad=list(range(1, 16)), base_bank=1.2,
+                     base_purchase_prices={i: 5.0 for i in range(1, 16)})
+    record_transfers(path, cfg, gw=9, transfers_made=1, chip=None,
+                     squad=list(range(1, 16)), bank=1.2)
+    written = load_state(path, cfg)
+    assert written.freehit_event is None
+    assert written.base_squad == []

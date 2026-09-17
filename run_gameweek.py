@@ -142,9 +142,14 @@ def main() -> int:
         # value resets to market value every run and the budget drifts high again.
         updated = {int(pid): float(purchase_prices.get(int(pid), now[int(pid)]))
                    for pid in applied}
+        # The pre-deadline squad, bank and prices are what FPL restores after a
+        # Free Hit, so they are handed over as the permanent state to keep.
         written = record_transfers(state_path, cfg, args.gw, transfers_made, chip,
                                    purchase_prices=updated, squad=applied, bank=cash,
-                                   api_chips=chip_events)
+                                   api_chips=chip_events,
+                                   base_squad=list(current_squad),
+                                   base_bank=bank,
+                                   base_purchase_prices=dict(purchase_prices))
         print(f"\nRecorded GW{args.gw} as played: {transfers_made} transfer(s), "
               f"chip {chip or 'none'}, bank £{written.bank}m, "
               f"{written.free_transfers_remaining} free transfer(s) left this week, "
