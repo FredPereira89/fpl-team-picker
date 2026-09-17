@@ -61,6 +61,12 @@ class Config:
     # tracks expected points closely; raise it toward 0.9 to chase a green
     # arrow, which is the only regime where taking variance is correct.
     rank_target: float = 0.5
+    # Let the rank layer DECIDE the weekly transfer, rather than only report on
+    # it. Off by default: the rank objective scores one gameweek, so it cannot
+    # see the future gain a transfer is made for -- a plan losing 0.2 now and
+    # gaining 8 over four weeks lost to a one-week move, and a hit with strong
+    # payback was close to unselectable. The horizon decides instead.
+    rank_transfers: bool = False
     # Recalibrate xP per position against scored gameweeks (model.calibration).
     # Self-limiting: it refuses to fit below MIN_GAMEWEEKS, so early in a season
     # this is a no-op rather than a correction built from noise.
@@ -100,6 +106,7 @@ def load_config(path: Path) -> Config:
         rank_sims=int(opt.get("rank_sims", d.rank_sims)),
         rank_candidates=int(opt.get("rank_candidates", d.rank_candidates)),
         rank_diversity=int(opt.get("rank_diversity", d.rank_diversity)),
+        rank_transfers=bool(opt.get("rank_transfers", d.rank_transfers)),
         calibrate=bool(model.get("calibrate", d.calibrate)),
         rank_target=float(opt.get("rank_target", d.rank_target)),
         free_transfers=int(raw.get("free_transfers", d.free_transfers)),

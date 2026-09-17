@@ -230,34 +230,57 @@ def _squad_quality(xp, cfg, current_squad, bank, selling, best_plan):
 
 def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                       current_squad, bank, free_transfers, selling):
-    """This week's transfer plan, judged against the field rather than on xP.
+    """This week's transfer plan, chosen on discounted multi-gameweek net points.
 
-    The distributional layer was wired into the squad REBUILD only, so the mode
-    that runs every week -- deciding one or two transfers -- never used it, and
-    the expected-points objective it exists to replace was still deciding alone.
+    The rank layer used to make this decision, and it should not. Candidates are
+    generated on the discounted horizon, but the final pick was made purely on
+    CURRENT-EVENT samples: a plan's future gains were never scored at all. A
+    transfer losing 0.2 this week and gaining 8 over the next four lost to a
+    one-week move, and a hit with strong future payback was close to
+    unselectable -- which defeats the entire purpose of charging four points
+    for it. With rank_sims at 4000 by default, that one-week objective
+    superseded the otherwise-correct horizon comparison every gameweek.
 
-    Each candidate is charged its own points hit inside the simulation, so a
-    -4 plan has to beat the field by more than a free one rather than being
-    compared on equal terms.
+    So the horizon decides, and the rank layer reports. `optimizer.rank_transfers`
+    restores the old behaviour for anyone who wants it, and is off by default
+    because a one-week target cannot price a five-week decision.
     """
-    # optimize_transfers solves the same unconstrained n=0 plan that
-    # enumerate_transfer_plans's own sweep produces, so with the rank layer on
-    # it is only run as a fallback for the (rare) case the enumeration finds
-    # no candidate plans -- not unconditionally, which paid for that solve
-    # twice on every weekly run.
+    plans = []
     if int(cfg.rank_sims) > 0:
+        # Enumerated even when rank does not decide: the candidate set is how a
+        # hit and a coordinated two-move restructure get onto the table at all,
+        # and the diversity is worth having in the report.
         plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
                                          xp_col=HORIZON_COL, selling_prices=selling,
                                          k=int(cfg.rank_candidates))
-        if plans:
+
+    if plans and int(cfg.rank_sims) > 0 and bool(getattr(cfg, "rank_transfers", False)):
+        ids, samples, rival_scores, target, n_needed, bar = _rank_context(
+            xp, players, rates, minutes, tfx, cfg, from_event)
+        chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
+                                         bar=bar, penalties=[p.hit_cost for p in plans])
+        index = plans.index(chosen)
+        stats = _rank_stats(scored, index, len(plans), target, n_needed)
+        stats["hit_cost"] = int(chosen.hit_cost)
+        stats["decided_by"] = "rank"
+        return chosen, None, stats
+
+    if plans:
+        # net_xp is the discounted horizon total with this plan's hit already
+        # subtracted, which is exactly the quantity a transfer decision turns on.
+        best = max(plans, key=lambda p: (p.net_xp, -p.n_transfers))
+        stats = None
+        if int(cfg.rank_sims) > 0:
+            # Diagnostic only: how the CHOSEN plan fares against the field. It
+            # no longer selects anything, so it cannot overrule the horizon.
             ids, samples, rival_scores, target, n_needed, bar = _rank_context(
                 xp, players, rates, minutes, tfx, cfg, from_event)
-            chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
-                                             bar=bar, penalties=[p.hit_cost for p in plans])
-            index = plans.index(chosen)
-            stats = _rank_stats(scored, index, len(plans), target, n_needed)
-            stats["hit_cost"] = int(chosen.hit_cost)
-            return chosen, None, stats
+            _, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
+                                        bar=bar, penalties=[p.hit_cost for p in plans])
+            stats = _rank_stats(scored, plans.index(best), len(plans), target, n_needed)
+            stats["hit_cost"] = int(best.hit_cost)
+            stats["decided_by"] = "expected points over the horizon"
+        return best, plans, stats
 
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
                                        xp_col=HORIZON_COL, selling_prices=selling)

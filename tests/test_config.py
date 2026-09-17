@@ -135,3 +135,15 @@ def test_the_bench_floor_is_off_unless_asked_for(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text("optimizer:\n  bench_floor_xp: 2.5\n")
     assert load_config(p).bench_floor_xp == 2.5
+
+
+def test_the_rank_layer_does_not_decide_transfers_by_default(tmp_path):
+    """The rank objective scores ONE gameweek, so it cannot see the future gain
+    a transfer is made for. Letting it pick the plan meant a move losing 0.2 now
+    and gaining 8 over four weeks lost to a one-week swap, and a hit with strong
+    payback was close to unselectable -- which defeats the point of charging
+    four points for it."""
+    assert Config().rank_transfers is False
+    p = tmp_path / "config.yaml"
+    p.write_text("optimizer:\n  rank_transfers: true\n")
+    assert load_config(p).rank_transfers is True
