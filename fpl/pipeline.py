@@ -25,11 +25,12 @@ from .model.xp import build_xp
 from .backtest.ledger import save_predictions, load_scored_summary
 from .model.calibration import fit_calibration, apply_calibration, scored_history
 from .model.simulate import simulate_event
-from .optimize.squad import optimize_squad, enumerate_squads
+from .optimize.squad import optimize_squad, enumerate_squads, Squad
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
                             field_bar, required_rivals, RIVALS)
 from .optimize.lineup import build_lineup
-from .optimize.chips import advise_chips
+from .optimize.chips import advise_chips, ChipAdvice
+from .optimize.actions import wildcard_action, freehit_action
 from .optimize.transfers import (optimize_transfers, enumerate_transfer_plans,
                                  selling_price, bank_after)
 from .report.weekly import Recommendation, render
@@ -373,7 +374,6 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
                                           from_event)
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
 
-    from .optimize.squad import Squad
     lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
 
     team_by_player = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
@@ -384,6 +384,26 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     chip = advise_chips(xp, lineup, squad_ids, counts, team_by_player, from_event,
                         list(chip_events or []), last_event=last_event,
                         quality=quality, first_event=first_event)
+
+    # A named chip must return the squad that chip actually fields. Advising
+    # "Free Hit" while handing back the ordinary permanent transfer plan is not
+    # a timing error -- it is not the action the chip means.
+    chip_squad = chip_temporary = False
+    if actual_mode == 2 and chip is not None and chip.chip in ("wildcard", "freehit"):
+        action = (wildcard_action(xp, cfg, current_squad, bank, selling,
+                                  xp_col=HORIZON_COL)
+                  if chip.chip == "wildcard"
+                  else freehit_action(xp, cfg, current_squad, bank, selling))
+        if action is None:
+            chip = ChipAdvice(None, (
+                f"A {chip.chip} looked right this week, but no legal squad could "
+                f"be built from your budget — so no chip is recommended."
+            ))
+        else:
+            squad_ids, starting_ids = action.squad_ids, action.starting_ids
+            transfers = action.transfers
+            lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
+            chip_squad, chip_temporary = True, action.temporary
 
     value = round(sum(prices[i] for i in squad_ids), 1)
     deadline = next(
@@ -406,6 +426,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         flags=freshness_flags(client, raw_fixtures, checked_through),
         bank=cash,
         squad_value=value, stale=getattr(client, "stale", False),
+        chip_squad=chip_squad, chip_temporary=chip_temporary,
         trust=trust_text(root) if actual_mode == 1 else "",
     )
     return rec, xp

@@ -30,6 +30,12 @@ class Recommendation:
     # What the per-position recalibration was fitted on, or None when there is
     # not yet enough scored history to fit one.
     calibration: str | None = None
+    # True when the fifteen below are the squad a CHIP builds rather than the
+    # ordinary transfer plan, and true again when FPL will take them back at
+    # the next deadline (Free Hit). The report has to say which, because
+    # confirming one writes permanent state and the other must not.
+    chip_squad: bool = False
+    chip_temporary: bool = False
 
 
 def _name(df, pid) -> str:
@@ -169,6 +175,15 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         out.append(prefix + rec.chip.reason)
     else:
         out.append(f"**{rec.chip.chip}** — {rec.chip.reason}")
+        if rec.chip_temporary:
+            out.append(
+                "The fifteen above are this chip's ONE-WEEK squad. FPL restores "
+                "your permanent team at the next deadline, and any money this "
+                "week frees up does not carry over."
+            )
+        elif rec.chip_squad:
+            out.append("The fifteen above are the squad this chip builds, "
+                       "with every transfer free.")
     out.append("")
 
     out += [f"### Budget", f"Bank: £{rec.bank}m | Squad value: £{rec.squad_value}m", ""]

@@ -668,3 +668,64 @@ def test_a_structural_hold_never_claims_to_have_a_projection(tmp_path):
 
     assert "no projection" in later.chip.reason
     assert "projects better" not in later.chip.reason
+
+
+# --- P0/B4: a named chip returns its own squad (2026-09-17 audit) ---
+
+def _legal_current_squad():
+    """A cheap but legal 15 to run Mode 2 transfers from."""
+    from fpl.data.normalize import normalize_players
+    players = normalize_players(BOOTSTRAP)
+    need = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    current, club_count = [], {}
+    cheap = players[players.player_id % 5 == 0].sort_values("player_id")
+    for _, row in cheap.iterrows():
+        pos, team_id, pid = row["position"], int(row["team_id"]), int(row["player_id"])
+        if need.get(pos, 0) > 0 and club_count.get(team_id, 0) < 3:
+            current.append(pid)
+            need[pos] -= 1
+            club_count[team_id] = club_count.get(team_id, 0) + 1
+        if all(v == 0 for v in need.values()):
+            break
+    return current
+
+
+def test_a_recommended_wildcard_returns_the_rebuilt_squad(tmp_path, monkeypatch):
+    """Confirming a Wildcard used to apply the limited-transfer squad, which is
+    not the team the chip chose."""
+    import fpl.pipeline as pipeline
+    from fpl.optimize.chips import ChipAdvice
+
+    monkeypatch.setattr(pipeline, "advise_chips",
+                        lambda *a, **k: ChipAdvice("wildcard", "test"))
+    rec, _ = run(Config(rank_sims=0, max_paid_hits=2), mode=2, from_event=1,
+                 root=tmp_path, client=FakeClient(),
+                 current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
+    assert rec.chip.chip == "wildcard"
+    assert rec.chip_squad is True
+    assert rec.chip_temporary is False
+    # Unlimited free transfers: a rebuild can never be charged a hit.
+    assert rec.transfers is not None and rec.transfers.hit_cost == 0
+    assert set(rec.lineup.xi) <= set(rec.squad_ids)
+
+
+def test_a_recommended_free_hit_is_flagged_temporary(tmp_path, monkeypatch):
+    import fpl.pipeline as pipeline
+    from fpl.optimize.chips import ChipAdvice
+
+    monkeypatch.setattr(pipeline, "advise_chips",
+                        lambda *a, **k: ChipAdvice("freehit", "test"))
+    rec, _ = run(Config(rank_sims=0, max_paid_hits=2), mode=2, from_event=1,
+                 root=tmp_path, client=FakeClient(),
+                 current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
+    assert rec.chip_squad is True
+    assert rec.chip_temporary is True
+    assert len(rec.squad_ids) == 15
+
+
+def test_an_ordinary_week_is_not_flagged_as_a_chip_squad(tmp_path):
+    rec, _ = run(Config(rank_sims=0, max_paid_hits=2), mode=2, from_event=1,
+                 root=tmp_path, client=FakeClient(),
+                 current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
+    assert rec.chip_squad is False
+    assert rec.chip_temporary is False
