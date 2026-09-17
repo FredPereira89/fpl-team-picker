@@ -1,13 +1,26 @@
 #!/usr/bin/env python
 """Replay past gameweeks and report whether the model actually beats the field.
 
-Populates the prediction ledger with a forecast for every gameweek already
-played, built only from data that existed before it, then scores each one
-against FPL's own published average. The ledger is what the per-position
-calibration (model.calibration) fits on, so running this is what turns the
-calibration from a no-op into a correction.
-
     python scripts/run_walkforward.py --through 8
+
+Two numbers come out, and they answer different questions.
+
+The first is a SEQUENTIAL replay: one squad carried from gameweek to gameweek
+under the real rules -- one bank, recorded purchase prices, a free-transfer
+balance, points hits, chip legality, Free Hit restoration. Policies are
+compared on the decisions they would actually have made, so the result is
+something a manager could have executed.
+
+The second is the free weekly rebuild this script used to report as its
+headline. It buys fifteen players from a fresh budget every gameweek and obeys
+none of the above, so it is a CEILING and is now labelled as one. The gap
+between the two is the cost of having to play by the rules.
+
+Both are still built from today's bootstrap for any gameweek with no
+pre-deadline snapshot on file, which means they know about injuries, price
+changes and transfers the live model could not. `fpl.data.snapshots` records
+snapshots from now on; until enough exist, the contamination banner prints and
+any edge reported here is an upper bound.
 
 Read the verdict, not the mean. The weekly edge has an SD near 15 points: ten
 gameweeks can only confirm an edge of ~13 pts/GW, a full season ~6.8, and
@@ -38,6 +51,9 @@ from fpl.model.calibration import fit_calibration, apply_calibration, scored_his
 from fpl.backtest.ledger import save_predictions
 from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_score,
                                       squad_ledger, weekly_edge, replayable_gameweeks)
+from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
+                                 expected_points_policy, oracle_rebuild_policy)
+from fpl.data import snapshots
 from fpl.optimize.squad import optimize_squad
 
 
@@ -65,6 +81,14 @@ def main() -> int:
                     help="last gameweek to replay (default: every one played)")
     ap.add_argument("--no-save", action="store_true",
                     help="score without writing forecasts into the ledger")
+    ap.add_argument("--policies", default="hold,expected",
+                    help="comma-separated executable policies to replay in "
+                         "sequence (hold, expected). The free weekly rebuild is "
+                         "always reported separately as an oracle ceiling.")
+    ap.add_argument("--squad", default=None,
+                    help="comma/space separated starting 15 for the sequential "
+                         "replay (default: the best legal squad at the first "
+                         "replayed gameweek, which is itself a small advantage)")
     ap.add_argument("--overwrite", action="store_true",
                     help="replace ledger entries that already exist. A live "
                          "pre-deadline forecast is uncontaminated evidence and "
@@ -105,8 +129,14 @@ def main() -> int:
         print(f"Keeping the live forecast already on file for GW{kept} "
               f"(scored below, not rewritten; --overwrite to replace).")
     print()
+    banner = snapshots.contamination_note(args.root, played)
+    if banner:
+        print(banner)
+        print()
+
     print(f"{'GW':>3}{'squad':>8}{'field':>7}{'edge':>7}  calibration")
     results = {}
+    xp_by_gw = {}
     for gw in played:
         seen = forecast_inputs(summaries, before_event=gw)
         ratings = team_ratings(players, teams, current=seen["current"])
@@ -137,20 +167,85 @@ def main() -> int:
         pool = xp[xp["player_id"].isin(frame.index)].copy()
         pool = pool.drop(columns=[c for c in pool.columns if c.startswith("xp_gw")],
                          errors="ignore")
+        # The same pool the oracle sees, kept for the sequential replay below so
+        # the two comparisons differ only in whether the rules apply.
+        xp_by_gw[gw] = pool
         squad = optimize_squad(pool, cfg, xp_col="xp_next1")
         got = realised_score(squad.player_ids, squad.starting_ids, frame)
         avg = averages.get(gw, 0.0)
         results[gw] = (got["points"], avg)
         print(f"{gw:>3}{got['points']:>8.0f}{avg:>7.0f}{got['points'] - avg:>+7.0f}  {note}")
 
+    # --- what a manager could actually have done -----------------------------
+    #
+    # This is the comparison that means something. Every policy below starts
+    # from one squad and carries its state forward: the same bank, the same
+    # purchase prices, the same free-transfer balance, the same chips. The
+    # scratch rebuild printed afterwards obeys none of that.
+    print("\n" + "=" * 62)
+    print("EXECUTABLE POLICIES — one squad, carried forward under the rules")
+    print("=" * 62)
+
+    first = played[0]
+    if args.squad:
+        start_squad = [int(t) for t in args.squad.replace(",", " ").split()]
+    else:
+        start_squad = list(optimize_squad(xp_by_gw[first], cfg,
+                                          xp_col="xp_next1").player_ids)
+        print(f"No --squad given, so the replay starts from the best legal GW{first} "
+              f"squad. That is itself a small advantage a real manager did not have.")
+
+    price_at_start = dict(zip(xp_by_gw[first]["player_id"].astype(int),
+                              xp_by_gw[first]["price"].astype(float)))
+    initial = ManagerState(
+        squad=start_squad,
+        bank=round(cfg.budget - sum(price_at_start[p] for p in start_squad), 1),
+        purchase_prices={int(p): float(price_at_start[p]) for p in start_squad},
+        free_transfers=1,
+    )
+
+    wanted = [n.strip() for n in str(args.policies).split(",") if n.strip()]
+    catalogue = {"hold": hold_policy, "expected": expected_points_policy}
+    chosen = {n: catalogue[n] for n in wanted if n in catalogue}
+    unknown = [n for n in wanted if n not in catalogue]
+    if unknown:
+        print(f"Ignoring unknown policies: {', '.join(unknown)}")
+    chosen["oracle"] = oracle_rebuild_policy
+
+    table = compare_policies(xp_by_gw, actuals, initial, cfg, policies=chosen,
+                             field_average=averages, gameweeks=played)
+    print()
+    for _, row in table.iterrows():
+        tag = "" if row["executable"] else "   <- ORACLE CEILING (not executable)"
+        edge = "  n/a" if row["mean_edge"] is None else f"{row['mean_edge']:+6.1f}"
+        print(f"  {row['policy']:<10} {row['points']:>7.0f} pts   "
+              f"{row['transfers']:>3} transfers  {row['hits_paid']:>3} in hits  "
+              f"edge {edge}/GW{tag}")
+
+    executable = table[table["executable"]]
+    if len(executable):
+        best = executable.iloc[0]
+        print(f"\nBest executable policy: {best['policy']} at "
+              f"{best['points']:.0f} points.")
+    print("The oracle row rebuilds fifteen players from a fresh budget every "
+          "gameweek. It is a ceiling, not a strategy, and the gap to it is the "
+          "cost of having to obey the rules.")
+
+    # --- the legacy scratch-rebuild number, kept but demoted ------------------
     ledger = squad_ledger(results)
     verdict = weekly_edge(ledger["edge"].tolist())
-    print(f"\nMean edge {verdict['mean']:+.1f} pts/GW over {verdict['n']} gameweeks "
+    print("\n" + "-" * 62)
+    print("ORACLE CEILING, scored week by week (the number this script used to "
+          "report as its headline)")
+    print("-" * 62)
+    print(f"Mean edge {verdict['mean']:+.1f} pts/GW over {verdict['n']} gameweeks "
           f"(SD {verdict['sd']:.1f})")
     if verdict["n"] > 1:
         print(f"95% CI [{verdict['ci_low']:+.1f}, {verdict['ci_high']:+.1f}], "
               f"p = {verdict['p']:.3f}")
     print(f"\n{verdict['verdict']}")
+    if banner:
+        print(f"\n{banner}")
     return 0
 
 

@@ -254,3 +254,22 @@ def test_the_expected_points_policy_spends_a_free_transfer_when_it_pays():
     _, after = step(pool, _actuals(), _state(free_transfers=1), 1, _cfg(),
                     expected_points_policy)
     assert 4 in after.squad
+
+
+def test_the_oracle_is_not_charged_for_its_free_rebuild():
+    """Its premise is that the rules do not apply. Charging it hits made the
+    'ceiling' score below doing nothing, which is not a ceiling."""
+    rebuilt = list(POOL.player_id[:2]) + list(POOL.player_id[16:21]) \
+        + list(POOL.player_id[31:36]) + list(POOL.player_id[46:49])
+    result, _ = step(POOL, _actuals(), _state(free_transfers=1), 1, _cfg(),
+                     lambda xp, st, gw, c: Decision(rebuilt, rebuilt[:11],
+                                                    free_transfers=15))
+    assert result.transfers > 1
+    assert result.hit_cost == 0
+
+
+def test_an_executable_policy_cannot_waive_its_own_hits():
+    swap = [p for p in CURRENT if p not in (1, 2)] + [4, 5]
+    result, _ = step(POOL, _actuals(), _state(free_transfers=1), 1, _cfg(),
+                     _fixed(swap, swap[:11]))
+    assert result.hit_cost == 4

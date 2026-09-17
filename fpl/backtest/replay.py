@@ -65,10 +65,18 @@ class ManagerState:
 
 @dataclass
 class Decision:
-    """What a policy chose for one gameweek."""
+    """What a policy chose for one gameweek.
+
+    `free_transfers` overrides the state's balance for this gameweek only. It
+    exists for the oracle, whose whole premise is that the rules do not apply:
+    charging its weekly rebuild 108 points of hits made the "ceiling" score
+    below doing nothing, which is not a ceiling, it is a different mistake.
+    Every executable policy leaves this None and is charged normally.
+    """
     squad_ids: list[int]
     starting_ids: list[int]
     chip: str | None = None
+    free_transfers: int | None = None
 
 
 @dataclass
@@ -134,7 +142,8 @@ def oracle_rebuild_policy(xp, state, gw, cfg) -> Decision:
     because the old harness reported exactly this as if it were a backtest.
     """
     squad = optimize_squad(xp, cfg, xp_col="xp_next1")
-    return Decision(list(squad.player_ids), list(squad.starting_ids), None)
+    return Decision(list(squad.player_ids), list(squad.starting_ids), None,
+                    free_transfers=SQUAD_SIZE)
 
 
 def _apply_freehit_restoration(state: ManagerState, gw: int) -> ManagerState:
@@ -171,7 +180,12 @@ def step(xp: pd.DataFrame, actuals: pd.DataFrame, state: ManagerState, gw: int,
 
     squad = [int(i) for i in decision.squad_ids]
     transfers = len(set(before.squad) - set(squad))
-    free = SQUAD_SIZE if chip in FREE_TRANSFER_CHIPS else int(before.free_transfers)
+    if chip in FREE_TRANSFER_CHIPS:
+        free = SQUAD_SIZE
+    elif decision.free_transfers is not None:
+        free = int(decision.free_transfers)      # the oracle, and only the oracle
+    else:
+        free = int(before.free_transfers)
     hit_cost = max(0, transfers - free) * int(cfg.hit_cost)
 
     price = _prices(xp)
