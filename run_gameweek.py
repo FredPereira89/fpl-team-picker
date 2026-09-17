@@ -31,7 +31,7 @@ def parse_squad(text: str) -> list[int]:
     return ids
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     # Player names and report formatting can include non-ASCII characters
     # (accents, dashes, currency symbols); Windows consoles often default to
     # a narrow codepage (e.g. cp1252) that can't encode them, crashing the
@@ -55,11 +55,14 @@ def main() -> int:
     ap.add_argument("--applied-chip", default=None,
                     help="with --confirm: the chip you actually played "
                          "(wildcard/freehit/benchboost/triplecaptain), or 'none' if "
-                         "you played none. Defaults to the advised chip.")
+                         "you played none. REQUIRED whenever the run advised a "
+                         "chip — a recommendation is not an action, and "
+                         "confirming one you did not play spends it for "
+                         "the season.")
     ap.add_argument("--config", type=Path, default=ROOT / "config.yaml")
     ap.add_argument("--overrides", type=Path, default=ROOT / "data" / "overrides.yaml",
                     help="team-news p_start overrides (see fpl/data/overrides.py)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     if args.no_refresh:
@@ -128,8 +131,18 @@ def main() -> int:
         # Assuming every recommendation was taken is how state drifts away from
         # the real team; --applied-squad/--applied-chip say otherwise.
         applied = list(args.applied_squad or rec.squad_ids)
+        # A run is a PROPOSAL. Defaulting to the advised chip spent a Triple
+        # Captain on a run that was never acted on -- and for a Free Hit it also
+        # decided whether the permanent squad survived. So when the run advised
+        # a chip, the manager has to say what they actually played.
+        advised = rec.chip.chip if rec.chip else None
         if args.applied_chip is None:
-            chip = rec.chip.chip if rec.chip else None
+            if advised is not None:
+                print(f"\nThis run advised {advised}. Re-run with "
+                      f"--applied-chip {advised} if you played it, or "
+                      f"--applied-chip none if you did not. Nothing was recorded.")
+                return 1
+            chip = None
         else:
             chip = None if str(args.applied_chip).lower() == "none" else \
                 canonical_chip(args.applied_chip)

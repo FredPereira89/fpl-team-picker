@@ -359,3 +359,42 @@ def test_an_ordinary_confirmation_clears_the_free_hit_marker(tmp_path):
     written = load_state(path, cfg)
     assert written.freehit_event is None
     assert written.base_squad == []
+
+
+# --- P0/B4: confirming a chip has to be deliberate (2026-09-17 audit) ---
+
+def test_confirming_without_naming_the_chip_is_refused(monkeypatch, capsys):
+    """A run is a proposal. Defaulting --confirm to the advised chip spends a
+    chip on advice the manager may never have acted on -- and for a Free Hit it
+    also decides whether the permanent squad is preserved."""
+    import run_gameweek
+    from fpl.optimize.chips import ChipAdvice
+    from fpl.report.weekly import Recommendation
+
+    class _Lineup:
+        xi, bench, formation, captain, vice, xp = [1], [2], "4-4-2", 1, 2, 10.0
+
+    squad = list(range(1, 16))
+    rec = Recommendation(gw=5, deadline="x", mode=2, lineup=_Lineup(),
+                         squad_ids=squad, chip=ChipAdvice("triplecaptain", "why"))
+
+    monkeypatch.setattr(run_gameweek, "resolve_current_squad",
+                        lambda *a, **k: (run_gameweek_live(squad), []))
+    monkeypatch.setattr(run_gameweek, "run", lambda *a, **k: (rec, _fake_xp(squad)))
+    monkeypatch.setattr(run_gameweek, "render", lambda *a, **k: "")
+    monkeypatch.setattr(run_gameweek, "FplClient", lambda *a, **k: object())
+    monkeypatch.setattr(run_gameweek, "load_overrides", lambda *a, **k: {})
+
+    code = run_gameweek.main(["--mode", "2", "--gw", "5", "--confirm", "--no-refresh"])
+    assert code == 1
+    assert "--applied-chip" in capsys.readouterr().out
+
+
+def run_gameweek_live(squad):
+    from fpl.cli import LiveSquad
+    return LiveSquad(squad, 0.0, 1, [], {}, [], [])
+
+
+def _fake_xp(squad):
+    import pandas as pd
+    return pd.DataFrame({"player_id": squad, "price": [5.0] * len(squad)})
