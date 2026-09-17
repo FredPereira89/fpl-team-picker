@@ -1,6 +1,7 @@
 # Handoff — FPL audit remediation
 
-**Status:** P0 complete (576 tests). **P1 in progress** — 6 of 7 tasks done, suite at **626 passed**.
+**Status:** P0 complete. **P1 complete**. Suite at **628 passed** (from 510).
+**Next:** P2 (objective and simulation alignment) — not started.
 **Last updated:** 2026-09-17
 **Branch:** `master` — 14 commits, `370de0e..22ff9ba`
 
@@ -95,8 +96,22 @@ Chip handling is split three ways, and the split is load-bearing:
 | 3 | Tier 2 keeps DNPs, uses training-season minutes, cannot gate trust | B15 | **done** |
 | 4 | Failed fetch ≠ newcomer; `coverage_gate` aborts the run | B16 | **done** |
 | 5 | Point-in-time snapshots (`fpl/data/snapshots.py`) | B13 | **done** |
-| 6 | Sequential manager-state replay (`fpl/backtest/replay.py`) | B13 | **done** — 17 tests, one per rule |
-| 7 | Wire replay into `scripts/run_walkforward.py` above the oracle ceiling | B13 | not started |
+| 6 | Sequential manager-state replay (`fpl/backtest/replay.py`) | B13 | **done** — 19 tests, one per rule |
+| 7 | Wire replay into `scripts/run_walkforward.py` above the oracle ceiling | B13 | **done** |
+
+### What the new replay actually measured (GW1-4, CONTAMINATED — upper bound)
+
+    hold       236 pts    0 transfers   0 in hits   edge  -2.2/GW
+    expected   234 pts    4 transfers   0 in hits   edge  -2.8/GW
+    oracle     245 pts   31 transfers   0 in hits   edge  +0.0/GW  <- ceiling
+
+**Holding beat transferring over these four gameweeks.** Four gameweeks settle
+nothing (the MDE is ~17.8 pts/GW at the observed SD), and the inputs are
+contaminated, so this is not a verdict — but it is the first number in this
+repo that describes a policy a manager could actually execute. Re-run it as
+snapshots accumulate.
+
+Run it with: `python scripts/run_walkforward.py --through N --no-save`
 
 ### P1 design notes worth keeping
 
