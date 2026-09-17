@@ -122,3 +122,16 @@ def test_an_expensive_but_reachable_target_is_allowed(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("budget: 100\noptimizer:\n  rank_target: 0.99\n")
     assert load_config(p).rank_target == 0.99
+
+
+# --- R11: the bench floor is opt-in (2026-09-17 audit) ---
+
+def test_the_bench_floor_is_off_unless_asked_for(tmp_path):
+    """Every fresh build was silently solving a Bench Boost readiness problem:
+    all four bench players forced over 2.5 xP, spending XI budget even when the
+    chip was already spent -- and the setting was not in the checked-in config,
+    so nobody could see it was on."""
+    assert Config().bench_floor_xp == 0.0
+    p = tmp_path / "config.yaml"
+    p.write_text("optimizer:\n  bench_floor_xp: 2.5\n")
+    assert load_config(p).bench_floor_xp == 2.5

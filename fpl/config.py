@@ -29,14 +29,17 @@ class Config:
     max_paid_hits: int = 2
     hit_cost: int = 4
     bench_weight: list[float] = field(default_factory=lambda: [0.15, 0.10, 0.05, 0.02])
-    # Lowest projection allowed to SIT on the bench in a squad build. The bench
-    # weights above price the fourth slot at 0.02, which is right for an
-    # ordinary week -- the reserve keeper plays only when the first does not --
-    # but it also means the solver always buys a non-playing ~£4.0m keeper, and
-    # that one slot held Bench Boost below its threshold permanently. Measured
-    # on the real GW5 pool, forcing every bench slot over 2.5 cost 0.07 xP of XI
-    # strength and gained 9.94 xP of bench. Set to 0 to disable.
-    bench_floor_xp: float = 2.5
+    # Lowest projection allowed to SIT on the bench in a squad build. This is a
+    # Bench Boost READINESS constraint, not an ordinary-week one: forcing every
+    # bench slot over a floor spends XI budget on players who, in a normal week,
+    # score nothing. Measured on the real GW5 pool it cost 0.07 xP of XI to gain
+    # 9.94 xP of bench -- a good trade the week you play the chip and a pure
+    # loss every week you do not, including after it has been spent.
+    #
+    # So it is OFF by default and belongs in config.yaml only while preparing a
+    # Wildcard or a Bench Boost. `pipeline._squad_quality` and the Wildcard
+    # action still honour whatever is configured.
+    bench_floor_xp: float = 0.0
     odds_provider: str | None = None
     cache_ttl_hours: int = 6
     cache_ttl_matchday_hours: int = 1
