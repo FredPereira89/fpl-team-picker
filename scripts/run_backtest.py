@@ -91,6 +91,11 @@ def _shrunk_pts90(df: pd.DataFrame, cfg) -> pd.Series:
     return (mins * raw + k * means) / (mins + k)
 
 
+# Matches fpl.model.minutes.TEAM_GAMES. Expected minutes per gameweek is last
+# season's total spread over the season, which is leak-free by construction.
+TEAM_GAMES_PER_SEASON = 38
+
+
 def tier2(cache: Cache, cfg) -> dict:
     print("\n=== Tier 2: per-GW backtest (train on 2024-25, test on 2025-26) ===")
     train = load_season_gws("2024-25", cache)
@@ -108,21 +113,31 @@ def tier2(cache: Cache, cfg) -> dict:
         train_season["total_points"] / train_season["minutes"].clip(lower=1) * 90.0,
         0.0,
     )
-    rates = train_season.set_index("element")[["pts90_shrunk", "pts90_naive"]]
+    # Expected minutes from the TRAINING season only. The harness used to
+    # multiply each prediction by the minutes that actually occurred, which
+    # hands the rate model future playing time -- the single thing a forecast
+    # most needs to get right, supplied for free.
+    train_season["exp_minutes"] = (train_season["minutes"].astype(float)
+                                   / float(TEAM_GAMES_PER_SEASON))
+    rates = train_season.set_index("element")[["pts90_shrunk", "pts90_naive",
+                                               "exp_minutes"]]
 
-    played = test[test["minutes"] > 0].merge(
-        rates, left_on="element", right_index=True, how="inner"
-    )
-    print(f"  {len(played)} 2025-26 GW rows with minutes>0 AND known 2024-25 history")
+    # Every registered player-gameweek row, nonappearances included. Filtering
+    # to minutes>0 deleted the largest source of FPL error and flattered the
+    # model precisely where weekly selection is hardest.
+    rows = test.merge(rates, left_on="element", right_index=True, how="inner")
+    n_absent = int((rows["minutes"] <= 0).sum())
+    print(f"  {len(rows)} 2025-26 GW rows with known 2024-25 history "
+          f"({n_absent} of them nonappearances, previously discarded)")
 
-    played["pred_model"] = played["pts90_shrunk"] * played["minutes"] / 90.0
-    played["pred_naive"] = played["pts90_naive"] * played["minutes"] / 90.0
-    played["pred_fpl_xp"] = pd.to_numeric(played["xP"], errors="coerce")
+    rows["pred_model"] = rows["pts90_shrunk"] * rows["exp_minutes"] / 90.0
+    rows["pred_naive"] = rows["pts90_naive"] * rows["exp_minutes"] / 90.0
+    rows["pred_fpl_xp"] = pd.to_numeric(rows["xP"], errors="coerce")
 
-    positions = played["position"].replace({"GK": "GKP"})
-    model_metrics = evaluate_predictions(played["pred_model"], played["total_points"], positions)
-    naive_metrics = evaluate_predictions(played["pred_naive"], played["total_points"], positions)
-    fpl_metrics = evaluate_predictions(played["pred_fpl_xp"].fillna(0), played["total_points"], positions)
+    positions = rows["position"].replace({"GK": "GKP"})
+    model_metrics = evaluate_predictions(rows["pred_model"], rows["total_points"], positions)
+    naive_metrics = evaluate_predictions(rows["pred_naive"], rows["total_points"], positions)
+    fpl_metrics = evaluate_predictions(rows["pred_fpl_xp"].fillna(0), rows["total_points"], positions)
 
     print(f"\n  Model  : MAE={model_metrics['mae']:.2f}  Spearman(overall)={model_metrics['spearman_overall']:.3f}  n={model_metrics['n']}")
     print(f"  Naive  : MAE={naive_metrics['mae']:.2f}  Spearman(overall)={naive_metrics['spearman_overall']:.3f}")
@@ -131,10 +146,28 @@ def tier2(cache: Cache, cfg) -> dict:
     print(f"  Per-position Spearman (naive): {naive_metrics['spearman_by_position']}")
     print(f"  Per-position Spearman (FPL xP): {fpl_metrics['spearman_by_position']}")
 
-    gate = trust_gate(model_metrics, naive_metrics, fpl_metrics)
+    # For continuity with every earlier run of this script, and clearly labelled
+    # as what it is: the same comparison with future minutes supplied and
+    # nonappearances removed. It is not evidence about the production model.
+    appeared = rows[rows["minutes"] > 0].copy()
+    appeared["pred_oracle_minutes"] = (appeared["pts90_shrunk"]
+                                       * appeared["minutes"] / 90.0)
+    oracle = evaluate_predictions(appeared["pred_oracle_minutes"],
+                                  appeared["total_points"],
+                                  appeared["position"].replace({"GK": "GKP"}))
+    print("\n  [component diagnostic, rate model only — given the minutes that "
+          "actually occurred, nonappearances removed]")
+    print(f"  Model  : MAE={oracle['mae']:.2f}  "
+          f"Spearman(overall)={oracle['spearman_overall']:.3f}  n={oracle['n']}")
+
+    # full_pipeline=False on purpose: this harness scores a points-per-90 proxy
+    # against archived rows. It never runs the production minutes model, the
+    # component scoring split or the optimizer, so it cannot grant trust.
+    gate = trust_gate(model_metrics, naive_metrics, fpl_metrics, full_pipeline=False)
     print(f"\n  TRUST GATE: trusted={gate['trusted']}")
     print(f"  {gate['summary']}")
-    return {"model": model_metrics, "naive": naive_metrics, "fpl_xp": fpl_metrics, "gate": gate}
+    return {"model": model_metrics, "naive": naive_metrics, "fpl_xp": fpl_metrics,
+            "component_diagnostic": oracle, "gate": gate}
 
 
 def main():
@@ -150,8 +183,10 @@ def main():
     print("=" * 60)
     print(f"Tier 1 (multi-season aggregate): beats naive = {t1['beats_naive']} "
           f"(MAE {t1['mae']:.2f} vs naive {t1['naive_mae']:.2f}, n={t1['n']})")
-    print(f"Tier 2 (per-GW, 2025-26 held out): trust gate = "
-          f"{'TRUSTED' if t2['gate']['trusted'] else 'NOT TRUSTED'}")
+    print(f"Tier 2 (per-GW, 2025-26 held out): component diagnostic only — "
+          f"trust gate = {'TRUSTED' if t2['gate']['trusted'] else 'NOT TRUSTED'}")
+    print("  Production trust comes from the sequential replay "
+          "(scripts/run_walkforward.py), not from this script.")
     if not t2['gate']['trusted']:
         print(f"  Failures: {t2['gate']['failures']}")
 
