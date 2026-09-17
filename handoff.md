@@ -1,7 +1,7 @@
 # Handoff — FPL audit remediation
 
-**Status:** P0 complete. **P1 complete**. Suite at **628 passed** (from 510).
-**Next:** P2 (objective and simulation alignment) — not started.
+**Status:** P0 complete. P1 complete. **P2 started (1 of 5 items done).** Suite at **629 passed** (from 510).
+**Next:** P2 items B8, B7, R3, R2 — see the P2 section at the bottom.
 **Last updated:** 2026-09-17
 **Branch:** `master` — 14 commits, `370de0e..22ff9ba`
 
@@ -135,21 +135,63 @@ Run it with: `python scripts/run_walkforward.py --through N --no-save`
   production. `oracle_rebuild_policy` is the old free-weekly-rebuild behaviour,
   kept but marked `executable=False`.
 
+## P2 progress — objective and simulation alignment
+
+No plan document was written for P2; the audit's own P2 list is the spec
+(`docs/fpl-model-optimizer-audit-2026-09-17.md`, section "P2 — align objective
+and simulation").
+
+| Item | Audit | Status |
+|---|---|---|
+| Stop one-week rank reranking of transfer plans | B6 | **done** |
+| Per-event lineup variables, or an exact one-week lineup solve for the report | B8 | not started |
+| Calibrated event means and sample means must agree; report the rank-selected captain | B7 | not started |
+| Coherent match scenarios (no goal against a clean sheet in the same match) | R3 | not started |
+| Calibrate the rival field from real rank-cohort picks | R2 | not started |
+
+### B6, as implemented
+
+`pipeline._choose_transfers` now picks `max(plans, key=net_xp)` — the discounted
+horizon total with the plan's own hit already subtracted. The rank layer still
+runs when `rank_sims > 0`, but only to produce `rank_stats` for the chosen plan;
+it no longer selects. `rank_stats["decided_by"]` says which objective chose.
+New config `optimizer.rank_transfers` (default `false`) restores the old
+rank-decides behaviour.
+
+Candidate enumeration still happens even when rank does not decide — that is how
+paid hits and two-move restructures get onto the table at all (P0 task 8).
+
+### Suggested approach for the remaining P2 items
+
+- **B8 (cheap, high value).** `build_lineup` reuses the horizon-fixed XI from the
+  solver. Add an exact one-week XI solve for the report: enumerate legal
+  formations (GKP 1, DEF 3–5, MID 2–5, FWD 1–3, summing to 11) over the chosen
+  15 and take the best by `xp_next1`. No MILP needed; it is a handful of
+  combinations.
+- **B7 (cheap).** Two separate things. (a) After calibration changes `xp`,
+  `simulate_event` still uses raw rates, so candidate means and simulated means
+  disagree — moment-match by scaling each player's samples by
+  `calibrated_xp_next1 / simulated_mean` inside `pipeline._rank_context`.
+  (b) `optimize.rank` records its own optimal captain in `rank_stats` and the
+  pipeline discards it; report the one that was actually scored.
+- **R3 (expensive, and the audit's acceptance gate names it).**
+  `model.simulate._simulate_fixture` runs one team at a time, so an attacker can
+  score in a scenario where the opposing defenders keep a clean sheet. Fix by
+  grouping `tfx` rows by `fixture_id` and simulating both sides together: draw
+  the home and away scorelines once, then allocate each team's goals to its own
+  players, and derive the opponent's `conceded_team` from that same scoreline.
+  Preserve marginal means by calibrating the allocation shares.
+- **R2 (blocked on data).** Needs pre-deadline public picks for a stratified
+  sample of the user's rank cohort, which nothing in this repo fetches. The
+  achievable part now is enforcing budget and club legality in generated rivals
+  and using empirical formation/captain shares; the cohort sampling is a
+  separate piece of work.
+
 ## Still open from the audit — each needs its own plan
 
 Nothing below was touched.
 
-**P1 — honest validation (the audit calls this the prerequisite for tuning):**
-- B14 immutable actioned forecasts; exclude replays from calibration
-- B13 point-in-time snapshots and a sequential manager-state replay
-- B15 Tier 2 uses actual minutes and excludes DNPs while gating production trust
-- B16 a partial element-summary fetch is indistinguishable from a newcomer
-
-**P2 — objective and simulation alignment:**
-- B6 rank reranking discards the multi-gameweek transfer objective
-- B7 optimizer, simulator and reported captain are three different decisions
-- B8 one fixed XI and bench order across the whole horizon
-- R1 one-week median-beat target; R2 the rival field; R3 incoherent match outcomes
+**P2 — remaining:** B7, B8, R1, R2, R3 (see the P2 section above).
 
 **P3 — information, then sophistication:**
 - R4 confidence never affects the distribution
@@ -160,6 +202,10 @@ Nothing below was touched.
 - R9 chip timing beyond the horizon uses structure, not value
 - R10 goalkeeper/bonus bias is structural
 
-Suggested next step if continuing: **P1 first**. The audit's argument is that a
-trustworthy backtest is worth more than another forecasting feature, because it
-is the only thing that says whether a feature should influence a transfer at all.
+Suggested next step if continuing: **finish P2**, in the order B8 → B7 → R3.
+B8 and B7 are each an hour or two and independently valuable; R3 is a real
+restructure of `model/simulate.py` and should be its own session.
+
+R1 (the one-week median-beat target) is worth a conversation before coding: the
+audit argues the default objective should be discounted expected points, which
+B6 has now made true for transfers but not yet for the Mode 1 squad build.
