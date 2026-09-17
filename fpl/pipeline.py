@@ -331,7 +331,8 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         history = scored_history(root, summaries, from_event)
         cal = fit_calibration(history)
         if cal is not None:
-            xp = apply_calibration(xp, cal)
+            xp = apply_calibration(xp, cal,
+                                   decay=float(getattr(cfg, "horizon_decay", 1.0)))
             calibration_note = cal.summary
 
     # Record the forecast before acting on it. Scoring it later (fpl.backtest.

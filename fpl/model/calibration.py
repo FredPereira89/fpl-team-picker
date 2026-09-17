@@ -106,41 +106,57 @@ def projection_columns(xp: pd.DataFrame) -> list[str]:
             if any(str(c).startswith(p) for p in PROJECTION_PREFIXES)]
 
 
-def apply_calibration(xp: pd.DataFrame, cal: Calibration | None) -> pd.DataFrame:
-    """Rescale every projection column by its position's fitted transform.
+def apply_calibration(xp: pd.DataFrame, cal: Calibration | None,
+                      decay: float = 1.0) -> pd.DataFrame:
+    """Rescale each per-gameweek projection, then rebuild the totals from them.
 
-    All projection columns move together: `xp_next1`, `xp_next5`, `xp_horizon`
-    and each per-gameweek column are the same quantity over different windows,
-    so calibrating one and not the others would let the optimizer and the
-    report disagree about the same player.
+    The fit's unit of observation is a player-GAMEWEEK, so the transform applies
+    once per gameweek column -- a double gets one intercept because it was one
+    observation, and a blank gets none because it is not an observation at all.
 
-    The intercept is scaled with the window -- a per-match offset applies once
-    per match -- and the result is floored at zero, since no projection of an
-    FPL return is meaningfully negative.
+    Scaling the intercept by `projection / xp_next1` instead, which is what this
+    did, treated "twice this week's xP" as "two matches": an easy future single
+    fixture collected several intercepts, a hard one collected a fraction, and
+    when `xp_next1` was zero -- a blank, or a current injury -- EVERY column
+    including the zero one collected exactly one, turning a genuine blank into
+    points the player cannot score.
+
+    `xp_next1`, `xp_next5` and `xp_horizon` are then recomputed from the
+    calibrated weeks rather than calibrated in their own right, so the number in
+    the report, the number the solver maximises and the number the captain is
+    valued on cannot drift apart under the clip.
     """
     if cal is None:
         return xp
+    from ..optimize.objective import event_columns
+
     out = xp.copy()
     pos = out["position"].astype(str)
     slope = pos.map(cal.slope).fillna(cal.pooled_slope).astype(float)
     inter = pos.map(cal.intercept).fillna(cal.pooled_intercept).astype(float)
-    base = out["xp_next1"].astype(float).replace(0.0, np.nan)
-    # The true ceiling on how many matches any column can cover: the number of
-    # per-event columns actually in this frame. A rotation-risk player with a
-    # fixture doubt THIS week (xp_next1 near zero) but a normal horizon
-    # otherwise inflates the values/base ratio far past his real match count,
-    # so bounding it to an arbitrary constant either over-applies the
-    # per-match offset for him or truncates it for a genuinely long horizon.
-    # Bounding to the real number of event columns fixes both.
-    n_events = sum(1 for c in out.columns if str(c).startswith(EVENT_PREFIX))
-    ceiling = float(n_events) if n_events else 20.0
-    for col in projection_columns(out):
+
+    cols = event_columns(out)
+    if not cols:
+        # Frames carrying only the aggregates -- older ledger entries, and
+        # several unit fixtures -- have nothing to rebuild from, so each column
+        # is calibrated as the single observation it stands for.
+        for col in projection_columns(out):
+            out[col] = (slope * out[col].astype(float) + inter).clip(lower=0.0)
+        return out
+
+    for _, col in cols:
         values = out[col].astype(float)
-        # How many matches this column covers, inferred from its size relative
-        # to the single-gameweek projection, so the offset is not applied once
-        # to a five-gameweek total.
-        windows = (values / base).fillna(1.0).clip(lower=0.0, upper=ceiling)
-        out[col] = (slope * values + inter * windows).clip(lower=0.0)
+        # A zero column is a blank gameweek, not a small projection: there is no
+        # match for a per-match offset to attach to.
+        out[col] = np.where(values > 0.0,
+                            (slope * values + inter).clip(lower=0.0), 0.0)
+
+    first = cols[0][0]
+    out["xp_next1"] = out[cols[0][1]].astype(float).round(4)
+    out["xp_next5"] = sum(out[c].astype(float) for _, c in cols).round(4)
+    out["xp_horizon"] = sum(
+        out[c].astype(float) * float(decay) ** (e - first) for e, c in cols
+    ).round(4)
     return out
 
 

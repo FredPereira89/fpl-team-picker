@@ -141,3 +141,63 @@ def test_scored_history_skips_gameweeks_nobody_has_played_yet(tmp_path):
     save_predictions(pred, gw=2, root=tmp_path)
     summaries = {1: {"history": [{"round": 1, "total_points": 5, "minutes": 90}]}}
     assert sorted(scored_history(tmp_path, summaries, before_event=9)["gw"].unique()) == [1]
+
+
+# --- B10: one intercept per real fixture week (2026-09-17 audit) ---
+
+def _cal(intercept=0.5, slope=1.0):
+    return Calibration(intercept={"MID": intercept}, slope={"MID": slope},
+                       pooled_intercept=intercept, pooled_slope=slope,
+                       n_gameweeks=5, n_observations=500,
+                       n_by_position={"MID": 500}, r2=0.1)
+
+
+def test_a_blank_gameweek_stays_a_blank_after_calibration():
+    """windows = projection / xp_next1 gave every column exactly one intercept
+    when xp_next1 was zero -- including the zero current event, so a positive
+    fitted intercept turned a genuine blank into points."""
+    xp = pd.DataFrame({
+        "player_id": [1], "position": ["MID"],
+        "xp_next1": [0.0], "xp_next5": [6.0], "xp_horizon": [5.4],
+        "xp_gw5": [0.0], "xp_gw6": [3.0], "xp_gw7": [3.0],
+    })
+    out = apply_calibration(xp, _cal(), decay=0.9)
+    assert out.loc[0, "xp_gw5"] == 0.0
+    assert out.loc[0, "xp_next1"] == 0.0
+
+
+def test_the_calibrated_horizon_is_the_sum_of_the_calibrated_weeks():
+    """Clipping each column independently let xp_next5 drift away from the sum
+    of the xp_gw columns, so the report, the optimizer and the captain value
+    could disagree about the same player."""
+    xp = pd.DataFrame({
+        "player_id": [1], "position": ["MID"],
+        "xp_next1": [4.0], "xp_next5": [10.0], "xp_horizon": [9.1],
+        "xp_gw5": [4.0], "xp_gw6": [3.0], "xp_gw7": [3.0],
+    })
+    out = apply_calibration(xp, _cal(intercept=0.3, slope=1.2), decay=0.9)
+    weeks = [out.loc[0, c] for c in ("xp_gw5", "xp_gw6", "xp_gw7")]
+    assert out.loc[0, "xp_next1"] == pytest.approx(weeks[0])
+    assert out.loc[0, "xp_next5"] == pytest.approx(sum(weeks))
+    assert out.loc[0, "xp_horizon"] == pytest.approx(
+        weeks[0] + 0.9 * weeks[1] + 0.9 ** 2 * weeks[2])
+
+
+def test_a_double_gameweek_column_gets_one_intercept_not_two():
+    """The fit's observations are player-GAMEWEEKS, doubles included, so the
+    offset applies once per gameweek. The ratio rule gave a double roughly two."""
+    xp = pd.DataFrame({
+        "player_id": [1], "position": ["MID"],
+        "xp_next1": [8.0], "xp_next5": [8.0], "xp_horizon": [8.0],
+        "xp_gw5": [8.0],
+    })
+    out = apply_calibration(xp, _cal(intercept=1.0), decay=1.0)
+    assert out.loc[0, "xp_gw5"] == pytest.approx(9.0)
+
+
+def test_a_frame_with_no_event_columns_still_calibrates():
+    """Older ledger frames and several unit fixtures carry only the aggregates."""
+    xp = pd.DataFrame({"player_id": [1], "position": ["MID"],
+                       "xp_next1": [4.0], "xp_next5": [10.0], "xp_horizon": [9.0]})
+    out = apply_calibration(xp, _cal(), decay=0.9)
+    assert out.loc[0, "xp_next1"] == pytest.approx(4.5)
