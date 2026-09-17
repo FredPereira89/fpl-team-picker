@@ -285,3 +285,77 @@ def test_summary_warns_that_one_gameweek_settles_nothing():
         "player_id": [1, 2, 3, 4], "actual": [2.0, 6.0, 9.0, 1.0],
         "minutes": [90.0, 90.0, 90.0, 90.0]}))
     assert "one gameweek" in scored_summary(scored, gw=7).lower()
+
+
+# --- B14: the ledger serves the forecast that was ACTED ON (2026-09-17 audit) ---
+
+def _frame():
+    return pd.DataFrame({
+        "player_id": [1, 2], "position": ["MID", "DEF"],
+        "web_name": ["A", "B"], "price": [8.0, 5.0],
+        "xp_next1": [5.0, 3.0], "p_start": [0.9, 0.8],
+    })
+
+
+def test_a_replay_write_does_not_change_what_the_ledger_serves(tmp_path):
+    """A replay is built from today's prices, status and news. Letting it
+    become the scored record of a live gameweek measures a model that had
+    information the live one did not."""
+    from fpl.backtest.ledger import save_predictions, load_predictions
+
+    live = _frame()
+    save_predictions(live, 5, tmp_path, origin="live",
+                     deadline="2026-09-11T17:30:00Z")
+
+    replay = _frame()
+    replay["xp_next1"] = [99.0, 99.0]
+    save_predictions(replay, 5, tmp_path, origin="replay")
+
+    served = load_predictions(5, tmp_path)
+    assert served["xp_next1"].max() == 5.0
+
+
+def test_a_post_deadline_rerun_does_not_displace_the_actioned_forecast(tmp_path):
+    from fpl.backtest.ledger import save_predictions, load_predictions
+    from fpl.backtest.manifest import mark_actioned
+
+    save_predictions(_frame(), 5, tmp_path, origin="live",
+                     deadline="2026-09-11T17:30:00Z")
+    mark_actioned(tmp_path, gw=5)
+
+    later = _frame()
+    later["xp_next1"] = [1.0, 1.0]
+    save_predictions(later, 5, tmp_path, origin="live",
+                     deadline="2026-09-11T17:30:00Z")
+
+    assert load_predictions(5, tmp_path)["xp_next1"].max() == 5.0
+
+
+def test_a_gameweek_with_only_a_replay_is_not_served_at_all(tmp_path):
+    from fpl.backtest.ledger import save_predictions, load_predictions
+
+    save_predictions(_frame(), 5, tmp_path, origin="replay")
+    with pytest.raises(FileNotFoundError):
+        load_predictions(5, tmp_path)
+
+
+def test_a_ledger_written_before_the_manifest_still_loads(tmp_path):
+    """Backwards compatibility: gw{n}.parquet files exist from before this."""
+    from fpl.backtest.ledger import LEDGER_DIR, load_predictions
+
+    out = tmp_path / LEDGER_DIR
+    out.mkdir(parents=True)
+    frame = _frame()
+    frame.insert(0, "gw", 5)
+    frame.to_parquet(out / "gw5.parquet", index=False)
+    assert load_predictions(5, tmp_path)["xp_next1"].max() == 5.0
+
+
+def test_calibration_skips_a_gameweek_whose_only_forecast_is_a_replay(tmp_path):
+    from fpl.backtest.ledger import save_predictions
+    from fpl.model.calibration import scored_history
+
+    save_predictions(_frame(), 5, tmp_path, origin="replay")
+    summaries = {1: {"history": [{"round": 5, "total_points": 6, "minutes": 90}]},
+                 2: {"history": [{"round": 5, "total_points": 2, "minutes": 90}]}}
+    assert len(scored_history(tmp_path, summaries, before_event=6)) == 0

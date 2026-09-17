@@ -128,7 +128,7 @@ def main() -> int:
             # Stamped as a replay so the ledger never loses track of which
             # forecasts were made before the deadline and which were
             # reconstructed afterwards from data the live model never had.
-            save_predictions(xp, gw, args.root, cfg=cfg,
+            save_predictions(xp, gw, args.root, cfg=cfg, origin="replay",
                              sources={"origin": "replay",
                                       "replayed_at_gw": max(played)})
 

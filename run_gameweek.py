@@ -15,6 +15,7 @@ from fpl.data.overrides import load_overrides
 from fpl.optimize.transfers import bank_after
 from fpl.pipeline import run
 from fpl.report.weekly import render
+from fpl.backtest.manifest import mark_actioned
 from fpl.state import canonical_chip, load_state
 
 ROOT = Path(__file__).parent
@@ -163,6 +164,10 @@ def main(argv: list[str] | None = None) -> int:
                                    base_squad=list(current_squad),
                                    base_bank=bank,
                                    base_purchase_prices=dict(purchase_prices))
+        # Name the forecast that was acted on. Without this the ledger scores
+        # and calibrates on whichever version happened to be written last,
+        # which after a confirmation re-run is not the one that chose the team.
+        mark_actioned(data_root, args.gw)
         print(f"\nRecorded GW{args.gw} as played: {transfers_made} transfer(s), "
               f"chip {chip or 'none'}, bank £{written.bank}m, "
               f"{written.free_transfers_remaining} free transfer(s) left this week, "

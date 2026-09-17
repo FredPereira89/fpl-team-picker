@@ -338,9 +338,17 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # Record the forecast before acting on it. Scoring it later (fpl.backtest.
     # ledger, scripts/score_gameweek.py) is the only thing that measures the
     # production model rather than a proxy of it.
+    #
+    # The deadline goes in with it: without one the ledger cannot tell a
+    # pre-deadline forecast, which the manager could actually have acted on,
+    # from a post-deadline re-run that already knows the team news.
+    deadline = next(
+        (e["deadline_time"] for e in bootstrap.get("events", [])
+         if e["id"] == from_event), None)
     save_predictions(xp, from_event, root, cfg=cfg,
                      sources=client.source_summary()
-                     if hasattr(client, "source_summary") else {})
+                     if hasattr(client, "source_summary") else {},
+                     deadline=deadline)
 
     # actual_mode reflects which branch genuinely ran, not the caller's
     # request -- Mode 2 needs a current_squad to transfer from, and nothing
@@ -407,10 +415,6 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
             chip_squad, chip_temporary = True, action.temporary
 
     value = round(sum(prices[i] for i in squad_ids), 1)
-    deadline = next(
-        (e["deadline_time"] for e in bootstrap.get("events", []) if e["id"] == from_event),
-        "see the FPL site",
-    )
 
     if actual_mode == 2:
         # Bank must reflect proceeds from the CURRENT squad, not the new one,
@@ -422,7 +426,8 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     rec = Recommendation(
         rank=rank_stats,
         calibration=calibration_note,
-        gw=from_event, deadline=deadline, mode=actual_mode, lineup=lineup,
+        gw=from_event, deadline=deadline or "see the FPL site",
+        mode=actual_mode, lineup=lineup,
         squad_ids=squad_ids, transfers=transfers, chip=chip,
         flags=freshness_flags(client, raw_fixtures, checked_through),
         bank=cash,

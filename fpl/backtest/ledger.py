@@ -23,14 +23,19 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from .gw_level import evaluate_predictions
+from . import manifest
 
 LEDGER_DIR = "predictions"
 VERSION_DIR = "versions"
-TS_FMT = "%Y%m%dT%H%M%SZ"
-# Bumped by hand when the forecast changes in a way that makes older scores
-# incomparable. A scored gameweek says which model produced it or it measures
-# nothing in particular.
-MODEL_VERSION = "2026-09-07"
+# Sub-second, because two writes inside the same second are not the same
+# forecast -- a planning run immediately followed by a confirmation run would
+# otherwise share a version id and silently overwrite each other's record.
+TS_FMT = "%Y%m%dT%H%M%S%fZ"
+# Derived from the commit that produced the forecast (see manifest.model_version).
+# It used to be a date maintained by hand, which had fallen behind several core
+# commits -- so scored gameweeks were attributed to a model that was not the one
+# that produced them.
+MODEL_VERSION = manifest.model_version()
 
 
 def config_fingerprint(cfg) -> str:
@@ -48,21 +53,25 @@ def config_fingerprint(cfg) -> str:
 
 
 def save_predictions(xp: pd.DataFrame, gw: int, root: Path, cfg=None,
-                     sources: dict | None = None, created_at=None) -> Path:
-    """Write one gameweek's xP frame, and keep an immutable copy of it.
+                     sources: dict | None = None, created_at=None,
+                     origin: str = manifest.LIVE,
+                     deadline: str | None = None) -> Path:
+    """Write one gameweek's xP frame, keep an immutable copy, and record it.
 
-    `gw{n}.parquet` is the current forecast: a re-run before the deadline
-    supersedes the earlier one, which is what the scorer and the report want.
-    But overwriting also destroyed every earlier version, so "the forecast the
-    optimizer acted on" was unrecoverable the moment anything was re-run --
-    including the pre-deadline forecast that a mid-week team-news update
-    replaced. Each write therefore also lands under `versions/` under its own
-    timestamp, and carries when it was made, which model and config made it,
-    and which data snapshots it read.
+    `gw{n}.parquet` remains a convenience pointer at the most recent write. It
+    is NOT authoritative any more: `load_predictions` resolves through the
+    append-only manifest instead, because the pointer was being overwritten by
+    post-deadline re-runs and by replays, either of which destroyed the record
+    of what the optimizer actually acted on.
+
+    `origin` separates a real pre-deadline forecast from one reconstructed
+    afterwards. A replay still gets written and versioned -- it is useful for
+    research -- but it can never be served as the gameweek's forecast.
     """
     out = Path(root) / LEDGER_DIR
     out.mkdir(parents=True, exist_ok=True)
     when = created_at or datetime.now(timezone.utc)
+    version = when.strftime(TS_FMT)
 
     frame = xp.copy()
     frame.insert(0, "gw", int(gw))
@@ -70,15 +79,23 @@ def save_predictions(xp: pd.DataFrame, gw: int, root: Path, cfg=None,
     frame["model_version"] = MODEL_VERSION
     frame["config_hash"] = config_fingerprint(cfg)
     frame["sources"] = json.dumps(sources or {}, sort_keys=True)
-
-    path = out / f"gw{int(gw)}.parquet"
-    frame.to_parquet(path, index=False)
+    frame["origin"] = str(origin)
 
     versions = out / VERSION_DIR
     versions.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(versions / f"gw{int(gw)}_{when.strftime(TS_FMT)}.parquet",
-                     index=False)
-    return path
+    version_path = versions / f"gw{int(gw)}_{version}.parquet"
+    frame.to_parquet(version_path, index=False)
+
+    # The pointer only follows a live write. A replay that moved it would make
+    # every reader that predates the manifest read the replay instead.
+    if str(origin) == manifest.LIVE:
+        frame.to_parquet(out / f"gw{int(gw)}.parquet", index=False)
+
+    manifest.record_version(root, gw=int(gw), version=version, created_at=when,
+                            origin=str(origin), model_version=MODEL_VERSION,
+                            config_hash=config_fingerprint(cfg),
+                            deadline=deadline)
+    return version_path
 
 
 def forecast_versions(gw: int, root: Path) -> list[Path]:
@@ -101,8 +118,37 @@ def gameweek_is_final(fixtures: list[dict], gw: int) -> bool:
     return bool(rows) and all(bool(f.get("finished")) for f in rows)
 
 
-def load_predictions(gw: int, root: Path) -> pd.DataFrame:
-    return pd.read_parquet(Path(root) / LEDGER_DIR / f"gw{int(gw)}.parquet")
+def load_predictions(gw: int, root: Path, deadline: str | None = None) -> pd.DataFrame:
+    """The forecast that should be scored for `gw`.
+
+    Resolved through the manifest -- the acted-on version, else the newest live
+    version before the deadline -- and never a replay. Falls back to the
+    `gw{n}.parquet` pointer only for ledgers written before the manifest
+    existed, which have no version history to choose from.
+    """
+    chosen = manifest.select_version(root, int(gw), deadline=deadline)
+    if chosen is not None:
+        path = (Path(root) / LEDGER_DIR / VERSION_DIR
+                / f"gw{int(gw)}_{chosen['version']}.parquet")
+        if path.exists():
+            return pd.read_parquet(path)
+
+    pointer = Path(root) / LEDGER_DIR / f"gw{int(gw)}.parquet"
+    if not pointer.exists():
+        raise FileNotFoundError(
+            f"no live forecast on file for GW{gw}. A replay-only gameweek is "
+            f"deliberately not served: it was built from data the live model "
+            f"never had, so scoring or calibrating on it measures the wrong "
+            f"model."
+        )
+    if manifest.entries(root, int(gw)):
+        # The manifest knows this gameweek and chose nothing, so every recorded
+        # version is a replay. The stale pointer must not stand in for one.
+        raise FileNotFoundError(
+            f"GW{gw} has only replayed forecasts on file, which are never "
+            f"served as a live gameweek's record."
+        )
+    return pd.read_parquet(pointer)
 
 
 def available_gameweeks(root: Path) -> list[int]:
