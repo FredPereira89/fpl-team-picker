@@ -328,3 +328,96 @@ def test_the_floor_is_judged_on_one_gameweek_not_the_horizon():
     solved = _solve(pool, cur, budget, 15, cfg, "xp_next5", cost=cost,
                     bench_floor=2.5)
     assert solved is None, "the floor must read the gameweek, not the horizon"
+
+
+# --- P0/B5: every transfer count must reach the rank layer (2026-09-17 audit) ---
+
+def _improving_pool():
+    """A pool where each extra transfer is strictly worth making.
+
+    The shared POOL is deliberately flat, so no transfer count dominates any
+    other and a stratification test could not tell the passes apart.
+    """
+    pool = POOL.copy()
+    pool.loc[pool.player_id.isin(CURRENT), "xp_next5"] = 1.0
+    pool.loc[~pool.player_id.isin(CURRENT), "xp_next5"] = 10.0
+    return pool
+
+
+def test_every_transfer_count_is_represented_before_alternatives():
+    """The single global quota was filled in ascending transfer count: the hold
+    plan took one slot, a large pool supplied k-1 one-transfer alternatives, and
+    the loop exited before n=2. With one free transfer that meant the rank layer
+    never saw a paid hit at all, and with banked transfers it never saw a
+    coordinated two-move restructure."""
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    plans = enumerate_transfer_plans(_improving_pool(), list(CURRENT), bank=5.0,
+                                     free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5,
+                                                max_paid_hits=2),
+                                     xp_col="xp_next5", k=4)
+    counts = {p.n_transfers for p in plans}
+    assert {0, 1, 2} <= counts, f"transfer counts reaching the rank layer: {counts}"
+
+
+def test_the_reserved_pass_is_never_truncated_by_a_small_quota():
+    """The reservation is the point: a small k must widen the decision rather
+    than cut the deepest plans off it."""
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    plans = enumerate_transfer_plans(_improving_pool(), list(CURRENT), bank=5.0,
+                                     free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5,
+                                                max_paid_hits=2),
+                                     xp_col="xp_next5", k=2)
+    assert {0, 1, 2, 3} <= {p.n_transfers for p in plans}
+
+
+def test_a_paid_hit_plan_still_carries_its_hit_after_stratification():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    plans = enumerate_transfer_plans(_improving_pool(), list(CURRENT), bank=5.0,
+                                     free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5,
+                                                max_paid_hits=2),
+                                     xp_col="xp_next5", k=6)
+    for plan in plans:
+        assert plan.hit_cost == max(0, plan.n_transfers - 1) * Config().hit_cost
+
+
+# --- B17: FPL's real-transfer club-cap exception (2026-09-17 audit) ---
+
+def _four_from_one_club():
+    """A pool and squad where four of the fifteen share a club, as a real
+    Premier League transfer can leave an FPL manager."""
+    pool = POOL.copy()
+    cur = list(CURRENT)
+    club = pool.set_index("player_id").loc[cur[0], "team"]
+    pool.loc[pool.player_id.isin(cur[:4]), "team"] = club
+    return pool, cur
+
+
+def test_holding_a_four_from_one_club_squad_is_legal():
+    """A real Premier League transfer can leave an FPL manager with four from
+    one club. FPL lets the squad stand and requires three only when the manager
+    NEXT makes a transfer, so the zero-transfer hold must stay feasible."""
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    pool, cur = _four_from_one_club()
+    plans = enumerate_transfer_plans(pool, cur, bank=5.0, free_transfers=1,
+                                     cfg=Config(budget=100.0, horizon_gw=5,
+                                                max_paid_hits=1),
+                                     xp_col="xp_next5", k=6)
+    hold = [p for p in plans if p.n_transfers == 0]
+    assert hold, "the hold plan was made infeasible by the club cap"
+    assert set(hold[0].squad_ids) == set(cur)
+
+
+def test_any_transfer_must_return_the_squad_to_three_per_club():
+    from fpl.optimize.transfers import enumerate_transfer_plans
+    pool, cur = _four_from_one_club()
+    frame = pool.set_index("player_id")
+    for plan in enumerate_transfer_plans(pool, cur, bank=5.0, free_transfers=1,
+                                         cfg=Config(budget=100.0, horizon_gw=5,
+                                                    max_paid_hits=1),
+                                         xp_col="xp_next5", k=6):
+        if plan.n_transfers == 0:
+            continue
+        assert frame.loc[list(plan.squad_ids), "team"].value_counts().max() <= 3

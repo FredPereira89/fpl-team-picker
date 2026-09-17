@@ -62,7 +62,8 @@ class TransferPlan:
 
 
 def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,
-           excluded=None, min_different=1, bench_floor: float = 0.0):
+           excluded=None, min_different=1, bench_floor: float = 0.0,
+           allow_club_overage: bool = False):
     ids = [int(i) for i in xp_df["player_id"]]
     # Solve on the tilted score, report the untilted one -- see optimize.squad.
     tilted = tilted_frame(xp_df, cfg, xp_col)
@@ -91,8 +92,22 @@ def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,
         in_pos = [start[i] for i in ids if pos[i] == p]
         prob += pulp.lpSum(in_pos) >= XI_MIN[p]
         prob += pulp.lpSum(in_pos) <= XI_MAX[p]
+    # A real Premier League transfer can temporarily leave an FPL manager with
+    # four players from one club. FPL does NOT force a sale: the squad stands,
+    # and must return to three only when the manager next makes a transfer. So
+    # the zero-transfer hold is allowed to keep an existing overage -- forcing
+    # the cap there made holding infeasible and manufactured a move the game
+    # does not require. Every plan that does transfer, and every fresh or
+    # chip-built squad, is capped at three.
+    owned_per_club: dict = {}
+    if allow_club_overage:
+        for i in current_set:
+            if i in club:
+                owned_per_club[club[i]] = owned_per_club.get(club[i], 0) + 1
     for c in set(club.values()):
-        prob += pulp.lpSum(squad[i] for i in ids if club[i] == c) <= MAX_PER_CLUB
+        cap = (max(MAX_PER_CLUB, owned_per_club.get(c, 0)) if allow_club_overage
+               else MAX_PER_CLUB)
+        prob += pulp.lpSum(squad[i] for i in ids if club[i] == c) <= cap
     for i in ids:
         prob += start[i] <= squad[i]
     # Opt-in only, and only the wildcard rebuild opts in: a player below the
@@ -179,30 +194,62 @@ def enumerate_transfer_plans(xp_df: pd.DataFrame, current_squad_ids: list[int],
     expected-points objective it exists to replace was still deciding every
     gameweek on its own, in the one mode anybody runs weekly.
 
-    Plans are enumerated across both axes that matter: how many transfers to
-    make (0 up to free plus paid hits) and, within a count, which players move.
-    `min_different` defaults to 1 rather than the 4 used for a squad rebuild --
-    a transfer plan IS a small change, and forcing candidates four players
-    apart would only return plans nobody would consider.
+    Plans are enumerated in two passes. The first reserves one slot for the best
+    plan at EVERY transfer count from 0 to free-plus-paid, so the rank layer
+    always sees the whole decision -- hold, free moves, and each paid hit. Only
+    then does the second pass spend the remaining quota on alternatives, deepest
+    count first. `min_different` defaults to 1 rather than the 4 used for a
+    squad rebuild -- a transfer plan IS a small change, and forcing candidates
+    four players apart would only return plans nobody would consider.
+
+    `k` is therefore a floor on breadth, not a hard ceiling: a `k` smaller than
+    the number of transfer counts widens the decision rather than truncating it.
     """
     current_set = {int(i) for i in current_squad_ids}
     budget, cost = _budget_and_cost(xp_df, current_set, bank, selling_prices)
-    plans, excluded = [], []
-    for n in range(0, int(free_transfers) + int(cfg.max_paid_hits) + 1):
-        for _ in range(int(k)):
+    max_n = int(free_transfers) + int(cfg.max_paid_hits)
+    plans: list[TransferPlan] = []
+    excluded: list[list[int]] = []
+
+    def add(plan) -> bool:
+        """Keep a plan unless an identical fifteen is already in the list."""
+        if any(set(plan.squad_ids) == set(p.squad_ids) for p in plans):
+            return False
+        plans.append(plan)
+        excluded.append(list(plan.squad_ids))
+        return True
+
+    # PASS 1 -- one reserved slot per transfer count.
+    #
+    # A single global quota filled in ascending order never got this far: the
+    # hold plan took a slot, a large pool then supplied every remaining slot
+    # with one-transfer alternatives, and the outer loop exited before n=2. With
+    # one free transfer the rank layer was therefore never shown a paid hit, and
+    # with banked transfers it was never shown a coordinated two-move
+    # restructure. Reserving a slot per count costs at most max_n solves and
+    # guarantees the whole decision is on the table.
+    for n in range(0, max_n + 1):
+        solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost,
+                        allow_club_overage=(n == 0))
+        if solved is None:
+            continue
+        add(_plan(current_set, solved, free_transfers, cfg))
+
+    # PASS 2 -- spend whatever quota is left on genuinely different alternatives,
+    # deepest count first so the extra candidates are the ones the first pass
+    # could not express.
+    for n in range(max_n, -1, -1):
+        while len(plans) < int(k):
             solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost,
-                            excluded=excluded, min_different=int(min_different))
+                            excluded=excluded, min_different=int(min_different),
+                            allow_club_overage=(n == 0))
             if solved is None:
                 break
-            plan = _plan(current_set, solved, free_transfers, cfg)
-            if any(set(plan.squad_ids) == set(p.squad_ids) for p in plans):
-                break
-            plans.append(plan)
-            excluded.append(list(plan.squad_ids))
-            if len(plans) >= int(k):
+            if not add(_plan(current_set, solved, free_transfers, cfg)):
                 break
         if len(plans) >= int(k):
             break
+
     _attribute_gain(plans)
     return plans
 
@@ -223,7 +270,8 @@ def optimize_transfers(xp_df: pd.DataFrame, current_squad_ids: list[int], bank: 
 
     options: list[TransferPlan] = []
     for n in range(0, int(free_transfers) + int(cfg.max_paid_hits) + 1):
-        solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost)
+        solved = _solve(xp_df, current_set, budget, n, cfg, xp_col, cost=cost,
+                        allow_club_overage=(n == 0))
         if solved is None:
             continue
         options.append(_plan(current_set, solved, free_transfers, cfg))
