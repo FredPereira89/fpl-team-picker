@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .xp import EVENT_PREFIX
 
 # Below this the correction is not distinguishable from noise. The review's
 # sensitivity analysis put the smallest detectable weekly edge at ~13 pts on
