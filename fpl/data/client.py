@@ -14,6 +14,16 @@ FORBIDDEN = ("my-team",)
 HISTORY_TTL_H = 24 * 30
 
 
+class DataCoverageError(RuntimeError):
+    """Too much of this run's player history is missing to optimise safely.
+
+    Raised rather than warned because the failure is invisible downstream: a
+    player whose summary could not be fetched is zeroed and routed to the same
+    price prior as a genuine new signing, and the optimizer then returns a
+    confident, legal team built on an estimate nothing supports.
+    """
+
+
 class FplClient:
     def __init__(self, cache: Cache, ttl_hours: float = 6, rate_limit_s: float = 1.0, session=None):
         self.cache = cache
@@ -33,6 +43,11 @@ class FplClient:
         # Slugs served from a snapshot too old to carry a `final_through`
         # marker, when one was asked for.
         self.unverified: set[str] = set()
+        # Players whose element-summary could not be fetched OR served from
+        # cache on this run. `stale` is one global boolean and cannot say WHO
+        # is affected, which is exactly what the caller needs to decide whether
+        # the missing history touches the squad.
+        self.fetch_failures: set[int] = set()
         self._last_call = 0.0
 
     def _record_source(self, slug: str) -> None:
@@ -125,8 +140,11 @@ class FplClient:
         Without it a 30-day-old snapshot counts as fresh and the model silently
         runs on whatever gameweek happened to be current when it was taken.
 
-        A player whose summary can't be fetched is simply omitted; downstream
-        that zeroes their baseline and routes them to the price prior.
+        A player whose summary can't be fetched is omitted from the result AND
+        recorded in `fetch_failures`. Downstream, an omitted player is zeroed
+        and routed to the price prior -- the right treatment for a newcomer and
+        badly wrong for an established player lost to an outage -- so the
+        caller has to be able to tell the two apart.
         """
         out: dict[int, dict] = {}
         ids = list(player_ids)
@@ -137,6 +155,7 @@ class FplClient:
                     require_final_through=require_final_through)
             except Exception:
                 self.stale = True
+                self.fetch_failures.add(int(pid))
             if progress:
                 progress(i + 1, len(ids))
         return out

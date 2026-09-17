@@ -11,7 +11,7 @@ import pandas as pd
 from .config import Config
 from .data.cache import (Cache, data_complete_after, is_matchday, final_through,
                          settled_after)
-from .data.client import FplClient
+from .data.client import FplClient, DataCoverageError
 from .data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
                              history_past_frame, history_current_frame,
                              history_rounds_frame, apply_season_baseline,
@@ -95,6 +95,62 @@ def freshness_flags(client, fixtures: list[dict], checked_through: int) -> list[
         f"stat corrections since then are not in this forecast — delete "
         f"data/cache/element-summary-*.json to force a refresh."
     ]
+
+
+# How much of the player pool must have readable history before a run is
+# allowed to optimise. Not 100%: a handful of unreadable fringe players changes
+# nothing, and refusing the run over them would make the tool unusable during
+# ordinary API flakiness. Below this, though, the pool the solver is choosing
+# from is not the pool it thinks it is.
+MIN_HISTORY_COVERAGE = 0.99
+
+
+def coverage_gate(players, summaries, fetch_failed, owned_ids,
+                  min_coverage: float = MIN_HISTORY_COVERAGE) -> list[str]:
+    """Blocking reasons why this run's data is too incomplete to optimise on.
+
+    Individual element-summary failures used to be swallowed silently. The
+    missing player's prior rows were then zeroed and routed to the same price
+    prior as a genuine new signing, so a partial API outage could erase an
+    established player's history while the optimizer still returned a
+    confident, legal team. The only signal was a global `stale` boolean, which
+    cannot say whether the gap touches the squad.
+
+    Two things are refused rather than warned about: an OWNED player this run
+    could not read -- there is no safe way to price a sale or a hit against an
+    estimate nothing supports -- and a pool whose overall coverage has fallen
+    below `min_coverage`.
+    """
+    from .data.normalize import history_status, HISTORY_FAILED
+
+    status = history_status(players, summaries, fetch_failed).set_index("player_id")
+    name_of = dict(zip(players["player_id"].astype(int), players["web_name"]))
+    failed = {int(i) for i, row in status.iterrows()
+              if row["history_status"] == HISTORY_FAILED}
+    if not failed:
+        return []
+
+    reasons = []
+    owned_missing = sorted(failed & {int(i) for i in (owned_ids or [])})
+    if owned_missing:
+        who = ", ".join(f"{name_of.get(i, i)} ({i})" for i in owned_missing)
+        reasons.append(
+            f"player history could not be read for {len(owned_missing)} player(s) "
+            f"you own: {who}. They would be priced off their transfer fee like a "
+            f"new signing, which is how a bad sale or a hit gets recommended. "
+            f"Re-run once the API is responding."
+        )
+
+    total = max(1, len(status))
+    coverage = 1.0 - len(failed) / total
+    if coverage < float(min_coverage):
+        reasons.append(
+            f"player history coverage is {coverage:.1%}, below the "
+            f"{float(min_coverage):.0%} floor: {len(failed)} of {total} "
+            f"summaries could not be read, so the pool the solver is choosing "
+            f"from is not the one it appears to be."
+        )
+    return reasons
 
 
 def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
@@ -283,6 +339,15 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     summaries = client.element_summaries(players["player_id"].tolist(), progress=progress,
                                          not_before=data_complete_after(raw_fixtures),
                                          require_final_through=checked_through)
+    # Refuse to optimise on a pool this run could not actually read. A missing
+    # summary is indistinguishable downstream from a genuine newcomer, so an
+    # outage would otherwise produce a confident team built on price priors.
+    blocking = coverage_gate(players, summaries,
+                             getattr(client, "fetch_failures", set()),
+                             owned_ids=current_squad or [])
+    if blocking:
+        raise DataCoverageError(" ".join(blocking))
+
     past = history_past_frame(summaries)
     baseline_season = latest_season(past)
     players = apply_season_baseline(players, past, baseline_season)

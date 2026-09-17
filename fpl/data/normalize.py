@@ -183,3 +183,45 @@ def history_current_frame(summaries: dict[int, dict], before_event: int) -> pd.D
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows)[cols].reset_index(drop=True)
+
+
+# Why a player has no usable Premier League history. These are four different
+# facts that `apply_season_baseline` collapsed into one zeroed row, after which
+# an established player lost to an API outage and a genuine new signing were
+# indistinguishable -- both priced off the transfer fee.
+HISTORY_ESTABLISHED = "established"    # has prior-season minutes on record
+HISTORY_NEW = "new_to_league"          # summary fetched, genuinely no PL past
+HISTORY_NONE = "no_history"            # registered, never featured, not new
+HISTORY_FAILED = "fetch_failed"        # this run could not read his summary
+
+
+def history_status(players: pd.DataFrame, summaries: dict[int, dict],
+                   fetch_failed=None) -> pd.DataFrame:
+    """One row per player saying WHY his history is thin, if it is.
+
+    `fetch_failed` is the set of player ids whose element-summary could not be
+    read on this run (see `FplClient.fetch_failures`). Those are reported
+    separately from newcomers, because the correct response differs: a newcomer
+    should be priced off his fee, while a missing fetch means the run has no
+    opinion at all and should say so rather than invent one.
+    """
+    failed = {int(i) for i in (fetch_failed or set())}
+    seen = summaries or {}
+    rows = []
+    for _, p in players.iterrows():
+        pid = int(p["player_id"])
+        if pid in failed or pid not in seen:
+            # Absent from the result of a call made for every player is the
+            # same fact as an explicit failure: this run could not read him.
+            status = HISTORY_FAILED
+        elif float(p.get("minutes", 0) or 0) > 0:
+            status = HISTORY_ESTABLISHED
+        elif seen[pid].get("history_past"):
+            # He has been in the league before and simply did not play last
+            # season -- a very different prior from a player who has never
+            # been here at all.
+            status = HISTORY_NONE
+        else:
+            status = HISTORY_NEW
+        rows.append({"player_id": pid, "history_status": status})
+    return pd.DataFrame(rows)
