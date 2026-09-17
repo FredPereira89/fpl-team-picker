@@ -1,6 +1,6 @@
 # Handoff — FPL audit remediation
 
-**Status:** P0 complete (576 tests). **P1 in progress** — 5 of 7 tasks done, suite at **609 passed**.
+**Status:** P0 complete (576 tests). **P1 in progress** — 6 of 7 tasks done, suite at **626 passed**.
 **Last updated:** 2026-09-17
 **Branch:** `master` — 14 commits, `370de0e..22ff9ba`
 
@@ -95,7 +95,7 @@ Chip handling is split three ways, and the split is load-bearing:
 | 3 | Tier 2 keeps DNPs, uses training-season minutes, cannot gate trust | B15 | **done** |
 | 4 | Failed fetch ≠ newcomer; `coverage_gate` aborts the run | B16 | **done** |
 | 5 | Point-in-time snapshots (`fpl/data/snapshots.py`) | B13 | **done** |
-| 6 | Sequential manager-state replay (`fpl/backtest/replay.py`) | B13 | **IN PROGRESS** — module + `tests/test_replay.py` written, tests not yet run |
+| 6 | Sequential manager-state replay (`fpl/backtest/replay.py`) | B13 | **done** — 17 tests, one per rule |
 | 7 | Wire replay into `scripts/run_walkforward.py` above the oracle ceiling | B13 | not started |
 
 ### P1 design notes worth keeping
