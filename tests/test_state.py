@@ -61,12 +61,20 @@ def test_taking_hits_floors_the_balance_at_zero_before_accruing():
     assert advance_ft(State(2, 1, []), transfers_made=3) == 1
 
 
-def test_wildcard_preserves_the_balance_and_still_accrues():
-    assert advance_ft(State(3, 1, []), transfers_made=9, chip="wildcard") == 4
+def test_wildcard_keeps_saved_transfers_without_adding_one():
+    """FPL's FAQ is explicit: two saved transfers are still two after a
+    Wildcard. The gameweek's own free transfer is consumed by activating the
+    chip, so the balance is preserved -- not preserved AND incremented, which
+    silently authorised a transfer costing four points every week after a chip."""
+    assert advance_ft(State(3, 1, []), transfers_made=9, chip="wildcard") == 3
 
 
-def test_free_hit_preserves_the_balance():
-    assert advance_ft(State(2, 1, []), transfers_made=11, chip="freehit") == 3
+def test_free_hit_keeps_saved_transfers_without_adding_one():
+    assert advance_ft(State(2, 1, []), transfers_made=11, chip="freehit") == 2
+
+
+def test_a_chip_week_cannot_push_the_balance_past_the_cap():
+    assert advance_ft(State(5, 1, []), transfers_made=9, chip="wildcard") == 5
 
 
 def test_bench_boost_does_not_preserve_the_balance():
@@ -158,7 +166,10 @@ def test_reconcile_does_not_spend_free_transfers_on_a_wildcard_week():
     """A Wildcard makes every transfer free and leaves the balance untouched.
     Replaying the history without reading the chip list drained a banked 2 down
     to 1 -- and because the derived value overrides local tracking, that wrong
-    number then replaced the correct one."""
+    number then replaced the correct one.
+
+    Untouched means exactly that: the chip consumes the gameweek's own free
+    transfer to activate, so the 2 banked going into GW3 are still 2 for GW4."""
     history = {
         "current": [
             {"event": 1, "event_transfers": 0},
@@ -168,7 +179,7 @@ def test_reconcile_does_not_spend_free_transfers_on_a_wildcard_week():
         "chips": [{"name": "wildcard", "time": "2026-08-30T10:00:00Z", "event": 3}],
     }
     ft, _ = reconcile(State(), history)
-    assert ft == 3  # 2 banked going into GW3, untouched, +1 for GW4
+    assert ft == 2  # 2 banked going into GW3, still 2 for GW4
 
 
 def test_reconcile_does_not_spend_free_transfers_on_a_free_hit_week():
@@ -180,7 +191,8 @@ def test_reconcile_does_not_spend_free_transfers_on_a_free_hit_week():
         "chips": [{"name": "freehit", "event": 2}],
     }
     ft, _ = reconcile(State(), history)
-    assert ft == 2
+    # 1 banked going into GW2; the Free Hit neither spends it nor adds to it.
+    assert ft == 1
 
 
 def test_reconcile_still_spends_transfers_in_a_bench_boost_week():
@@ -271,7 +283,8 @@ def test_ft_after_moves_separates_this_week_from_next():
 
 
 def test_ft_after_moves_leaves_a_wildcard_week_whole():
+    """Unlimited transfers inside the week, and the same balance out of it."""
     remaining, nxt = ft_after_moves(State(free_transfers=2), transfers_made=9,
                                     chip="wildcard")
-    assert (remaining, nxt) == (2, 3)
+    assert (remaining, nxt) == (2, 2)
 

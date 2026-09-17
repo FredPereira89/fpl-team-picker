@@ -156,8 +156,18 @@ def ft_after_moves(state: State, transfers_made: int,
 
     The two differ by the weekly accrual, and conflating them is what let a
     re-planned gameweek spend a transfer that had already been used.
+
+    A Wildcard or Free Hit is the exception in BOTH directions. Inside the week
+    transfers are unlimited, so nothing is spent; but the gameweek's own free
+    transfer is consumed by activating the chip, so no accrual follows either.
+    FPL's FAQ gives the example directly: two saved transfers are still two
+    after a Wildcard. Returning `balance + 1` here handed the optimizer a
+    transfer that actually costs four points in the gameweek after every chip.
     """
-    used = 0 if canonical_chip(chip) in CHIPS_PRESERVING_FT else int(transfers_made)
+    if canonical_chip(chip) in CHIPS_PRESERVING_FT:
+        balance = min(FT_CAP, int(state.free_transfers))
+        return balance, balance
+    used = int(transfers_made)
     remaining = max(0, int(state.free_transfers) - used)
     return remaining, min(FT_CAP, remaining + 1)
 

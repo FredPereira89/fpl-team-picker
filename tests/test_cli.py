@@ -149,7 +149,9 @@ def test_record_transfers_tracks_chip_usage(tmp_path):
     record_transfers(state_path, Config(free_transfers=1), gw=2, transfers_made=15, chip="wildcard")
     s = load_state(state_path, Config())
     assert s.chips_used == ["wildcard"]
-    assert s.free_transfers == 2  # wildcard preserves balance, still accrues
+    # Preserved, not preserved-and-incremented: the chip consumes the
+    # gameweek's own free transfer, so 1 in is 1 out.
+    assert s.free_transfers == 1
 
 
 # --- P6: purchase prices (2026-08-27 audit) ---
