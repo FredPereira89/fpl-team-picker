@@ -156,10 +156,16 @@ def history_current_frame(summaries: dict[int, dict], before_event: int) -> pd.D
     gameweek being predicted appear once it kicks off, and counting them would
     score the model against an answer it was handed.
 
-    `gws_played` counts distinct rounds on record, which is the number of
-    matches the player's club has played since he joined it -- not the number
-    he featured in. That is the right denominator for both how much weight
-    season-to-date form deserves and how many chances to start he has had.
+    `gws_played` counts distinct ROUNDS and `matches_played` counts fixture
+    ROWS. They differ in a double gameweek, and conflating them was a real bug:
+    `starts` sums fixture rows, so a player who started both legs of a double
+    read as two starts out of one opportunity and his start probability could
+    exceed 1 before clipping. Matches are the right denominator for how many
+    chances to start he has had; gameweeks are the right one for how much
+    weight season-to-date form deserves, which is measured in weeks.
+
+    Neither counts the matches he FEATURED in: a row exists for every fixture
+    his club played while he was registered to it.
     """
     rows = []
     for pid, summary in (summaries or {}).items():
@@ -168,11 +174,12 @@ def history_current_frame(summaries: dict[int, dict], before_event: int) -> pd.D
         if not played:
             continue
         row = {"player_id": int(pid),
-               "gws_played": len({int(h["round"]) for h in played})}
+               "gws_played": len({int(h["round"]) for h in played}),
+               "matches_played": len(played)}
         for c in PLAYER_INT_COLS + FLOAT_COLS:
             row[c] = sum(pd.to_numeric(h.get(c, 0), errors="coerce") or 0 for h in played)
         rows.append(row)
-    cols = ["player_id", "gws_played"] + PLAYER_INT_COLS + FLOAT_COLS
+    cols = ["player_id", "gws_played", "matches_played"] + PLAYER_INT_COLS + FLOAT_COLS
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows)[cols].reset_index(drop=True)

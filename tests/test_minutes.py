@@ -403,3 +403,31 @@ def test_a_doubtful_player_loses_the_cameo_too():
     doubt = minutes_model(PLAYERS, CFG).set_index("player_id").loc[4]
     assert doubt.p_start == pytest.approx(healthy.p_start * 0.25)
     assert doubt.p_play == pytest.approx(healthy.p_play * 0.25)
+
+
+def test_a_start_rate_does_not_depend_on_how_matches_are_packed_into_gameweeks():
+    """Two starts in three matches is the same evidence whether the three
+    matches fell in three gameweeks or in two with a double.
+
+    `starts` sums fixture ROWS while the denominator counted distinct ROUNDS,
+    so the double-gameweek player got the same two starts over one fewer
+    opportunity and read as the more nailed of the two."""
+    from fpl.data.normalize import history_current_frame
+
+    spread = {2: {"history": [
+        {"round": 1, "starts": 1, "minutes": 90},
+        {"round": 2, "starts": 1, "minutes": 90},
+        {"round": 3, "starts": 0, "minutes": 5},
+    ]}}
+    doubled = {2: {"history": [
+        {"round": 1, "starts": 1, "minutes": 90},
+        {"round": 2, "starts": 1, "minutes": 90},
+        {"round": 2, "starts": 0, "minutes": 5},
+    ]}}
+
+    a = minutes_model(PLAYERS, CFG,
+                      current=history_current_frame(spread, before_event=4))
+    b = minutes_model(PLAYERS, CFG,
+                      current=history_current_frame(doubled, before_event=4))
+    assert (a.set_index("player_id").loc[2, "p_start"]
+            == pytest.approx(b.set_index("player_id").loc[2, "p_start"]))

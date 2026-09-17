@@ -221,3 +221,21 @@ def test_rounds_frame_keeps_both_halves_of_a_double_gameweek():
     df = history_rounds_frame({7: _summary_with_history(doubled)}, before_event=3)
     assert len(df) == 3
     assert sorted(df[df["round"] == 2]["minutes"]) == [45, 70]
+
+
+# --- B11: a double gameweek is two matches, one gameweek (2026-09-17 audit) ---
+
+def test_a_double_gameweek_is_two_matches_and_one_gameweek():
+    """`starts` sums fixture rows while `gws_played` counted distinct rounds, so
+    a player who started both legs of a double read as two starts in one
+    opportunity -- a p_start above 1 before clipping, and a rotation risk turned
+    into a falsely nailed player for every week after."""
+    summaries = {1: {"history": [
+        {"round": 3, "starts": 1, "minutes": 90},
+        {"round": 4, "starts": 1, "minutes": 90},
+        {"round": 4, "starts": 1, "minutes": 90},
+    ]}}
+    frame = history_current_frame(summaries, before_event=5).set_index("player_id")
+    assert frame.loc[1, "gws_played"] == 2
+    assert frame.loc[1, "matches_played"] == 3
+    assert frame.loc[1, "starts"] == 3

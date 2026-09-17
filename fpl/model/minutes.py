@@ -153,9 +153,13 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
         confidence = "high"
         minutes = float(p["minutes"])
         seen = now.get(int(p["player_id"]))
-        # Games his club has played since he joined it -- not games he featured
-        # in -- which is the number of chances to start he has actually had.
-        now_games = float(seen["gws_played"]) if seen is not None else 0.0
+        # MATCHES his club has played since he joined it -- not gameweeks, and
+        # not games he featured in. `now_starts` sums fixture rows, so the
+        # denominator has to count them too: counting distinct rounds gave a
+        # double-gameweek player two starts out of one opportunity, and a
+        # rotation risk then read as nailed on for every week after.
+        now_games = (float(seen.get("matches_played", seen["gws_played"]))
+                     if seen is not None else 0.0)
         now_starts = float(seen["starts"]) if seen is not None else 0.0
         has_past = minutes > 0
 
