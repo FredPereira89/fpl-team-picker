@@ -214,7 +214,7 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
             if event not in horizon_events:
                 continue
             bonus = expected_bonus_for(rate_row["bonus90"], mins_row["e_minutes"],
-                                       att_mult=float(fx["att_mult"]))
+                                       att_mult=float(fx["att_mult"]), position=pos)
             per_event[event] = per_event.get(event, 0.0) + xp_for_fixture(
                 rate_row, mins_row, fx, pos, bonus
             )

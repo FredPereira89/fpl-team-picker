@@ -285,7 +285,7 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     # this returns the ingredients for that ranking rather than a bonus
     # value of its own.
     bps = score_side_bps(positions, played, reached_60, goals, assists,
-                         clean_sheet, saves, cards, dc)
+                         clean_sheet, saves, cards, dc, conceded_on)
     return pts.astype(float), goals, bps
 
 
