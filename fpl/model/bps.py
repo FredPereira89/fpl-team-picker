@@ -18,68 +18,50 @@ import pandas as pd
 MAX_BONUS_PER_MATCH = 3.0
 FIXTURE_SENSITIVITY = 0.5  # bonus is less fixture-dependent than goals
 
-# R10 re-review (Codex): `expected_bonus_for` treats a player's `bonus90` as
-# an INDEPENDENT rate, exactly the assumption `score_side_bps`/
-# `award_match_bonus` exist to correct in the simulation -- but `build_xp`'s
-# xP_next1 (Mode 1's default squad-selection objective) called this function
-# directly and was never touched by that fix, so the primary decision path
-# kept scoring bonus as if every capable player could win the full ~3-point
-# ceiling independently of how many OTHER BPS-competitive players share his
-# match. Summed across a whole match that overstates the true total by a
-# wide margin (confirmed with a uniform bonus90 test pool: 16.8 analytic vs
-# ~6 true; see handoff.md R10).
-#
-# These multipliers correct that: for each position, how much of
-# `expected_bonus_for`'s ANALYTIC (independent-rate) prediction actually
-# survives real match-wide competition. Derived from a large simulated
-# league using `score_side_bps`/`award_match_bonus` (the SAME corrected
-# ranking the simulator uses) over bonus90/xg90/xa90/dc90/saves90/cards90
-# tiers set from general FPL domain knowledge (elite/mid/fringe per
-# position), NOT fitted to precise historical rates -- a proper refit
-# against the production `blended_rates` pipeline's real historical output
-# is a documented follow-up, not done here. FWD needs the least correction:
-# goals are a sharp, hard-to-crowd-out BPS signal, so a striker's own
-# bonus90 already tracks his real competitiveness fairly well. GKP/DEF/MID
-# need much more: their bonus depends on saves/DC/appearance, categories
-# several match participants can contest at once.
-BONUS_CALIBRATION = {"GKP": 0.42, "DEF": 0.35, "MID": 0.41, "FWD": 0.80}
+# R10 re-review (Codex) reverted a calibration that was tried and shown
+# wrong here: `bonus90` is derived (model.scoring.RATE_SPECS) from the REAL
+# `bonus` field FPL actually awarded each player -- i.e. it is ALREADY the
+# outcome of real match-wide BPS competition, a historical per-90 average of
+# points that survived it, not an abstract "how good is this player at BPS"
+# rate. Projecting it forward via `bonus90 * (e_minutes/90) * scale` is an
+# ordinary linear extrapolation of an already-calibrated statistic and does
+# not need a further "how much survives the match" correction -- that
+# survival is already baked into the historical number by construction.
+# A per-position multiplier was added believing otherwise (reasoning from a
+# synthetic diagnostic with an unrealistic UNIFORM bonus90 across every
+# simulated player, which is not how real bonus90 is distributed across a
+# real pool) and was checked against real data only after landing: applied
+# to the real 2026/27 GW1-4 bootstrap, those factors cut correctly-awarded
+# bonus totalling ~6.4-6.5 per match down to ~3.0 -- 46% of the true total.
+# Removed entirely rather than patched, per the same principle C6-5 used
+# for the earlier Beta-draw mistake: a demonstrably wrong mechanism does not
+# get a smaller wrong constant, it gets removed. A genuine correction, if
+# one is ever warranted, needs fitting against the production
+# `blended_rates` pipeline's real historical output with an out-of-sample
+# (leave-one-gameweek-out) check -- not a simulated proxy -- and is left
+# as an open, undone follow-up (handoff.md R10).
 
 
-def expected_bonus_for(bonus90: float, e_minutes: float, att_mult: float = 1.0,
-                       position: str | None = None) -> float:
+def expected_bonus_for(bonus90: float, e_minutes: float, att_mult: float = 1.0) -> float:
     """Expected bonus for ONE player in ONE fixture.
 
     `build_xp` needs exactly this, once per (player, fixture). It was getting it
     by filtering the entire rates and minutes frames each time, which made the
     projection quadratic in squad size for no gain.
-
-    `position`, when given, applies `BONUS_CALIBRATION` -- see its docstring
-    for why an uncalibrated independent rate overstates true expected bonus.
-    Omitted (the default) for backward compatibility with any caller that
-    does not have a position to hand; that caller gets the OLD, uncorrected
-    number, not a silent behaviour change.
     """
     scale = 1.0 + (float(att_mult) - 1.0) * FIXTURE_SENSITIVITY
-    calibration = BONUS_CALIBRATION.get(position, 1.0) if position else 1.0
-    per_match = float(bonus90) * (float(e_minutes) / 90.0) * scale * calibration
+    per_match = float(bonus90) * (float(e_minutes) / 90.0) * scale
     return float(min(max(per_match, 0.0), MAX_BONUS_PER_MATCH))
 
 
 def expected_bonus(rates: pd.DataFrame, minutes: pd.DataFrame,
-                   att_mult: float = 1.0, positions: pd.Series | None = None) -> pd.Series:
-    """`positions`, when given, must be indexed by `player_id` and applies
-    `BONUS_CALIBRATION` the same way `expected_bonus_for`'s `position` does."""
+                   att_mult: float = 1.0) -> pd.Series:
     df = rates[["player_id", "bonus90"]].merge(
         minutes[["player_id", "e_minutes"]], on="player_id", how="left"
     ).fillna({"e_minutes": 0.0})
 
     scale = 1.0 + (att_mult - 1.0) * FIXTURE_SENSITIVITY
-    if positions is not None:
-        pos = df["player_id"].map(positions)
-        calibration = pos.map(BONUS_CALIBRATION).fillna(1.0)
-    else:
-        calibration = 1.0
-    per_match = df["bonus90"] * (df["e_minutes"] / 90.0) * scale * calibration
+    per_match = df["bonus90"] * (df["e_minutes"] / 90.0) * scale
     per_match = per_match.clip(lower=0.0, upper=MAX_BONUS_PER_MATCH)
 
     out = pd.Series(per_match.values, index=df["player_id"].astype(int))
@@ -123,6 +105,9 @@ BPS_SAVE = 2.0
 # undifferentiated `cards` count, so every card scores as a yellow here --
 # a real, and probably small, underestimate of the rare red-card cost.
 BPS_CARD = -3.0
+# The official RED value, for a caller (validate_bps.py) that has the real
+# yellow/red split available and does not need this approximation.
+BPS_RED_CARD = -9.0
 # Official, GKP/DEF only, per goal conceded (not per two, unlike the FPL
 # POINTS rule in model.xp -- these are different scoring systems).
 BPS_CONCEDED = -4.0
@@ -132,16 +117,16 @@ CONCEDED_BPS_POSITIONS = {"GKP", "DEF"}
 # three, unchanged), successful tackle 2 (the SEPARATE -1-for-being-tackled
 # penalty was removed this season, not the +2 for a successful one).
 # `dc90` is one blended per-90 rate with no split between these three, so
-# this is a documented weighted guess per position, not a precise fit --
-# `scripts/validate_bps.py`, run against real GW1-4 fixtures (element-
-# summary history, real BPS/bonus), found the single uniform value (0.6)
-# gave BPS mean absolute errors of GKP 2.46 / DEF 3.54 / MID 3.85 / FWD
-# 2.63, and that per-position weights closer to GKP 0.5 / DEF 0.7-0.8 /
-# MID 0.8-0.9 / FWD 0.5-0.6 reduced overall MAE by roughly 7% (3.51 to
-# 3.25). These rounder, more conservative values track that direction
-# without precisely fitting a 40-fixture sample -- re-run the validation
-# script as more gameweeks accumulate before tightening further.
-BPS_DC_ACTION = {"GKP": 0.5, "DEF": 0.7, "MID": 0.8, "FWD": 0.5}
+# this is a documented weighted guess per position, not a precise fit.
+# `scripts/validate_bps.py::logo_cv` (Codex's re-review, finding 2: fitting
+# and evaluating on the SAME gameweeks is in-sample selection, not
+# validation) runs leave-one-gameweek-out cross-validation over real GW1-4
+# fixtures: the SAME candidate weight set was selected on every one of the
+# 4 training folds (not fold-dependent, which would have signalled
+# overfitting), with a mean HELD-OUT MAE of 3.24 -- close to its in-sample
+# 3.26 and consistently below the uniform-0.6 baseline's 3.49 on the same
+# held-out folds. Re-run that script as more gameweeks accumulate.
+BPS_DC_ACTION = {"GKP": 0.5, "DEF": 0.75, "MID": 0.85, "FWD": 0.55}
 
 
 def score_side_bps(positions: np.ndarray, played: np.ndarray, reached_60: np.ndarray,

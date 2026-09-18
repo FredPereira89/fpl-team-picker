@@ -145,45 +145,49 @@ def test_score_side_bps_excludes_a_player_who_never_played():
     assert bps[1, 0] == -np.inf     # never played
 
 
-# --- R10 re-review: the analytic bonus90 estimate calibrated toward the
-# match-ranked reality (Codex: Mode 1 still used the old, uncorrected
-# independent-rate number, which overstates true expected bonus) ---
+# --- R10 second re-review: a position-based BONUS_CALIBRATION was tried and
+# reverted here (Codex caught it: `bonus90` is derived from the REAL
+# historical `bonus` FPL actually awarded -- model.scoring.RATE_SPECS --
+# which is ALREADY the outcome of real match-wide BPS competition, so
+# projecting it forward is an ordinary linear extrapolation of an
+# already-calibrated statistic, not something that needs a further
+# "survival" discount. Applied to the real 2026/27 GW1-4 bootstrap, the
+# reverted factors would have cut correctly-awarded bonus totalling
+# ~6.4-6.5/match down to ~3.0/match -- 46% of the true total). These tests
+# pin the REVERTED, uncalibrated behaviour so it cannot quietly return. ---
 
-def test_position_calibration_lowers_the_uncalibrated_estimate():
-    """`BONUS_CALIBRATION` factors are all < 1: an independent-rate estimate
-    always overstates what match-wide ranking actually delivers (see the
-    module docstring for why -- confirmed with a uniform bonus90 test pool
-    summing to ~3x the true per-match total)."""
-    from fpl.model.bps import expected_bonus_for, BONUS_CALIBRATION
+def test_expected_bonus_for_has_no_position_parameter():
+    """`BONUS_CALIBRATION` and the `position` argument it needed are gone --
+    asserted directly so a future patch cannot reintroduce the same
+    statistically unsound double-correction without at least this test
+    demanding a deliberate decision to add the parameter back."""
+    import inspect
+    import fpl.model.bps as bpsmod
 
-    for position in ("GKP", "DEF", "MID", "FWD"):
-        uncalibrated = expected_bonus_for(0.5, 80.0, att_mult=1.0)
-        calibrated = expected_bonus_for(0.5, 80.0, att_mult=1.0, position=position)
-        assert calibrated < uncalibrated
-        assert calibrated == pytest.approx(uncalibrated * BONUS_CALIBRATION[position])
+    params = inspect.signature(bpsmod.expected_bonus_for).parameters
+    assert "position" not in params
+    assert not hasattr(bpsmod, "BONUS_CALIBRATION")
 
 
-def test_no_position_given_keeps_the_old_uncalibrated_behaviour():
-    """A caller that does not know the position (or predates this change)
-    gets the OLD number, not a silent, unexplained behaviour change."""
+def test_expected_bonus_for_is_a_plain_linear_projection_of_bonus90():
+    """No position-dependent discount: doubling `bonus90` must exactly
+    double the projection (below the 3.0 cap), since it is a linear
+    extrapolation of an already-calibrated historical rate."""
     from fpl.model.bps import expected_bonus_for
 
-    assert expected_bonus_for(0.5, 80.0, att_mult=1.0) == pytest.approx(
-        expected_bonus_for(0.5, 80.0, att_mult=1.0, position=None))
+    single = expected_bonus_for(0.5, 80.0, att_mult=1.0)
+    double = expected_bonus_for(1.0, 80.0, att_mult=1.0)
+    assert double == pytest.approx(2 * single)
 
 
-def test_build_xp_uses_the_calibrated_bonus_not_the_old_independent_rate():
-    """Codex's re-review, finding 1: build_xp (Mode 1's default squad-
-    selection objective) called expected_bonus_for without a position,
-    so R10's correction never reached the primary decision path -- only
-    the rank layer's simulation.
-
-    Isolates the bonus term exactly: two players identical except for
-    `bonus90` (everything else driving xp_next1 -- goals, assists, DC,
-    cards -- is zero, so it cannot move). The DIFFERENCE in xp_next1 must
-    equal the CALIBRATED difference in expected bonus, not the old
-    uncalibrated one.
-    """
+def test_build_xp_bonus_term_is_uncalibrated_bonus90_linear_projection():
+    """`build_xp`'s bonus term for xp_next1 (Mode 1's default squad-
+    selection objective) must equal the plain `expected_bonus_for` value --
+    no position-based discount reaching this call site. Isolates the bonus
+    term exactly: two players identical except for `bonus90` (everything
+    else driving xp_next1 -- goals, assists, DC, cards -- is zero, so it
+    cannot move), so the difference in xp_next1 must equal the plain
+    difference in expected_bonus_for."""
     import pandas as pd
     from fpl.config import Config
     from fpl.model.bps import expected_bonus_for
@@ -208,12 +212,9 @@ def test_build_xp_uses_the_calibrated_bonus_not_the_old_independent_rate():
     xp = build_xp(players, rates, minutes, tfx, cfg, from_event=1).set_index("player_id")
     xp_gap = float(xp.loc[2, "xp_next1"]) - float(xp.loc[1, "xp_next1"])
 
-    calibrated_gap = (expected_bonus_for(1.0, 85.0, att_mult=1.0, position="MID")
-                      - expected_bonus_for(0.0, 85.0, att_mult=1.0, position="MID"))
-    uncalibrated_gap = (expected_bonus_for(1.0, 85.0, att_mult=1.0)
-                        - expected_bonus_for(0.0, 85.0, att_mult=1.0))
-    assert calibrated_gap < uncalibrated_gap   # sanity: calibration bites here
-    assert xp_gap == pytest.approx(calibrated_gap, abs=1e-3)   # build_xp rounds to 4dp
+    expected_gap = (expected_bonus_for(1.0, 85.0, att_mult=1.0)
+                    - expected_bonus_for(0.0, 85.0, att_mult=1.0))
+    assert xp_gap == pytest.approx(expected_gap, abs=1e-3)   # build_xp rounds to 4dp
 
 
 def test_score_side_bps_penalises_goals_conceded_for_gkp_and_def():
@@ -258,16 +259,57 @@ def _real_bps_sample():
     return json.load(open(path, encoding="utf-8"))
 
 
+def _side_bps(rows):
+    """`score_side_bps` for ONE side (`was_home` shared by every row) of one
+    fixture, real yellow/red cards weighted at their own official BPS
+    values rather than conflated into one count."""
+    import numpy as np
+    from fpl.model.bps import score_side_bps, BPS_CARD, BPS_RED_CARD
+
+    positions = np.array([r["position"] for r in rows])
+    played = np.array([[float(r["minutes"]) > 0] for r in rows])
+    reached_60 = np.array([[float(r["minutes"]) >= 60] for r in rows])
+    goals = np.array([[float(r["goals_scored"])] for r in rows])
+    assists = np.array([[float(r["assists"])] for r in rows])
+    saves = np.array([[float(r["saves"])] for r in rows])
+    dc = np.array([[float(r["clearances_blocks_interceptions"]) + float(r["recoveries"])
+                   + float(r["tackles"])] for r in rows])
+    conceded_on = np.array([[float(r["goals_conceded"])] for r in rows])
+    # This SIDE's own clean sheet: every row here shares one `was_home`, so
+    # they share one opponent score too.
+    was_home = rows[0]["was_home"]
+    opp_score = float(rows[0]["team_a_score"] if was_home else rows[0]["team_h_score"])
+    clean_sheet = np.array([opp_score == 0.0])
+
+    # score_side_bps takes one blended `cards` count and a single BPS_CARD
+    # weight (production cannot split yellow/red from one simulated draw);
+    # real data CAN split them, so pass cards=0 here and add each card's
+    # own official BPS value directly afterward instead.
+    zero_cards = np.zeros((len(rows), 1))
+    bps = score_side_bps(positions, played, reached_60, goals, assists,
+                         clean_sheet, saves, zero_cards, dc, conceded_on)
+    cards_bps = np.array([[float(r["yellow_cards"]) * BPS_CARD
+                          + float(r["red_cards"]) * BPS_RED_CARD] for r in rows])
+    return bps + cards_bps
+
+
 def test_bps_approximation_beats_a_reasonable_floor_on_real_fixtures():
     """Reproduces `scripts/validate_bps.py`'s own metrics on the frozen
-    sample: at the time this was written (post-calibration), the full live
-    cache scored 42.5% exact bonus-recipient match, 0.675 mean Jaccard,
-    3.28 BPS MAE -- this asserts generous floors on the same metrics for
-    the smaller frozen sample, loose enough not to be a flaky exact
-    reproduction, tight enough to catch a real regression (e.g. reverting
-    the conceded-goal penalty, or a sign error in a coefficient)."""
+    sample: at the time this was written, the full live cache scored 45.0%
+    exact bonus-recipient match, 0.692 mean Jaccard, 3.24 BPS MAE (DC
+    weights cross-validated leave-one-gameweek-out, not fit and evaluated
+    on the same data -- see `logo_cv` and the `BPS_DC_ACTION` docstring)
+    -- this asserts generous floors on the same metrics for the smaller
+    frozen sample, loose enough not to be a flaky exact reproduction,
+    tight enough to catch a real regression (e.g. reverting the
+    conceded-goal penalty, or a sign error in a coefficient).
+
+    Each SIDE of a fixture (grouped by `was_home`) is scored separately --
+    an earlier version of this test used one clean-sheet flag for the
+    whole match, which credited the LOSING side's defenders with a clean
+    sheet whenever the first player happened to be on the winning side."""
     import numpy as np
-    from fpl.model.bps import score_side_bps, award_match_bonus
+    from fpl.model.bps import award_match_bonus
 
     rows = _real_bps_sample()
     by_fixture: dict = {}
@@ -280,31 +322,23 @@ def test_bps_approximation_beats_a_reasonable_floor_on_real_fixtures():
     n_fixtures = 0
     for fixture_id, grp in by_fixture.items():
         n_fixtures += 1
-        positions = np.array([r["position"] for r in grp])
-        played = np.array([[float(r["minutes"]) > 0] for r in grp])
-        reached_60 = np.array([[float(r["minutes"]) >= 60] for r in grp])
-        goals = np.array([[float(r["goals_scored"])] for r in grp])
-        assists = np.array([[float(r["assists"])] for r in grp])
-        saves = np.array([[float(r["saves"])] for r in grp])
-        cards = np.array([[float(r["yellow_cards"]) + float(r["red_cards"])] for r in grp])
-        dc = np.array([[float(r["clearances_blocks_interceptions"]) + float(r["recoveries"])
-                       + float(r["tackles"])] for r in grp])
-        conceded_on = np.array([[float(r["goals_conceded"])] for r in grp])
-        # Team clean sheet: opponent's score, from whichever side this row's
-        # player was on.
-        opp_scores = [float(r["team_a_score"]) if r["was_home"] == "True" or r["was_home"] is True
-                     else float(r["team_h_score"]) for r in grp]
-        clean_sheet = np.array([opp_scores[0] == 0.0])   # same match, same value
+        home = [r for r in grp if r["was_home"]]
+        away = [r for r in grp if not r["was_home"]]
+        sides = [s for s in (home, away) if s]
 
-        approx = score_side_bps(positions, played, reached_60, goals, assists,
-                                clean_sheet, saves, cards, dc, conceded_on)
-        real_bps = np.array([float(r["bps"]) for r in grp])
-        real_bonus = np.array([float(r["bonus"]) for r in grp])
+        match_rows, match_bps = [], []
+        for side in sides:
+            match_rows.extend(side)
+            match_bps.append(_side_bps(side))
+        approx = np.concatenate(match_bps, axis=0)
+
+        real_bps = np.array([float(r["bps"]) for r in match_rows])
+        real_bonus = np.array([float(r["bonus"]) for r in match_rows])
         abs_errs.extend(np.abs(approx[:, 0] - real_bps).tolist())
 
         approx_bonus = award_match_bonus(approx)[:, 0]
-        real_recipients = {r["player_id"] for r, b in zip(grp, real_bonus) if b > 0}
-        approx_recipients = {r["player_id"] for r, b in zip(grp, approx_bonus) if b > 0}
+        real_recipients = {r["player_id"] for r, b in zip(match_rows, real_bonus) if b > 0}
+        approx_recipients = {r["player_id"] for r, b in zip(match_rows, approx_bonus) if b > 0}
         if real_recipients == approx_recipients:
             exact_match += 1
         union = real_recipients | approx_recipients

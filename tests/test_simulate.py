@@ -93,15 +93,10 @@ def _mean_excluding_bonus(n_sims=20000, seed=0):
     bonus90_of = RATES.set_index("player_id")["bonus90"]
     e_minutes_of = MINUTES.set_index("player_id")["e_minutes"]
 
-    position_of = PLAYERS.set_index("player_id")["position"]
     sim_mean, analytic_mean = {}, {}
     for i, pid in enumerate(ids):
-        # `position=` matches build_xp's own call (R10 re-review: xp_next1's
-        # bonus term is now calibrated per position, see BONUS_CALIBRATION),
-        # so the amount subtracted here is the SAME one baked into `analytic`.
         analytic_bonus = expected_bonus_for(bonus90_of.loc[pid], e_minutes_of.loc[pid],
-                                            att_mult_by_team.loc[team_of.loc[pid]],
-                                            position=position_of.loc[pid])
+                                            att_mult_by_team.loc[team_of.loc[pid]])
         sim_mean[pid] = float((samples[i] - bonus[i]).mean())
         analytic_mean[pid] = float(analytic.loc[pid]) - analytic_bonus
     return ids, sim_mean, analytic_mean
@@ -335,10 +330,8 @@ def test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60():
     analytic = build_xp(PLAYERS, RATES, mins, TFX, CFG, from_event=1).set_index(
         "player_id")["xp_next1"]
     i = list(ids).index(3)
-    # Player 3 is Alpha (team_id=1), whose fixture att_mult is 1.25, and DEF
-    # (matches build_xp's own now-calibrated call for this player).
-    analytic_bonus = expected_bonus_for(bonus90=0.30, e_minutes=62.9, att_mult=1.25,
-                                        position="DEF")
+    # Player 3 is Alpha (team_id=1), whose fixture att_mult is 1.25.
+    analytic_bonus = expected_bonus_for(bonus90=0.30, e_minutes=62.9, att_mult=1.25)
     # abs=0.05 is tight enough that the confirmed bug (a ~0.05-0.06 point
     # shift in the clean-sheet term alone at this gap) would fail it; the
     # pre-existing whole-suite tolerance (abs=0.15) was too loose to catch it.
