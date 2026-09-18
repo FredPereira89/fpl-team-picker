@@ -115,8 +115,14 @@ def model_version() -> str:
 
 def record_version(root, *, gw: int, version: str, created_at, origin: str = LIVE,
                    model_version: str = "", config_hash: str = "",
-                   deadline: str | None = None) -> dict:
-    """Append one forecast version. Never replaces an existing record."""
+                   deadline: str | None = None,
+                   snapshot: str | None = None) -> dict:
+    """Append one forecast version. Never replaces an existing record.
+
+    `snapshot` is the `fpl.data.snapshots` version this forecast read, so a
+    replay of the acted-on forecast can reproduce exactly its inputs rather
+    than whichever capture happens to be newest.
+    """
     when = created_at or datetime.now(timezone.utc)
     return _append(root, {
         "kind": "version",
@@ -127,6 +133,7 @@ def record_version(root, *, gw: int, version: str, created_at, origin: str = LIV
         "model_version": str(model_version),
         "config_hash": str(config_hash),
         "deadline": deadline,
+        "snapshot": snapshot,
     })
 
 

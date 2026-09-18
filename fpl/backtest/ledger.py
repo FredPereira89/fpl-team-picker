@@ -55,7 +55,8 @@ def config_fingerprint(cfg) -> str:
 def save_predictions(xp: pd.DataFrame, gw: int, root: Path, cfg=None,
                      sources: dict | None = None, created_at=None,
                      origin: str = manifest.LIVE,
-                     deadline: str | None = None) -> Path:
+                     deadline: str | None = None,
+                     snapshot: str | None = None) -> Path:
     """Write one gameweek's xP frame, keep an immutable copy, and record it.
 
     `gw{n}.parquet` remains a convenience pointer at the most recent write. It
@@ -94,7 +95,7 @@ def save_predictions(xp: pd.DataFrame, gw: int, root: Path, cfg=None,
     manifest.record_version(root, gw=int(gw), version=version, created_at=when,
                             origin=str(origin), model_version=MODEL_VERSION,
                             config_hash=config_fingerprint(cfg),
-                            deadline=deadline)
+                            deadline=deadline, snapshot=snapshot)
     return version_path
 
 

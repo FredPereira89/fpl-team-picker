@@ -436,16 +436,15 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
          if e["id"] == from_event), None)
     # And record what this run could SEE, so a later replay of this gameweek
     # does not have to read today's prices, availability and club assignments.
-    # The first capture wins, because a later run in the same gameweek has seen
-    # team news the deadline had not.
-    snapshots.capture(root, from_event, bootstrap=bootstrap, fixtures=raw_fixtures,
-                      deadline=deadline, final_through=checked_through,
-                      sources=client.source_summary()
-                      if hasattr(client, "source_summary") else {})
+    # Every capture is kept, and the forecast records which one it read.
+    snapshot = snapshots.capture(
+        root, from_event, bootstrap=bootstrap, fixtures=raw_fixtures,
+        deadline=deadline, final_through=checked_through,
+        sources=client.source_summary() if hasattr(client, "source_summary") else {})
     save_predictions(xp, from_event, root, cfg=cfg,
                      sources=client.source_summary()
                      if hasattr(client, "source_summary") else {},
-                     deadline=deadline)
+                     deadline=deadline, snapshot=snapshot)
 
     # actual_mode reflects which branch genuinely ran, not the caller's
     # request -- Mode 2 needs a current_squad to transfer from, and nothing
