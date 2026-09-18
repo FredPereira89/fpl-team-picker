@@ -141,37 +141,75 @@ def _systematic_pps(pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndar
     return order[np.clip(np.searchsorted(cum, marks), 0, len(pi) - 1)]
 
 
-# What a rival XI may cost. A legal fifteen fits in the budget, and the four
-# on the bench cost at least the cheapest keeper plus the three cheapest
-# outfielders in the pool -- so an XI dearer than budget minus that bench
-# belongs to nobody. Without the ceiling the sampler assembled elevens of
-# premiums no manager could own together and overstated the field.
+# What a rival XI may cost: budget minus the cheapest legal bench that
+# completes it, checked exactly per-XI by `_cheapest_legal_bench` below.
+# An earlier version bounded this with a single pool-wide scalar (cheapest
+# keeper + 3 cheapest outfielders in the whole pool, regardless of formation,
+# club cap, or whether those cheap players were already in the XI) -- that
+# passed XIs whose true cheapest bench blew the budget once the actual
+# formation and club cap were accounted for.
 DEFAULT_BUDGET = 100.0
 REPAIR_PASSES = 20
 
 
-def _xi_ceiling(xp_df: pd.DataFrame, budget: float) -> float:
-    if "price" not in xp_df.columns:
-        return float("inf")
-    price = xp_df["price"].astype(float)
-    pos = xp_df["position"]
-    keepers = np.sort(price[pos == "GKP"].to_numpy())
-    outfield = np.sort(price[pos != "GKP"].to_numpy())
-    bench = (keepers[0] if len(keepers) else 0.0) + outfield[:3].sum()
-    return float(budget) - float(bench)
+def _cheapest_legal_bench(xi, pos, club, price, by_pos_sorted) -> float | None:
+    """The cheapest legal bench (position-exact, club-cap-respecting,
+    distinct from the XI) that completes `xi` into a real fifteen, or None
+    if this pool cannot supply one.
+
+    A 3-5-2 XI needs 2 DEF + 0 MID + 1 FWD on the bench, not "any 3
+    outfielders" -- and any cheap player already IN the XI can't also fill
+    a bench slot, nor can one whose club is already at MAX_PER_CLUB once the
+    XI and the bench chosen so far are counted together. This checks the
+    real thing: for each position, exactly
+    `SQUAD_SPLIT[position] - (already in xi)` more players, cheapest first,
+    skipping anyone already in `xi` or whose club is already at
+    MAX_PER_CLUB once the XI and the bench chosen so far are counted
+    together. `by_pos_sorted[position]` must already be sorted by price
+    ascending, so repeated calls during repair stay a linear scan, not a
+    re-sort.
+    """
+    from .squad import SQUAD_SPLIT
+    xi_set = {int(i) for i in xi}
+    club_count: dict = {}
+    for i in xi_set:
+        club_count[club[i]] = club_count.get(club[i], 0) + 1
+    total = 0.0
+    for position, need_total in SQUAD_SPLIT.items():
+        in_xi = sum(1 for i in xi_set if pos[i] == position)
+        need = need_total - in_xi
+        if need <= 0:
+            continue
+        found = 0
+        for i in by_pos_sorted.get(position, ()):
+            if found >= need:
+                break
+            if i in xi_set:
+                continue
+            c = club[i]
+            if club_count.get(c, 0) >= MAX_PER_CLUB:
+                continue
+            total += price[i]
+            club_count[c] = club_count.get(c, 0) + 1
+            found += 1
+        if found < need:
+            return None
+    return total
 
 
-def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos, ceiling: float,
-            rng: np.random.Generator) -> np.ndarray:
+def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos,
+           by_pos_sorted, budget: float, rng: np.random.Generator) -> np.ndarray:
     """Swap players out of a drawn XI until it is a squad someone could own.
 
     Two rules a starting eleven inherits from the fifteen it came from: no
     more than MAX_PER_CLUB from one club, and a price that leaves room for a
-    bench. Each pass replaces one offender -- the cheapest-pull player of an
-    over-represented club, else the dearest player -- with a same-position
-    player drawn by the same start pull from those who do not re-offend.
-    Gives up after REPAIR_PASSES and returns the best it reached, which keeps
-    the sampler total rather than perfect on a pathological pool.
+    LEGAL bench -- checked exactly, via `_cheapest_legal_bench`, not the
+    pool-wide approximation. Each pass replaces one offender -- the
+    cheapest-pull player of an over-represented club, else the dearest
+    player -- with a same-position player drawn by the same start pull from
+    those who do not re-offend. Gives up after REPAIR_PASSES and returns the
+    best it reached, which keeps the sampler total rather than perfect on a
+    pathological pool.
     """
     picked = list(int(i) for i in picked)
     for _ in range(REPAIR_PASSES):
@@ -179,7 +217,10 @@ def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos, ceiling: f
         for i in picked:
             counts[club[i]] = counts.get(club[i], 0) + 1
         over = [c for c, n in counts.items() if n > MAX_PER_CLUB]
-        too_dear = price is not None and sum(price[i] for i in picked) > ceiling
+        too_dear = False
+        if price is not None:
+            bench_cost = _cheapest_legal_bench(picked, pos, club, price, by_pos_sorted)
+            too_dear = bench_cost is None or sum(price[i] for i in picked) + bench_cost > budget
         if not over and not too_dear:
             break
         if over:
@@ -189,24 +230,20 @@ def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos, ceiling: f
             out = max(picked, key=lambda i: price[i])
         remaining = [i for i in picked if i != out]
         pool = [i for i in by_pos[pos[out]] if i not in remaining]
-        cost_now = sum(price[i] for i in remaining) if price is not None else 0.0
         counts_now: dict = {}
         for i in remaining:
             counts_now[club[i]] = counts_now.get(club[i], 0) + 1
-        # Club first, then price: a replacement that fits both is ideal, one
-        # that at least respects the club cap still makes progress, and only a
-        # pool with nothing else at the position falls back to anyone.
+        # Club first; among club-legal candidates prefer the cheaper half
+        # when cost was the problem. This is a HEURISTIC search step, not the
+        # proof -- the stopping condition above re-checks exactly on the next
+        # pass, so an imperfect pick here just costs another iteration.
         club_ok = [i for i in pool if counts_now.get(club[i], 0) < MAX_PER_CLUB]
-        both = [i for i in club_ok if price is None or cost_now + price[i] <= ceiling]
-        if both:
-            legal = both
-        elif club_ok:
-            legal = sorted(club_ok, key=lambda i: price[i] if price is not None else 0)[
-                :max(1, len(club_ok) // 2)]
-        else:
-            legal = [i for i in pool if i != out] or pool
-        w = np.array([max(start_pull[i], 1e-12) for i in legal])
-        new = int(rng.choice(legal, p=w / w.sum()))
+        if not club_ok:
+            club_ok = [i for i in pool if i != out] or pool
+        if too_dear and price is not None and len(club_ok) > 1:
+            club_ok = sorted(club_ok, key=lambda i: price[i])[:max(1, len(club_ok) // 2)]
+        w = np.array([max(start_pull[i], 1e-12) for i in club_ok])
+        new = int(rng.choice(club_ok, p=w / w.sum()))
         picked = remaining + [new]
     return np.array(picked, dtype=int)
 
@@ -238,7 +275,6 @@ def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
             else np.arange(len(xp_df)))          # no club column: nothing to cap
     price = (xp_df["price"].astype(float).to_numpy() if "price" in xp_df.columns
              else None)
-    ceiling = _xi_ceiling(xp_df, budget)
     # Owning a player and STARTING him are different things: a manager owns 15
     # and plays 11, benching the cheap fodder. Weighting slots by ownership
     # alone spreads them evenly over everyone owned, which left a 71%-owned
@@ -247,6 +283,11 @@ def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
     # concentrates the slots on the players managers actually field.
     start_pull = own * np.clip(xp, 0.0, None)
     by_pos = {p: np.flatnonzero(pos == p) for p in ("GKP", "DEF", "MID", "FWD")}
+    # Sorted once here, not per repair pass: `_cheapest_legal_bench` runs up to
+    # REPAIR_PASSES times per rival, so a fresh sort each call would turn an
+    # O(n log n) cost into the dominant cost of the whole sampler.
+    by_pos_sorted = ({p: idx[np.argsort(price[idx])] for p, idx in by_pos.items()}
+                     if price is not None else {})
 
     out = np.zeros((n_rivals, len(xp_df)))
     for r in range(n_rivals):
@@ -280,7 +321,7 @@ def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
                     chosen = np.concatenate([chosen, np.atleast_1d(extra)])
             picked.extend(pool[chosen])
         picked = _repair(np.array(picked, dtype=int), pos, club, price, start_pull,
-                         by_pos, ceiling, rng)
+                         by_pos, by_pos_sorted, budget, rng)
         out[r, picked] = 1.0
         # Managers captain the best player they own, which is what makes the
         # field's armband concentrate on a handful of names.

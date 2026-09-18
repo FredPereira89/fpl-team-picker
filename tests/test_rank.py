@@ -371,15 +371,101 @@ def test_no_rival_starts_more_than_three_from_one_club():
         assert max(counts.values()) <= MAX_PER_CLUB
 
 
+def _by_pos_sorted(pool):
+    import numpy as np
+    price = pool["price"].to_numpy()
+    pos = pool["position"].to_numpy()
+    return {p: np.flatnonzero(pos == p)[np.argsort(price[pos == p])]
+            for p in ("GKP", "DEF", "MID", "FWD")}
+
+
 def test_no_rival_xi_costs_more_than_a_legal_fifteen_allows():
-    from fpl.optimize.rank import sample_rival_squads, _xi_ceiling
-    pool = _crowded_pool()
+    """Every sampled XI must be completable into a real fifteen within
+    budget -- checked exactly via `_cheapest_legal_bench`, not the
+    pool-wide "cheapest keeper + 3 cheapest outfielders" scalar a rival XI
+    could pass while its own specific formation's true bench still blew
+    the budget (C6-6). Uses `_formation_trap_pool`, not `_crowded_pool`:
+    the latter puts every GKP on one club, which makes some XIs genuinely
+    uncompletable regardless of price -- a club-cap pathology `_repair`
+    already documents it may not resolve, not a price-ceiling bug."""
+    from fpl.optimize.rank import sample_rival_squads, _cheapest_legal_bench
+    pool = _formation_trap_pool()
     rivals = sample_rival_squads(pool, n_rivals=300, rng=np.random.default_rng(0),
                                  budget=100.0)
     price = pool["price"].to_numpy()
-    ceiling = _xi_ceiling(pool, 100.0)
+    pos = pool["position"].to_numpy()
+    club = pool["team"].to_numpy()
+    by_pos_sorted = _by_pos_sorted(pool)
     for row in rivals:
-        assert price[np.flatnonzero(row > 0)].sum() <= ceiling + 1e-9
+        xi = np.flatnonzero(row > 0)
+        bench_cost = _cheapest_legal_bench(xi, pos, club, price, by_pos_sorted)
+        assert bench_cost is not None
+        assert price[xi].sum() + bench_cost <= 100.0 + 1e-9
+
+
+def _formation_trap_pool():
+    """A pool where the field's favoured 3-5-2 XI passes the old pool-wide
+    ceiling but cannot actually be completed into a legal fifteen: the
+    pool's 3 globally cheapest outfielders are MIDs, yet a 3-5-2 XI starts
+    all 5 MIDs, so none of those cheap MIDs are available for its bench --
+    which instead needs pricier DEF/FWD. Reproduces the exact scenario from
+    the C6-6 audit finding."""
+    import pandas as pd
+    rows = []
+    pid = 1
+    for price in (4.0, 4.5, 5.0, 5.5):                        # 4 GKP
+        rows.append({"player_id": pid, "position": "GKP", "team": f"T{pid % 8}",
+                     "price": price, "ownership": 30.0, "xp_next1": 4.0, "p_play": 0.9})
+        pid += 1
+    for price in (6.0, 6.2, 6.4, 6.6, 6.8, 7.0, 7.2, 7.4):    # 8 DEF, none cheap
+        rows.append({"player_id": pid, "position": "DEF", "team": f"T{pid % 8}",
+                     "price": price, "ownership": 30.0, "xp_next1": 5.0, "p_play": 0.9})
+        pid += 1
+    for price in (3.5, 3.7, 3.9, 8.0, 8.2, 8.4, 8.6, 8.8):    # 8 MID: 3 cheap + 5 pricier
+        rows.append({"player_id": pid, "position": "MID", "team": f"T{pid % 8}",
+                     "price": price, "ownership": 30.0,
+                     "xp_next1": 6.0 if price > 5.0 else 2.0, "p_play": 0.9})
+        pid += 1
+    for price in (7.0, 7.2, 7.4, 7.6, 7.8):                   # 5 FWD, none cheap
+        rows.append({"player_id": pid, "position": "FWD", "team": f"T{pid % 8}",
+                     "price": price, "ownership": 30.0, "xp_next1": 6.0, "p_play": 0.9})
+        pid += 1
+    return pd.DataFrame(rows)
+
+
+def test_a_ceiling_passing_xi_that_cannot_be_completed_is_repaired():
+    """The exact scenario numerically reproduced during the C6-6 audit: the
+    pool-wide ceiling (84.9) passes a 3-5-2 XI costing 78.8, but that XI's
+    true cheapest legal bench costs 25.3, for a real total of 104.1 against
+    a 100.0 budget -- genuinely infeasible despite passing the old check.
+    `_repair` must not let such an XI survive."""
+    from fpl.optimize.rank import _cheapest_legal_bench, _repair
+
+    pool = _formation_trap_pool()
+    price = pool["price"].to_numpy()
+    pos = pool["position"].to_numpy()
+    club = pool["team"].to_numpy()
+    by_pos_sorted = _by_pos_sorted(pool)
+    by_pos = {p: np.flatnonzero(pos == p) for p in ("GKP", "DEF", "MID", "FWD")}
+    start_pull = np.ones(len(pool))
+
+    gkp = [0]                                    # cheapest GKP
+    def_ = [4, 5, 6]                              # 3 cheapest DEF
+    mid = [15, 16, 17, 18, 19]                    # all 5 MID (the 5 pricier ones)
+    fwd = [20, 21]                                # 2 cheapest FWD
+    trap_xi = np.array(gkp + def_ + mid + fwd)
+
+    trap_cost = price[trap_xi].sum()
+    true_bench = _cheapest_legal_bench(trap_xi, pos, club, price, by_pos_sorted)
+    assert trap_cost == pytest.approx(78.8)
+    assert true_bench == pytest.approx(25.3)
+    assert trap_cost + true_bench > 100.0          # confirms the trap is real
+
+    repaired = _repair(trap_xi, pos, club, price, start_pull, by_pos,
+                       by_pos_sorted, 100.0, np.random.default_rng(0))
+    bench_cost = _cheapest_legal_bench(repaired, pos, club, price, by_pos_sorted)
+    assert bench_cost is not None
+    assert price[repaired].sum() + bench_cost <= 100.0 + 1e-9
 
 
 def test_repair_keeps_eleven_starters_and_one_captain():
