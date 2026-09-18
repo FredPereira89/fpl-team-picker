@@ -365,6 +365,67 @@ unfixable residual above, not a regression in the fix).
 
 Suite after this review: **748 passed, 1 warning**.
 
+### R10 fifth review (2026-09-18) — the clean-sheet fix broke teammate correlation; analytic xP still diverged; GKP save value was under-fit. All fixed and verified
+
+1. **High, FIXED.** The 4th review's `conceded_on` fix independently
+   thinned EACH player via `rng.binomial` on an `(n, n_sims)` array --
+   which still draws one INDEPENDENT sample per player-scenario cell, so
+   two defenders with the IDENTICAL playing window could disagree about
+   the SAME goal. Confirmed: two identical 60-minute players disagreed in
+   44.4% of scenarios (exactly `2*p*(1-p)` at `p=60/90`), undermining the
+   whole simulator's purpose (teammate correlation). Fixed with a new
+   `_conceded_on()`: the match's conceded goals now get ONE shared
+   simulated timing per scenario (each goal a Uniform(0,1) match-fraction,
+   common to every player on that side), and each player counts how many
+   of those SAME timed goals fall in his own interval (`[0, share]` if
+   started, `[1-share, 1]` if he came on as a sub). Re-verified: 0%
+   disagreement between identical players, same marginal mean as before.
+2. **High, FIXED.** `xp_for_fixture` still used `p_cs * CS_PTS * p_60`
+   (`p_cs` = the FULL match's clean-sheet probability), inconsistent with
+   the simulation's now-correct per-player rule. Measured gap for a
+   certain 60-minute defender facing xgc=2: simulation 2.619 vs analytic
+   2.107 (0.512pts). Fixed with `p_clean_sheet_over_minutes()`, modelling
+   conceded goals as a homogeneous Poisson process so a `minutes`-long
+   window's clean-sheet probability is `exp(-xgc*minutes/90)` --
+   deliberately NOT routed through the existing `minutes_branches` helper,
+   since that treats "started" as always reaching the full `m_start` with
+   no separate early-withdrawal chance, which this term's hard 60-minute
+   cutoff is sensitive to in a way the OTHER (smoothly-integrated)
+   threshold terms are not; the new function instead weights by
+   `min(p_60, p_start)` directly, mirroring the simulation's own
+   `p60_given_start`. Re-measured: gap down to 0.0016pts (Monte Carlo
+   noise floor).
+3. **Medium, FIXED.** The prior regression test inferred a "clean-sheet
+   rate" from `samples - 2`, which still carried bonus and other
+   components and did not isolate the event (reconstructing the pre-fix
+   formula also happened to pass it). `conceded_on` is now exposed
+   directly on `simulate_event_detailed`'s output, so the event
+   (`conceded_on == 0`) is asserted directly; a SEPARATE new test covers
+   finding 1 specifically (two identical teammates' `conceded_on` must
+   agree in >99.5% of scenarios).
+4. **Medium, FIXED with a data-fitted value.** The GKP residual diagnosis
+   was wrong on two counts: it is NOT "fairly flat regardless of save
+   count" (real correlation 0.477, ~0.894 extra BPS per save, 95% CI
+   [0.52, 1.26], residual rising from ~3.86 at zero saves to ~8.50 at
+   five), and the inside-box save bonus is not merely "possibly" part of
+   the rules. `BPS_SAVE` raised from 2.0 to 2.9 (base + the fitted slope,
+   rounded); GKP MAE improved 6.26 -> 3.82 on the live validation. The
+   save-count-INDEPENDENT part of the residual (~3.6-3.86 at zero saves)
+   remains a separate, likely passing-accuracy-driven gap with no data to
+   close it.
+5. **Low, FIXED.** `validate_bps.py` still called `logo_cv` an "honest
+   OUT-OF-SAMPLE check" in two places, contradicting the exploratory-CV
+   caveat the 4th review added. Both reworded to state plainly that the
+   candidate grid was designed after seeing all 4 cached gameweeks.
+
+Live validation after all five fixes: 42.5% exact bonus-recipient match,
+0.684 mean Jaccard, 0.769 recall, 3.45 BPS MAE overall (GKP 3.82 / DEF 3.74
+/ MID 3.40 / FWD 2.58). DC weights unchanged by the save-value fix (`{"GKP":
+0.4, "DEF": 0.8, "MID": 0.9, "FWD": 0.6}`, still selected on every
+leave-one-gameweek-out fold, mean held-out MAE 3.45 vs uniform-0.6's 3.82).
+
+Suite after this review: **749 passed, 1 warning**.
+
 ### Open residuals worth knowing
 
 - Assists are still drawn independently of goals in the simulation.
