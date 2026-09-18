@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **670 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **673 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -49,6 +49,17 @@ the pinned-snapshot, calibrated, horizon-start path.
 | 3. Claude misread the smoke run: 164/160 vs 101/100 were three- vs two-gameweek totals, not a config effect — GW1–3 have no archived config in this checkout | Acknowledged; no code change. |
 
 Codex's re-review findings are kept below for the record.
+
+## P2 progress (started 2026-09-18 after review 5)
+
+| Item | Status | Where |
+|---|---|---|
+| B8 exact one-week XI for the report | **done** — `lineup.best_xi()` enumerates legal formations; `build_lineup(exact=True)` is the default and the replay's armband goes through it | `fpl/optimize/lineup.py` |
+| B7a simulated means agree with calibrated xP | in progress — plan: `simulate.moment_match(samples, ids, xp)` scales each player's samples to `xp_next1` inside `pipeline._rank_context` | `fpl/model/simulate.py`, `fpl/pipeline.py` |
+| B7b report the captain the rank layer scored | in progress — plan: when `rank_stats["decided_by"] == "rank"` (or Mode 1 rank choice) and the rank captain is in the exact XI, the lineup's captain is set to him | `fpl/pipeline.py` |
+| R3 coherent match scenarios | not started — plan: `simulate_event` loops per FIXTURE; team A's goals ~ Poisson(B's `xgc`), allocated to A's on-pitch players with per-sim shares `w_i / max(Σw, xgc)` so attacker marginals are preserved when the player total is within the team total and scaled to it otherwise; B's `conceded_team` is that same draw, so a goal against a clean sheet in the same match is impossible. Assists and bonus stay independent (documented residual; R10 is P3). A lone team row (no opponent in `tfx`) falls back to G ~ Poisson(Σw). | `fpl/model/simulate.py` |
+| R2 rival field legality | not started — enforce budget/club cap in `rank.sample_rival_squads`; cohort picks need data the repo does not fetch | `fpl/optimize/rank.py` |
+| R1 Mode 1 objective | needs a decision from the user (see "Still-open model work") | — |
 
 ## Re-review findings
 
