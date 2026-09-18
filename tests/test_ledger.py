@@ -315,18 +315,19 @@ def test_a_replay_write_does_not_change_what_the_ledger_serves(tmp_path):
     assert served["xp_next1"].max() == 5.0
 
 
-def test_a_post_deadline_rerun_does_not_displace_the_actioned_forecast(tmp_path):
+def test_a_later_rerun_does_not_displace_the_actioned_forecast(tmp_path):
+    """Both writes are pre-deadline here (the deadline is far in the future);
+    the point is that an actioned marker beats recency."""
     from fpl.backtest.ledger import save_predictions, load_predictions
     from fpl.backtest.manifest import mark_actioned
 
-    save_predictions(_frame(), 5, tmp_path, origin="live",
-                     deadline="2026-09-11T17:30:00Z")
-    mark_actioned(tmp_path, gw=5)
+    deadline = "2099-01-01T00:00:00Z"
+    save_predictions(_frame(), 5, tmp_path, origin="live", deadline=deadline)
+    assert mark_actioned(tmp_path, gw=5, deadline=deadline) is not None
 
     later = _frame()
     later["xp_next1"] = [1.0, 1.0]
-    save_predictions(later, 5, tmp_path, origin="live",
-                     deadline="2026-09-11T17:30:00Z")
+    save_predictions(later, 5, tmp_path, origin="live", deadline=deadline)
 
     assert load_predictions(5, tmp_path)["xp_next1"].max() == 5.0
 

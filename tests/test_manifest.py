@@ -85,3 +85,42 @@ def test_the_model_version_is_not_a_hand_maintained_date():
     the one in the ledger predated several core commits."""
     v = model_version()
     assert isinstance(v, str) and v
+
+
+# --- RB8: --confirm must identify the forecast actually acted on ---
+
+def test_marking_actioned_with_a_deadline_picks_the_last_pre_deadline_version(tmp_path):
+    """A confirmation run writes its OWN forecast first, so 'newest' is the
+    confirmation's forecast, not the planning one the manager acted on."""
+    deadline = "2026-09-11T17:30:00Z"
+    _record(tmp_path, version="plan", day=10, deadline=deadline)
+    _record(tmp_path, version="confirm-rerun", day=12, deadline=deadline)   # after
+    marked = mark_actioned(tmp_path, gw=5, deadline=deadline)
+    assert marked["version"] == "plan"
+    assert select_version(tmp_path, 5, deadline=deadline)["version"] == "plan"
+
+
+def test_a_post_deadline_version_is_refused_as_actioned(tmp_path):
+    """An explicitly actioned post-deadline forecast would win unconditionally
+    and enter calibration knowing the team news."""
+    deadline = "2026-09-11T17:30:00Z"
+    _record(tmp_path, version="late", day=12, deadline=deadline)
+    assert mark_actioned(tmp_path, gw=5, version="late", deadline=deadline) is None
+    assert mark_actioned(tmp_path, gw=5, deadline=deadline) is None
+
+
+def test_an_explicit_version_is_honoured_when_it_is_pre_deadline(tmp_path):
+    deadline = "2026-09-11T17:30:00Z"
+    _record(tmp_path, version="v1", day=9, deadline=deadline)
+    _record(tmp_path, version="v2", day=10, deadline=deadline)
+    marked = mark_actioned(tmp_path, gw=5, version="v1", deadline=deadline)
+    assert marked["version"] == "v1"
+    assert select_version(tmp_path, 5)["version"] == "v1"
+
+
+def test_timestamps_compare_as_instants_not_strings(tmp_path):
+    """created_at is ISO with +00:00; deadlines from the API end in Z."""
+    deadline = "2026-09-11T17:30:00Z"
+    record_version(tmp_path, gw=5, version="edge", created_at=_when(11, 17),
+                   origin="live", deadline=deadline)
+    assert select_version(tmp_path, 5, deadline=deadline)["version"] == "edge"

@@ -32,6 +32,35 @@ LIVE, REPLAY = "live", "replay"
 FALLBACK_MODEL_VERSION = "unversioned"
 
 
+def _instant(value) -> datetime | None:
+    """An ISO timestamp as a comparable instant, or None.
+
+    `created_at` is written as ISO with `+00:00`; FPL deadlines end in `Z`.
+    Comparing those as strings happens to work for different dates and fails
+    at the edges, so both are parsed. A naive value is taken as UTC.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _before(created, deadline) -> bool:
+    a, b = _instant(created), _instant(deadline)
+    if a is None or b is None:
+        return False
+    return a < b
+
+
 def _path(root) -> Path:
     return Path(root) / LEDGER_DIR / MANIFEST_FILE
 
@@ -116,21 +145,42 @@ def _actioned(root, gw: int) -> str | None:
     return marks[-1]["version"] if marks else None
 
 
-def mark_actioned(root, gw: int, version: str | None = None, when=None) -> dict | None:
+def mark_actioned(root, gw: int, version: str | None = None, when=None,
+                  deadline: str | None = None) -> dict | None:
     """Record that a forecast version was the one acted on.
 
-    Called when a gameweek is confirmed. With no `version` this marks the newest
-    recorded one, which is what a confirmation immediately after a planning run
-    means. Returns the version record that was marked, or None if there is
-    nothing recorded for that gameweek.
+    Called when a gameweek is confirmed. Which version that is turns out to be
+    the whole question, because a confirmation run writes its OWN forecast
+    first: "the newest" is then the confirmation's forecast, not the planning
+    one the manager looked at when deciding. So with a `deadline` the default
+    is the newest LIVE version made strictly before it -- the last forecast the
+    manager could actually have seen -- and a version made after the deadline
+    is refused outright, explicitly named or not, because an actioned marker
+    beats everything in `select_version` and a post-deadline forecast would
+    carry the team news into calibration.
+
+    Returns the version record that was marked, or None if nothing qualified.
     """
-    available = entries(root, gw)
-    if not available:
+    live = [e for e in entries(root, gw) if e.get("origin") == LIVE]
+    if not live:
         return None
-    chosen = (next((e for e in reversed(available) if e["version"] == version), None)
-              if version is not None else available[-1])
-    if chosen is None:
-        return None
+    cutoff = deadline or next((e.get("deadline") for e in reversed(live)
+                               if e.get("deadline")), None)
+
+    if version is not None:
+        chosen = next((e for e in reversed(live) if e["version"] == version), None)
+        if chosen is None:
+            return None
+        if cutoff and not _before(chosen.get("created_at"), cutoff):
+            return None
+    elif cutoff:
+        eligible = [e for e in live if _before(e.get("created_at"), cutoff)]
+        if not eligible:
+            return None
+        chosen = eligible[-1]
+    else:
+        chosen = live[-1]
+
     stamp = when or datetime.now(timezone.utc)
     _append(root, {
         "kind": "actioned",
@@ -166,7 +216,7 @@ def select_version(root, gw: int, deadline: str | None = None) -> dict | None:
     cutoff = deadline or next((e.get("deadline") for e in reversed(live)
                                if e.get("deadline")), None)
     if cutoff:
-        before = [e for e in live if str(e.get("created_at", "")) < str(cutoff)]
+        before = [e for e in live if _before(e.get("created_at"), cutoff)]
         if before:
             return before[-1]
     return live[-1]

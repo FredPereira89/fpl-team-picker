@@ -60,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
                          "chip — a recommendation is not an action, and "
                          "confirming one you did not play spends it for "
                          "the season.")
+    ap.add_argument("--forecast-version", default=None,
+                    help="with --confirm: the forecast version id (from "
+                         "data/predictions/manifest.jsonl) the decision was based "
+                         "on. Defaults to the newest live forecast made before the "
+                         "deadline. A post-deadline version is refused.")
     ap.add_argument("--config", type=Path, default=ROOT / "config.yaml")
     ap.add_argument("--overrides", type=Path, default=ROOT / "data" / "overrides.yaml",
                     help="team-news p_start overrides (see fpl/data/overrides.py)")
@@ -164,10 +169,20 @@ def main(argv: list[str] | None = None) -> int:
                                    base_squad=list(current_squad),
                                    base_bank=bank,
                                    base_purchase_prices=dict(purchase_prices))
-        # Name the forecast that was acted on. Without this the ledger scores
-        # and calibrates on whichever version happened to be written last,
-        # which after a confirmation re-run is not the one that chose the team.
-        mark_actioned(data_root, args.gw)
+        # Name the forecast that was acted on. This run has just written its
+        # OWN forecast, so "newest" would be the confirmation's, not the planning
+        # one the manager looked at -- hence the deadline: the default is the
+        # newest live version made before it, and a post-deadline version is
+        # refused so it cannot carry the team news into calibration.
+        deadline = rec.deadline if "T" in str(rec.deadline) else None
+        marked = mark_actioned(data_root, args.gw, version=args.forecast_version,
+                               deadline=deadline)
+        if marked is None:
+            print("\nWARNING: no pre-deadline forecast could be marked as the one "
+                  "acted on (this run is after the deadline, or the named "
+                  "--forecast-version was not eligible). The squad and chip were "
+                  "recorded; the ledger will score the newest pre-deadline "
+                  "forecast on file, if any.")
         print(f"\nRecorded GW{args.gw} as played: {transfers_made} transfer(s), "
               f"chip {chip or 'none'}, bank £{written.bank}m, "
               f"{written.free_transfers_remaining} free transfer(s) left this week, "
