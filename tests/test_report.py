@@ -205,3 +205,68 @@ def test_a_held_chip_is_labelled_as_a_hold_not_as_no_advice():
     # just as visually distinct from the "nothing doing" fallback, which is a
     # bare unmarked sentence.
     assert "**Hold until GW29**" in out
+
+
+# --- C6-3: the report must not claim rank decided when it did not ---
+
+def test_the_field_section_says_expected_points_decided_when_they_did():
+    """rec.rank is populated for DIAGNOSTIC purposes whenever the rank layer
+    ran, even when it did not choose the squad -- the report used to claim
+    'Chosen ... by how often each beat a simulated field' unconditionally,
+    which is false whenever expected points over the horizon decided."""
+    rec = _rec()
+    rec.rank = {"p_beat_target": 0.63, "rank_percentile": 0.71, "mean_points": 58.4,
+               "sd_points": 14.2, "n_candidates": 8, "target": 0.5,
+               "captain": rec.lineup.captain,
+               "decided_by": "expected points over the horizon"}
+    text = render(rec, XP)
+    assert "not by expected points alone" not in text
+    assert "expected points over the horizon" in text.lower()
+
+
+def test_the_field_section_still_credits_rank_when_rank_decided():
+    rec = _rec()
+    rec.rank = {"p_beat_target": 0.63, "rank_percentile": 0.71, "mean_points": 58.4,
+               "sd_points": 14.2, "n_candidates": 8, "target": 0.5,
+               "captain": rec.lineup.captain, "decided_by": "rank"}
+    text = render(rec, XP)
+    assert "not by expected points alone" in text
+
+
+def test_the_hold_message_names_expected_points_when_they_decided():
+    """The old text ('none beat the field more often than holding') is a
+    claim about the RANK objective specifically, and was shown even when
+    expected points decided the hold."""
+    rec = _rec()
+    rec.mode = 2
+    rec.transfers = type("T", (), {"n_transfers": 0, "out_ids": [], "in_ids": [],
+                                   "hit_cost": 0, "gain": 0.0, "net_xp": 50.0,
+                                   "baseline_xp": 50.0})()
+    rec.rank = {"p_beat_target": 0.5, "rank_percentile": 0.5, "mean_points": 60.0,
+               "sd_points": 15.0, "n_candidates": 8, "target": 0.5, "captain": 1,
+               "decided_by": "expected points over the horizon"}
+    out = render(rec, XP)
+    assert "beat the field" not in out.lower()
+    assert "already optimal on projected points" in out
+
+
+def test_a_rejected_rank_captain_is_disclosed_not_hidden():
+    """_honour_rank_captain records captain_reported=False when the rank
+    layer's preferred captain is not in the exact weekly XI -- that caveat
+    was computed and then never shown anywhere."""
+    rec = _rec()
+    rec.rank = {"p_beat_target": 0.63, "rank_percentile": 0.71, "mean_points": 58.4,
+               "sd_points": 14.2, "n_candidates": 8, "target": 0.5,
+               "captain": 99, "decided_by": "rank", "captain_reported": False}
+    text = render(rec, XP)
+    assert "not in this week" in text.lower()
+
+
+def test_an_honoured_rank_captain_carries_no_extra_caveat():
+    rec = _rec()
+    rec.rank = {"p_beat_target": 0.63, "rank_percentile": 0.71, "mean_points": 58.4,
+               "sd_points": 14.2, "n_candidates": 8, "target": 0.5,
+               "captain": rec.lineup.captain, "decided_by": "rank",
+               "captain_reported": True}
+    text = render(rec, XP)
+    assert "not in this week" not in text.lower()

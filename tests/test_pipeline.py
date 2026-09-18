@@ -781,3 +781,75 @@ def test_mode_one_lets_rank_decide_only_when_asked(tmp_path):
     rec, _ = run(Config(rank_sims=300, rank_candidates=3, budget=100.0, rank_squad=True),
                  mode=1, from_event=1, root=tmp_path, client=FakeClient())
     assert rec.rank["decided_by"] == "rank"
+
+
+# --- C6-2/C6-3: rank stats must describe the XI actually reported ---
+
+def test_honour_rank_captain_recomputes_lineup_xp_when_captain_changes():
+    """`Lineup.xp` = sum(XI xp) + captain's own xp again (the armband double).
+    Overriding the captain without recomputing this left the report's own
+    total stale -- built_lineup's number, for a captain that was no longer
+    the one reported."""
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+    xp = pd.DataFrame({"player_id": [1, 2, 3], "xp_next1": [5.0, 6.0, 4.0]})
+    # As build_lineup would have produced it: xi sum (15) + captain 2's own xp (6) = 21.
+    lineup = Lineup(xi=[1, 2, 3], bench=[], formation="x", captain=2, vice=1, xp=21.0)
+    out, stats = _honour_rank_captain(lineup, {"captain": 1, "decided_by": "rank"}, xp)
+    assert out.captain == 1
+    # Correct total with captain 1: xi sum (15) + captain 1's own xp (5) = 20.
+    assert out.xp == pytest.approx(20.0)
+
+
+def test_rank_scoring_and_captaincy_use_the_exact_weekly_xi_not_the_horizon_one():
+    """Sixth review C6-2: every candidate out of enumerate_squads carries the
+    solver's HORIZON XI (fixed for the whole projection window). Scoring rank
+    diagnostics and picking a captain from that XI, before B8's exact-weekly
+    re-pick happened, meant the reported P(beat target)/mean_points and the
+    rank-chosen captain described a lineup that was not the one shown. Here
+    player 13 is a bench-worthy FWD on the horizon (weak xp_horizon) but
+    utterly dominant THIS week (huge xp_next1): the exact weekly XI must
+    start him, and rank's own captain choice and diagnostics must reflect
+    that, not the horizon XI that benches him."""
+    from fpl.pipeline import _choose_squad
+
+    ids = list(range(1, 16))
+    pos_order = (["GKP"] * 2 + ["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3)
+    clubs = [f"T{i % 5}" for i in range(15)]
+    xp_next1 = {i: 3.0 for i in ids}
+    xp_horizon = {i: 6.0 for i in ids}
+    xp_next1[13], xp_horizon[13] = 50.0, 3.0     # weak on the horizon, huge this week
+    xp_next1[14], xp_horizon[14] = 1.0, 15.0     # the horizon's preferred FWD
+    xp_next1[15], xp_horizon[15] = 1.0, 8.0
+
+    xp = pd.DataFrame({
+        "player_id": ids, "web_name": [f"P{i}" for i in ids], "team": clubs,
+        "position": pos_order, "price": [5.0] * 15, "ownership": [5.0] * 15,
+        "xp_next1": [xp_next1[i] for i in ids], "xp_next5": [xp_horizon[i] for i in ids],
+        "xp_horizon": [xp_horizon[i] for i in ids], "p_start": [0.9] * 15,
+        "p_play": [0.9] * 15, "e_minutes": [80.0] * 15, "confidence": ["high"] * 15,
+        "flags": [[] for _ in ids],
+    })
+    players = pd.DataFrame({"player_id": ids, "team_id": [i % 5 for i in range(15)],
+                            "position": pos_order, "selected_by_percent": [5.0] * 15})
+    rates = pd.DataFrame({"player_id": ids, "xg90": [0.3] * 15, "xa90": [0.1] * 15,
+                         "bonus90": [0.2] * 15, "dc90": [2.0] * 15,
+                         "saves90": [0.0] * 15, "cards90": [0.05] * 15})
+    minutes = pd.DataFrame({"player_id": ids, "p_start": [0.9] * 15, "p_play": [0.92] * 15,
+                           "p_60": [0.8] * 15, "m_start": [80.0] * 15,
+                           "e_minutes": [75.0] * 15, "confidence": ["high"] * 15,
+                           "flags": [[] for _ in ids]})
+    tfx = pd.DataFrame([{"team_id": c, "event": 1, "fixture_id": c,
+                        "opponent_id": (c + 1) % 5, "is_home": True, "xgc": 1.0,
+                        "p_cs": 0.3, "att_mult": 1.0, "opp_threat": 1.0}
+                       for c in range(5)])
+    cfg = Config(budget=200.0, horizon_gw=1, rank_sims=2000, rank_candidates=1,
+                rank_diversity=1, rank_squad=True, rank_target=0.5)
+
+    squad, rank_stats = _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event=1)
+    assert 13 in squad.starting_ids, "the exact weekly XI must start the dominant player"
+    assert 13 not in {14, 15}  # sanity: didn't just echo the horizon pick
+    assert rank_stats["captain"] == 13, "rank's own captain choice must come from the same XI"
+    # A candidate scored on the horizon XI (without player 13 at all) tops out
+    # in the 30s; only a genuinely fixed scoring path reaches this high.
+    assert rank_stats["mean_points"] > 80

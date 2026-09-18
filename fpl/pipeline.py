@@ -29,7 +29,7 @@ from .model.simulate import simulate_event, moment_match
 from .optimize.squad import optimize_squad, enumerate_squads, Squad
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
                             field_bar, required_rivals, RIVALS)
-from .optimize.lineup import build_lineup
+from .optimize.lineup import build_lineup, best_xi
 from .optimize.chips import advise_chips, ChipAdvice
 from .optimize.actions import wildcard_action, freehit_action
 from .optimize.transfers import (optimize_transfers, enumerate_transfer_plans,
@@ -222,7 +222,13 @@ def _honour_rank_captain(lineup, rank_stats, xp):
         frame = xp.set_index("player_id")
         others = [i for i in lineup.xi if i != captain]
         vice = max(others, key=lambda i: (float(frame.loc[i, "xp_next1"]), -i))
-        lineup = replace(lineup, captain=captain, vice=vice)
+        # Lineup.xp = sum(XI xp) + the captain's own xp again (the armband
+        # double). Overriding the captain without recomputing this left the
+        # report's headline total describing the OLD captain: the number
+        # shown and the armband shown belonged to two different decisions.
+        xi_total = sum(float(frame.loc[i, "xp_next1"]) for i in lineup.xi)
+        new_xp = round(xi_total + float(frame.loc[captain, "xp_next1"]), 3)
+        lineup = replace(lineup, captain=captain, vice=vice, xp=new_xp)
     stats["captain_reported"] = True
     return lineup, stats
 
@@ -287,6 +293,36 @@ def _squad_quality(xp, cfg, current_squad, bank, selling, best_plan):
     )
 
 
+def _with_weekly_xi(candidates, xp):
+    """Replace each candidate's `starting_ids` with the EXACT one-week XI.
+
+    Every candidate out of `enumerate_squads`/`enumerate_transfer_plans`
+    still carries the solver's discounted-HORIZON XI -- the one it holds
+    fixed for the whole projection window (B8's known limitation). Rank
+    scoring (`score_candidate`, `best_captain_by_rank`) and the gain
+    diagnostic (`_p_gain_positive`) used to run on that horizon XI, then the
+    pipeline re-picked the exact weekly XI only AFTERWARDS for the report --
+    so the default rank diagnostics described a different lineup from the
+    one shown, the rank-preferred captain could be a player benched in the
+    exact XI, and an opt-in `rank_squad`/`rank_transfers` could decide on a
+    lineup that was never actually fielded.
+
+    `best_xi` is a pure function of the fifteen and the projection column, so
+    substituting it here -- ONCE, before any scoring happens -- makes every
+    later recompute (the final `build_lineup` call) agree with it exactly;
+    there is no way for the two to drift apart afterwards. `net_xp`/
+    `gross_xp`/`gain` (the horizon totals reported as "suggested net gain") are
+    untouched: those describe the multi-gameweek decision the solver actually
+    made and do not depend on which single week's XI is being displayed.
+    """
+    from dataclasses import replace
+    out = []
+    for c in candidates:
+        full = list(getattr(c, "squad_ids", None) or c.player_ids)
+        out.append(replace(c, starting_ids=best_xi(full, xp, xp_col="xp_next1")))
+    return out
+
+
 def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                       current_squad, bank, free_transfers, selling):
     """This week's transfer plan, chosen on discounted multi-gameweek net points.
@@ -312,6 +348,8 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
         plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
                                          xp_col=HORIZON_COL, selling_prices=selling,
                                          k=int(cfg.rank_candidates))
+        if plans:
+            plans = _with_weekly_xi(plans, xp)
 
     if plans and int(cfg.rank_sims) > 0 and bool(getattr(cfg, "rank_transfers", False)):
         ids, samples, rival_scores, target, n_needed, bar = _rank_context(
@@ -365,6 +403,7 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
                                   min_different=int(cfg.rank_diversity))
     if not candidates:
         return optimize_squad(xp, cfg, xp_col=HORIZON_COL), None
+    candidates = _with_weekly_xi(candidates, xp)
 
     # The bar for the configured target is drawn from as many rivals as that
     # target needs -- 400 cannot locate anything past about the 99th

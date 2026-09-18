@@ -91,6 +91,23 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         r = rec.rank
         bar = ("the median manager" if abs(float(r["target"]) - 0.5) < 1e-9
                else f"the top {(1 - float(r['target'])) * 100:.0f}% of managers")
+        # Whichever objective actually decided, this paragraph is always a
+        # true statement about how the REPORTED team fares against the field
+        # -- rank_stats is scored on the exact same XI now (C6-2). Only the
+        # SELECTION sentence that follows has to say which objective chose
+        # it: with expected points deciding by default, "chosen by how often
+        # it beat the field" would be false.
+        decided_by_rank = r.get("decided_by", "rank") == "rank"
+        selection = (
+            f"Chosen from {r['n_candidates']} candidate squads by how often "
+            f"each beat a simulated field, not by expected points alone — "
+            f"points your rivals also score do not move your rank."
+            if decided_by_rank else
+            f"Chosen from {r['n_candidates']} candidate squads by discounted "
+            f"expected points over the horizon; the figures above are how "
+            f"that choice happens to fare against a simulated field, not what "
+            f"selected it."
+        )
         out += [
             "### Against the field",
             f"Projected {r['mean_points']:.1f} points (± {r['sd_points']:.1f}), "
@@ -98,9 +115,7 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
             f"gameweeks and finishes ahead of "
             f"**{r['rank_percentile']:.0%}** of rival squads on average.",
             "",
-            f"Chosen from {r['n_candidates']} candidate squads by how often "
-            f"each beat a simulated field, not by expected points alone — "
-            f"points your rivals also score do not move your rank.",
+            selection,
             "",
             "> These percentages are **relative, not a forecast**. Both your "
             "squad and the simulated field are drawn from this model's own "
@@ -110,6 +125,16 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
             "candidate squads, not to predict your finishing rank.",
             "",
         ]
+        # `_honour_rank_captain` rejects the rank-preferred captain when he is
+        # not in the exact weekly XI -- a real, silent divergence between what
+        # rank chose and what is fielded, and it was recorded but never shown.
+        if decided_by_rank and r.get("captain_reported") is False:
+            out += [
+                "> The captain rank would have preferred is not in this week's "
+                "exact starting XI, so the armband below is the lineup's own "
+                "choice instead.",
+                "",
+            ]
 
     out.append("### Bench (in order)")
     for n, pid in enumerate(lu.bench, start=1):
@@ -142,10 +167,11 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
     out.append("### Transfers this week")
     t = rec.transfers
     if t is None or t.n_transfers == 0:
-        if rec.mode == 2 and rec.rank:
-            # Naming the objective matters: with the rank layer on, holding was
-            # chosen because no plan beat the field by more than its hit cost,
-            # which is a different test from "no plan gains projected points".
+        # Naming the objective matters. Whether holding won because no plan
+        # beat the field, or because no plan gained discounted points over
+        # the horizon, are different claims -- and since B6/R1 the horizon
+        # decides by default, with rank only reporting on the result.
+        if rec.mode == 2 and rec.rank and rec.rank.get("decided_by", "rank") == "rank":
             out.append(
                 f"No transfer recommended — of {rec.rank['n_candidates']} plans "
                 f"considered, none beat the field more often than holding once "
