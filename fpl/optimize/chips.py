@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import pandas as pd
 
-from ..chips import chip_available, chip_blocked_reason
+from ..chips import chip_available, chip_blocked_reason, chip_window, FIRST_HALF_LAST
 from .actions import bench_boost_value, triple_captain_value
 from .objective import event_columns
 
@@ -145,7 +145,7 @@ def _timing(value_now: float, by_event: dict[int, float], from_event: int,
     """
     bar, target = patience_bar(exposure, from_event, last_event, horizon_last,
                                kind, squad_size)
-    future = {e: v for e, v in by_event.items() if e > from_event}
+    future = {e: v for e, v in by_event.items() if from_event < e <= last_event}
     if future:
         best_event = max(future, key=lambda e: future[e])
         if future[best_event] > value_now:
@@ -171,6 +171,13 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     """
     df = xp_df.set_index("player_id")
     events = list(chip_events or [])
+    # A chip can only be held as far as ITS window reaches. The first set
+    # expires at GW19, so a second-half double is no reason to hold a
+    # first-half chip -- by then it is gone, and the second copy will be there
+    # for that double regardless. Advising "hold for GW29" in October was
+    # advising the manager to forfeit a chip.
+    if chip_window(from_event) == 1:
+        last_event = min(int(last_event), FIRST_HALF_LAST)
 
     def usable(name: str) -> bool:
         return chip_available(name, from_event, events, first_event)
@@ -222,7 +229,7 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     # and blanks are known from the fixture list for the whole rest of the
     # season. A bigger blank week ahead simply outranks a smaller one now.
     future_blanks = {e: v["blanks"] for e, v in exposure.items()
-                     if e > from_event and v["blanks"] > blanks}
+                     if from_event < e <= last_event and v["blanks"] > blanks}
     fh_target = (max(future_blanks, key=lambda e: (future_blanks[e], -e))
                  if future_blanks else None)
     free_hit_ok = blanks >= FREE_HIT_MIN_BLANKS and fh_target is None

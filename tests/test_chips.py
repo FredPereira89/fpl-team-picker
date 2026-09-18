@@ -239,24 +239,26 @@ def test_triple_captain_fires_when_this_week_is_the_best_visible_week():
 
 def test_a_double_beyond_the_horizon_holds_a_merely_good_captain_week():
     """GW5's 10.0 armband clears the bare threshold, but a full-squad double in
-    GW20 raises the bar above it. Raise the bar, don't veto."""
+    GW15 raises the bar above it. Raise the bar, don't veto. (GW15, not the
+    GW20 this once used: a first-half chip expires at GW19, so a second-half
+    double is no reason to hold one -- see R9.)"""
     from fpl.optimize.chips import advise_chips
 
     xp = _xp_with_events({
         5: [10.0] + [4.0] * 10 + [1.0] * 4,
         6: [6.0] + [4.0] * 10 + [1.0] * 4,
     })
-    counts = _multi_counts([(1, 5, 1), (1, 6, 1), (1, 20, 2)])
+    counts = _multi_counts([(1, 5, 1), (1, 6, 1), (1, 15, 2)])
 
     a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, 5, [],
                      last_event=38)
 
     assert a.chip != "triplecaptain"
-    assert a.hold_until == 20
+    assert a.hold_until == 15
 
 
 def test_a_standout_captain_week_still_fires_through_a_beyond_horizon_double():
-    """Same GW20 double, but a 25.0 armband this week clears even the raised
+    """Same GW15 double, but a 25.0 armband this week clears even the raised
     bar -- structure may raise the threshold, never veto outright."""
     from fpl.optimize.chips import advise_chips
 
@@ -264,7 +266,7 @@ def test_a_standout_captain_week_still_fires_through_a_beyond_horizon_double():
         5: [25.0] + [4.0] * 10 + [1.0] * 4,
         6: [6.0] + [4.0] * 10 + [1.0] * 4,
     })
-    counts = _multi_counts([(1, 5, 1), (1, 6, 1), (1, 20, 2)])
+    counts = _multi_counts([(1, 5, 1), (1, 6, 1), (1, 15, 2)])
 
     a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, 5, [],
                      last_event=38)
@@ -273,8 +275,9 @@ def test_a_standout_captain_week_still_fires_through_a_beyond_horizon_double():
 
 
 def test_free_hit_is_held_for_a_worse_blank_week():
-    """Five blanks now clears the Free Hit threshold, but GW20 blanks the whole
-    squad. Spending the chip on the smaller problem wastes it."""
+    """Five blanks now clears the Free Hit threshold, but GW15 blanks the whole
+    squad. Spending the chip on the smaller problem wastes it. (A first-half
+    chip; the bigger blank has to be inside the first window to matter.)"""
     from fpl.optimize.chips import advise_chips
 
     team_by_player = {i: (1 if i <= 10 else 2) for i in SQUAD}
@@ -285,14 +288,14 @@ def test_free_hit_is_held_for_a_worse_blank_week():
     counts = _multi_counts([
         (1, 5, 1), (2, 5, 0),
         (1, 6, 1), (2, 6, 1),
-        (1, 20, 0), (2, 20, 0),
+        (1, 15, 0), (2, 15, 0),
     ])
 
     a = advise_chips(xp, LINEUP, SQUAD, counts, team_by_player, 5, [],
                      last_event=38)
 
     assert a.chip != "freehit"
-    assert a.hold_until == 20
+    assert a.hold_until == 15
 
 
 # --- Wildcard on squad QUALITY, not just squad health (2026-09-15) ---------
@@ -390,3 +393,33 @@ def test_a_better_future_armband_week_still_holds_triple_captain():
     a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, EVENT, [])
     assert a.chip != "triplecaptain"
     assert a.hold_until == 3
+
+
+# --- R9: a first-half chip cannot be held past GW19 ---
+
+def test_a_first_half_chip_is_not_held_for_a_second_half_double():
+    """The first set expires at GW19. A GW29 double is not a reason to hold a
+    first-half Bench Boost -- by then it is gone, and the second copy will be
+    available for GW29 regardless."""
+    xp = _xp(bench_xp=BENCH_BOOST_MIN_XP + 1)
+    counts = pd.DataFrame([{"team_id": 1, "event": 10, "n_fixtures": 1},
+                           {"team_id": 1, "event": 29, "n_fixtures": 2}])
+    a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, 10, [])
+    assert a.chip == "benchboost"
+    assert a.hold_until is None
+
+
+def test_a_second_half_chip_may_still_be_held_for_a_later_double():
+    xp = _xp(bench_xp=BENCH_BOOST_MIN_XP + 1)
+    counts = pd.DataFrame([{"team_id": 1, "event": 22, "n_fixtures": 1},
+                           {"team_id": 1, "event": 29, "n_fixtures": 2}])
+    a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, 22, [])
+    assert a.chip is None and a.hold_until == 29
+
+
+def test_a_first_half_free_hit_ignores_second_half_blanks():
+    xp = _xp()
+    counts = pd.DataFrame([{"team_id": 1, "event": 10, "n_fixtures": 0},
+                           {"team_id": 1, "event": 33, "n_fixtures": 0}])
+    a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, 10, [])
+    assert a.chip == "freehit"
