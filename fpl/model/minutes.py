@@ -217,6 +217,10 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
         # than nudging it. With no current games this collapses to the prior.
         p_start = ((now_starts + PRIOR_WEIGHT_GAMES * prior)
                    / (now_games + PRIOR_WEIGHT_GAMES))
+        # How many games of evidence sit behind that number. A price prior and
+        # an ever-present's thirty starts can produce the same p_start; only
+        # this says which one it is, and the simulation draws the uncertainty.
+        start_evidence = now_games + PRIOR_WEIGHT_GAMES
         if not has_past and now_games <= 0:
             confidence = "low"
             flags.append(
@@ -312,6 +316,9 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             # (goals, assists, cards) and the wrong one for every threshold:
             # a match is 90 minutes or 0, never the average of the two.
             "m_start": m_start,
+            # Effective games behind p_start, for a Beta posterior in the
+            # simulation: alpha = p * n, beta = (1 - p) * n.
+            "start_evidence": float(start_evidence),
             "confidence": confidence,
             "flags": flags,
         })

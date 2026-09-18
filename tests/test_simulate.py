@@ -215,3 +215,32 @@ def test_a_lone_team_row_without_an_opponent_still_simulates():
     ids, samples = simulate_event(PLAYERS, RATES, MINUTES, tfx, event=1,
                                   n_sims=500, seed=0)
     assert samples[list(ids).index(2)].sum() > 0
+
+
+# --- R4: the evidence behind p_start widens the tails, not the mean ---
+
+def test_a_thin_sample_widens_the_appearance_spread_without_moving_the_mean():
+    mins = MINUTES.copy()
+    mins["start_evidence"] = 200.0                 # everyone certain
+    ids, certain = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=20000, seed=3)
+    mins.loc[mins.player_id == 4, "start_evidence"] = 2.0   # a newcomer's worth
+    _, thin = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=20000, seed=3)
+    i = list(ids).index(4)
+    assert thin[i].mean() == pytest.approx(certain[i].mean(), abs=0.15)
+    # Across scenarios the drawn start rate varies, so the share of blanks
+    # spreads: more scenario-level variance in whether he plays at all.
+    assert thin[i].var() >= certain[i].var() * 0.98
+
+
+def test_an_unavailable_player_stays_out_under_beta_draws():
+    mins = MINUTES.copy()
+    mins["start_evidence"] = 2.0
+    mins.loc[mins.player_id == 4, ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
+    ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=500, seed=0)
+    assert samples[list(ids).index(4)].sum() == 0
+
+
+def test_frames_without_evidence_behave_as_before():
+    ids, a = simulate_event(PLAYERS, RATES, MINUTES, TFX, event=1, n_sims=300, seed=7)
+    ids, b = simulate_event(PLAYERS, RATES, MINUTES, TFX, event=1, n_sims=300, seed=7)
+    assert np.array_equal(a, b)

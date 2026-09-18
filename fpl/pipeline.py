@@ -172,6 +172,30 @@ def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
     return ids, samples, rival_scores, target, n_needed, bar
 
 
+def _p_gain_positive(chosen, plans, ids, samples) -> float | None:
+    """P(this week's net gain over holding is positive), from the scenarios.
+
+    A transfer is irreversible and a hit is a fixed cost, so the expected gain
+    alone is the wrong summary: a +0.4 with a thin, uncertain edge and a +0.4
+    on a nailed regular are not the same bet. The scenarios already carry the
+    epistemic spread (Beta-drawn starts), so the comparison is cheap. This is
+    a diagnostic for the report, not a selection rule -- the audit's caution
+    about subtracting an "uncertainty penalty" from every low-confidence
+    player applies.
+    """
+    from .optimize.rank import squad_indicator, squad_scores as _scores
+    hold = next((p for p in plans if p.n_transfers == 0), None)
+    if hold is None or chosen is hold or chosen.n_transfers == 0:
+        return None
+    frame = {i: k for k, i in enumerate(ids)}
+    def week(plan):
+        cap = max(plan.starting_ids, key=lambda i: samples[frame[i]].mean()
+                  if i in frame else -1.0)
+        return _scores(squad_indicator(plan.starting_ids, cap, ids)[None, :], samples)[0]
+    gain = week(chosen) - week(hold) - float(chosen.hit_cost)
+    return float(np.mean(gain > 0) + 0.5 * np.mean(gain == 0))
+
+
 def _honour_rank_captain(lineup, rank_stats, xp):
     """Report the armband the rank layer actually scored, when it decided.
 
@@ -315,6 +339,7 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
             stats = _rank_stats(scored, plans.index(best), len(plans), target, n_needed)
             stats["hit_cost"] = int(best.hit_cost)
             stats["decided_by"] = "expected points over the horizon"
+            stats["p_gain_positive"] = _p_gain_positive(best, plans, ids, samples)
         return best, plans, stats
 
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,

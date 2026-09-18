@@ -479,3 +479,13 @@ def test_a_stale_override_moves_p_start_less_than_a_fresh_one():
     with_fresh = minutes_model(PLAYERS, cfg, news=fresh).set_index("player_id").loc[1, "p_start"]
     with_stale = minutes_model(PLAYERS, cfg, news=stale).set_index("player_id").loc[1, "p_start"]
     assert with_fresh < with_stale < base
+
+
+def test_the_minutes_frame_says_how_much_evidence_backs_each_start_rate():
+    from fpl.model.minutes import PRIOR_WEIGHT_GAMES
+    from fpl.data.normalize import history_current_frame
+    summaries = {1: {"history": [{"round": r, "starts": 1, "minutes": 90} for r in range(1, 7)]}}
+    current = history_current_frame(summaries, before_event=7)
+    df = minutes_model(PLAYERS, CFG, current=current).set_index("player_id")
+    assert df.loc[1, "start_evidence"] == pytest.approx(6 + PRIOR_WEIGHT_GAMES)
+    assert df.loc[2, "start_evidence"] == pytest.approx(PRIOR_WEIGHT_GAMES)
