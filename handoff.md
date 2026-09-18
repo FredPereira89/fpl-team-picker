@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **701 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **705 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -69,7 +69,7 @@ Codex's re-review findings are kept below for the record.
 | R7 attack double-count | **done** — `xp.team_goal_scales()` caps each player's fixture goals at his share of the side's expected total (the opponent's `xgc`), the same rule as `simulate._allocate`; xP and simulation now agree. Assists are not capped (no team-assist total exists). | `fpl/model/xp.py` |
 | Proper probability scoring | **done (Brier)** — `ledger.brier()` / `probability_scores()`: Brier, climatology baseline, skill, reliability bins for `p_play` and `p_60`; printed in `scored_summary`. `p_60` added to the forecast contract. CRPS on points still needs stored per-player distributions. | `fpl/backtest/ledger.py` |
 | R6 cold starts / stale overrides | **done (three of four parts)** — exposure-weighted positional priors (`scoring.per90_rates`); form weight capped by minutes/90 (`scoring.form_weight`); stale overrides decay by half per freshness budget of extra age (`minutes.override_trust`). NOT done: a cross-league prior for newcomers (needs external data). | `fpl/model/scoring.py`, `fpl/model/minutes.py` |
-| R4 confidence into the distribution | not started (posterior draws for p_start / rates) | |
+| R4 confidence into the distribution | **done (starts)** — `minutes.start_evidence` (games behind `p_start`); `simulate._on_pitch` draws `p_start` per scenario from Beta(p·n, (1−p)·n), mean preserved; `pipeline._p_gain_positive` reports P(net gain over holding > 0) for the chosen transfer (diagnostic only). NOT done: posterior draws for per-90 rates and team strengths. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | R5 event-specific team-coherent minutes | not started (large) | |
 | R8 multi-period MILP | not started (large) | |
 | R10 BPS rebuild | not started (large) | |
