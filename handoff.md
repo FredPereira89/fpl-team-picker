@@ -256,10 +256,11 @@ the temporary Free Hit picks endpoint.
 | B17 inherited four-player club overage | Implemented. |
 | R11 hidden Bench Boost floor | Implemented; default is explicitly `0.0`. |
 
-The old GW1-4 sequential totals should remain labelled **contaminated smoke-test
-output**, not “the first executable-policy measurement.” Until RB1-RB3 are fixed,
-the policy being measured is not the production policy and a clean-snapshot
-claim would be false.
+The GW1–4 sequential totals remain **contaminated smoke-test output** — no
+pre-deadline snapshot can exist for those gameweeks. After RB1–RB3 the policy
+being measured IS the production one (5-GW horizon, live armband), and with the
+real horizon `expected` made 5 transfers incl. one hit and finished level with
+`hold` at 236. Still four gameweeks; still not a verdict.
 
 ## Still-open model work (after the blockers)
 
