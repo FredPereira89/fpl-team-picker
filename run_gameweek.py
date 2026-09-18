@@ -15,6 +15,7 @@ from fpl.data.overrides import load_overrides
 from fpl.optimize.transfers import bank_after
 from fpl.pipeline import run
 from fpl.report.weekly import render
+from fpl.backtest import manifest
 from fpl.backtest.manifest import mark_actioned
 from fpl.chips import CHIPS, chip_blocked_reason
 from fpl.state import canonical_chip, load_state
@@ -121,11 +122,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Override: player {pid} p_start -> {o['p_start_override']} "
               f"(blended at news.weight={cfg.news_weight}) — {o['note']}")
 
+    # The forecast the manager DECIDED on is the one on file BEFORE this run
+    # writes its own. A confirmation re-runs the whole pipeline, and that new
+    # forecast would otherwise be the newest pre-deadline version and get
+    # marked in place of the planning forecast actually looked at. Captured
+    # here, before anything is written, so it cannot be displaced.
+    planned = (manifest.select_version(data_root, args.gw)
+               if args.confirm and args.forecast_version is None else None)
+
     rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
                   current_squad=current_squad, bank=bank, free_transfers=free_transfers,
                   news=news, progress=progress, purchase_prices=purchase_prices,
                   chip_events=chip_events, first_event=first_event)
     print(render(rec, xp))
+    written_versions = manifest.entries(data_root, args.gw)
+    if written_versions:
+        # Ready to copy into --forecast-version on confirmation.
+        print(f"\nForecast version: {written_versions[-1]['version']}")
 
     # A run is a PROPOSAL, not an execution. Recording unconditionally spent
     # transfers that were only suggested and, when the advisor named a chip,
@@ -188,8 +201,13 @@ def main(argv: list[str] | None = None) -> int:
         # newest live version made before it, and a post-deadline version is
         # refused so it cannot carry the team news into calibration.
         deadline = rec.deadline if "T" in str(rec.deadline) else None
-        marked = mark_actioned(data_root, args.gw, version=args.forecast_version,
-                               deadline=deadline)
+        version = args.forecast_version or (planned["version"] if planned else None)
+        marked = mark_actioned(data_root, args.gw, version=version, deadline=deadline)
+        if marked is None and version is not None and args.forecast_version is None:
+            # The planning forecast was after the deadline; fall back to the
+            # rules mark_actioned applies on its own, which will refuse too if
+            # nothing pre-deadline exists.
+            marked = mark_actioned(data_root, args.gw, deadline=deadline)
         if marked is None:
             print("\nWARNING: no pre-deadline forecast could be marked as the one "
                   "acted on (this run is after the deadline, or the named "

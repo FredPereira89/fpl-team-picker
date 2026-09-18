@@ -3,6 +3,8 @@ import pytest
 from fpl.cli import resolve_current_squad, record_transfers
 from fpl.config import Config
 from fpl.state import load_state, save_state, State
+from pathlib import Path as _P
+_REPO = _P(__file__).resolve().parents[1]
 
 
 class FakeClient:
@@ -522,3 +524,62 @@ def test_a_confirmed_squad_does_not_need_the_picks_fetch_either(tmp_path):
         client=FakeClient(picks_error=RuntimeError("503"), history=HISTORY_NO_TRANSFERS))
     assert errors == []
     assert live.current_squad == list(range(100, 115))
+
+
+# --- RR1: a pre-deadline confirmation marks the PLANNING forecast ---
+
+def test_a_pre_deadline_confirmation_marks_the_planning_forecast(monkeypatch, tmp_path):
+    """--confirm re-runs the whole pipeline and writes a new forecast first.
+    Before this fix that new forecast, being the newest pre-deadline version,
+    was marked as the one acted on instead of the planning forecast the
+    manager had actually looked at."""
+    import run_gameweek
+    from datetime import datetime, timezone
+    from fpl.backtest import manifest
+
+    deadline = "2099-01-01T00:00:00Z"
+    root = tmp_path / "data"
+    manifest.record_version(root, gw=8, version="plan", origin="live",
+                            created_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+                            deadline=deadline)
+
+    squad = list(range(1, 16))
+    run_gameweek_mod, written = _confirm_harness(monkeypatch, squad)
+
+    # The stubbed pipeline "writes" its own forecast, exactly as the real one does.
+    real_run = run_gameweek_mod.run
+    def run_and_record(*a, **k):
+        manifest.record_version(root, gw=8, version="confirm-rerun", origin="live",
+                                created_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+                                deadline=deadline)
+        return real_run(*a, **k)
+    monkeypatch.setattr(run_gameweek_mod, "run", run_and_record)
+    monkeypatch.setattr(run_gameweek_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(run_gameweek_mod, "mark_actioned", manifest.mark_actioned)
+
+    code = run_gameweek_mod.main(["--mode", "2", "--gw", "8", "--confirm",
+                                  "--no-refresh", "--applied-chip", "none",
+                                  "--config", str(_REPO / "config.yaml")])
+    assert code == 0
+    assert manifest.select_version(root, 8)["version"] == "plan"
+
+
+def test_forecast_version_flag_pins_the_marked_version(monkeypatch, tmp_path):
+    import run_gameweek
+    from datetime import datetime, timezone
+    from fpl.backtest import manifest
+
+    deadline = "2099-01-01T00:00:00Z"
+    root = tmp_path / "data"
+    for i, day in enumerate((9, 10)):
+        manifest.record_version(root, gw=8, version=f"v{i}", origin="live",
+                                created_at=datetime(2026, 9, day, tzinfo=timezone.utc),
+                                deadline=deadline)
+    run_gameweek_mod, _ = _confirm_harness(monkeypatch, list(range(1, 16)))
+    monkeypatch.setattr(run_gameweek_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(run_gameweek_mod, "mark_actioned", manifest.mark_actioned)
+    code = run_gameweek_mod.main(["--mode", "2", "--gw", "8", "--confirm", "--no-refresh",
+                                  "--applied-chip", "none", "--forecast-version", "v0",
+                                  "--config", str(_REPO / "config.yaml")])
+    assert code == 0
+    assert manifest.select_version(root, 8)["version"] == "v0"
