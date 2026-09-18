@@ -45,11 +45,11 @@ from fpl.model.minutes import minutes_model
 from fpl.model.scoring import blended_rates
 from fpl.model.fixtures import team_fixture_frame
 from fpl.model.xp import build_xp
-from fpl.model.calibration import fit_calibration, apply_calibration, scored_history
 from fpl.backtest.ledger import save_predictions
 from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_score,
                                       squad_ledger, weekly_edge, replayable_gameweeks,
-                                      gameweek_inputs)
+                                      gameweek_inputs, actioned_snapshot,
+                                      replay_calibration)
 from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
                                  expected_points_policy, oracle_rebuild_policy)
 from fpl.data import snapshots
@@ -79,7 +79,11 @@ def main() -> int:
     ap.add_argument("--through", type=int, default=None,
                     help="last gameweek to replay (default: every one played)")
     ap.add_argument("--no-save", action="store_true",
-                    help="score without writing forecasts into the ledger")
+                    help="score without writing forecasts into the ledger. Does NOT "
+                         "switch off calibration -- production calibrates, so the "
+                         "replay does too; see --no-calibrate.")
+    ap.add_argument("--no-calibrate", action="store_true",
+                    help="skip the per-position calibration a live run would apply")
     ap.add_argument("--policies", default="hold,expected",
                     help="comma-separated executable policies to replay in "
                          "sequence (hold, expected). The free weekly rebuild is "
@@ -129,7 +133,11 @@ def main() -> int:
         print(f"Keeping the live forecast already on file for GW{kept} "
               f"(scored below, not rewritten; --overwrite to replace).")
     print()
-    banner = snapshots.contamination_note(args.root, played)
+    # The capture each gameweek's ACTIONED forecast read, where one is on
+    # record. Without the pin the replay reads the newest pre-deadline capture,
+    # which is not necessarily the one the decision was made on.
+    pinned = {gw: actioned_snapshot(args.root, gw) for gw in played}
+    banner = snapshots.contamination_note(args.root, played, versions_by_gw=pinned)
     if banner:
         print(banner)
         print()
@@ -143,7 +151,8 @@ def main() -> int:
         # earlier script imported the snapshot module and then read only the
         # current cache, so a valid snapshot silenced the banner without
         # changing a single input.
-        inputs = gameweek_inputs(args.root, gw, bootstrap, raw_fixtures, summaries)
+        inputs = gameweek_inputs(args.root, gw, bootstrap, raw_fixtures, summaries,
+                                 snapshot_version=pinned.get(gw))
         players, teams, fixtures = inputs["players"], inputs["teams"], inputs["fixtures"]
         seen = forecast_inputs(summaries, before_event=gw)
         ratings = team_ratings(players, teams, current=seen["current"])
@@ -155,12 +164,11 @@ def main() -> int:
 
         # Calibrate on gameweeks strictly before this one, exactly as a live run
         # would -- fitting on the gameweek being predicted would be circular.
-        note = "-"
-        if cfg.calibrate and not args.no_save:
-            cal = fit_calibration(scored_history(args.root, summaries, gw))
-            if cal is not None:
-                xp = apply_calibration(xp, cal)
-                note = f"fitted on {cal.n_gameweeks} GW"
+        # Independent of --no-save: reading the ledger is not writing it.
+        if args.no_calibrate:
+            note = "off"
+        else:
+            xp, note = replay_calibration(xp, args.root, summaries, gw, cfg)
         if not args.no_save and gw in writable:
             # Stamped as a replay so the ledger never loses track of which
             # forecasts were made before the deadline and which were
@@ -197,11 +205,18 @@ def main() -> int:
     first = played[0]
     if args.squad:
         start_squad = [int(t) for t in args.squad.replace(",", " ").split()]
+        start_label = "your squad"
     else:
+        # The production Mode 1 objective -- discounted xp_horizon -- not the
+        # one-week column: a squad built on xp_next1 is a different policy from
+        # the one the tool would actually have built at GW1.
         start_squad = list(optimize_squad(xp_by_gw[first], cfg,
-                                          xp_col="xp_next1").player_ids)
-        print(f"No --squad given, so the replay starts from the best legal GW{first} "
-              f"squad. That is itself a small advantage a real manager did not have.")
+                                          xp_col="xp_horizon").player_ids)
+        start_label = f"a synthetic Mode 1 build at GW{first}"
+        print(f"No --squad given, so the replay starts from {start_label} (the "
+              f"production squad objective). That start is a CHALLENGER, not your "
+              f"season: pass --squad with your real GW{first} fifteen for the "
+              f"executable-policy claim to be about you.")
 
     price_at_start = dict(zip(xp_by_gw[first]["player_id"].astype(int),
                               xp_by_gw[first]["price"].astype(float)))

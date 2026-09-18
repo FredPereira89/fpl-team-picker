@@ -249,3 +249,39 @@ def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
         "source": source,
         "events": bootstrap.get("events", []),
     }
+
+
+def actioned_snapshot(root, gw: int) -> str | None:
+    """The snapshot version the gameweek's acted-on forecast read, if any.
+
+    The manifest records it and `gameweek_inputs` accepts it, but the script
+    was passing neither, so the replay silently read the NEWEST pre-deadline
+    capture rather than the one the actioned forecast used -- two captures a
+    day apart gave two different prices for the same replayed decision.
+    """
+    from .manifest import select_version
+    chosen = select_version(root, int(gw))
+    return chosen.get("snapshot") if chosen else None
+
+
+def replay_calibration(xp, root, summaries, gw: int, cfg):
+    """Apply the calibration a LIVE run of `gw` would have applied, or none.
+
+    Two things went wrong in the script this replaces. Calibration was gated
+    on the same flag that gates writing replay forecasts, so `--no-save` -- the
+    recommended way to run -- silently disabled it while production has
+    `calibrate=true`. And `apply_calibration` was called without the configured
+    `horizon_decay`, so its default of 1.0 rebuilt an undiscounted xp_horizon
+    and the "expected" policy stopped matching the production objective.
+    Dormant until five live gameweeks are scored, then wrong every week.
+
+    Returns (calibrated xp, note).
+    """
+    from ..model.calibration import fit_calibration, apply_calibration, scored_history
+    if not getattr(cfg, "calibrate", True):
+        return xp, "off"
+    cal = fit_calibration(scored_history(root, summaries, int(gw)))
+    if cal is None:
+        return xp, "-"
+    return (apply_calibration(xp, cal, decay=float(getattr(cfg, "horizon_decay", 1.0))),
+            f"fitted on {cal.n_gameweeks} GW")

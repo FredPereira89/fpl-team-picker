@@ -246,3 +246,66 @@ def test_a_post_deadline_snapshot_is_not_used_as_point_in_time(tmp_path):
                           summaries={})
     assert got["point_in_time"] is False
     assert got["players"].set_index("player_id").loc[1, "price"] == 9.9
+
+
+# --- RR2: the replay reads the snapshot the ACTIONED forecast read ---
+
+def test_the_replay_pins_the_actioned_forecasts_snapshot(tmp_path):
+    """Two pre-deadline captures a day apart: the actioned forecast read the
+    first, and the replay must read that one, not the newer."""
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest import manifest
+    from fpl.backtest.walkforward import actioned_snapshot, gameweek_inputs
+
+    deadline = "2026-09-11T17:30:00Z"
+    first = snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(55, "a", 1),
+                              fixtures=_fixtures(5), deadline=deadline,
+                              captured_at=datetime(2026, 9, 9, tzinfo=timezone.utc))
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(57, "a", 1),
+                      fixtures=_fixtures(5), deadline=deadline,
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    manifest.record_version(tmp_path, gw=5, version="plan", origin="live",
+                            created_at=datetime(2026, 9, 9, 1, tzinfo=timezone.utc),
+                            deadline=deadline, snapshot=first)
+
+    pinned = actioned_snapshot(tmp_path, 5)
+    assert pinned == first
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={}, snapshot_version=pinned)
+    assert got["players"].set_index("player_id").loc[1, "price"] == 5.5
+    # And without the pin the newer one would have been read -- the bug.
+    loose = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                            summaries={})
+    assert loose["players"].set_index("player_id").loc[1, "price"] == 5.7
+
+
+# --- RR5: replay calibration is production calibration ---
+
+def test_replay_calibration_uses_the_configured_decay(tmp_path, monkeypatch):
+    import pandas as pd
+    from fpl.config import Config
+    from fpl.model.calibration import Calibration
+    from fpl.backtest import walkforward
+
+    cal = Calibration(intercept={"MID": 0.0}, slope={"MID": 1.0},
+                      pooled_intercept=0.0, pooled_slope=1.0, n_gameweeks=5,
+                      n_observations=500, n_by_position={"MID": 500}, r2=0.1)
+    monkeypatch.setattr("fpl.model.calibration.fit_calibration", lambda *_: cal)
+    monkeypatch.setattr("fpl.model.calibration.scored_history", lambda *_: pd.DataFrame())
+    xp = pd.DataFrame({"player_id": [1], "position": ["MID"],
+                       "xp_next1": [4.0], "xp_next5": [8.0], "xp_horizon": [7.0],
+                       "xp_gw5": [4.0], "xp_gw6": [4.0]})
+    out, note = walkforward.replay_calibration(xp, tmp_path, {}, 5,
+                                               Config(horizon_decay=0.5))
+    assert note.startswith("fitted")
+    assert out.loc[0, "xp_horizon"] == 4.0 + 0.5 * 4.0     # not the undiscounted 8.0
+
+
+def test_replay_calibration_can_be_switched_off_independently(tmp_path):
+    import pandas as pd
+    from fpl.config import Config
+    from fpl.backtest import walkforward
+    xp = pd.DataFrame({"player_id": [1], "position": ["MID"], "xp_next1": [4.0]})
+    out, note = walkforward.replay_calibration(xp, tmp_path, {}, 5, Config(calibrate=False))
+    assert note == "off" and out is xp
