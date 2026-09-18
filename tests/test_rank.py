@@ -62,7 +62,12 @@ def test_rivals_are_drawn_toward_the_template():
     rivals = sample_rival_squads(POOL, n_rivals=400, rng=rng)
     owned = POOL["ownership"].to_numpy()
     picked_rate = (rivals > 0).mean(axis=0)
-    assert picked_rate[owned > 10].mean() > 3 * picked_rate[owned < 10].mean()
+    # 2x, not the 3x this asserted before rivals had to be LEGAL: in this
+    # fixture every club is a single position and all forwards are
+    # differentials, so a three-per-club XI can carry at most ten template
+    # players and must start a differential up front. The pull toward the
+    # template is unchanged; the arithmetic ceiling on it is not.
+    assert picked_rate[owned > 10].mean() > 2 * picked_rate[owned < 10].mean()
 
 
 def test_a_squad_of_the_most_owned_players_lands_mid_table():
@@ -332,3 +337,63 @@ def test_the_captain_is_chosen_against_the_same_bar():
     xi = IDS[:11]
     low = np.full(samples.shape[1], -1e6)
     assert best_captain_by_rank(xi, IDS, samples, rs, bar=low) in xi
+
+
+# --- R2: generated rivals must be squads someone could actually own ---
+
+def _crowded_pool():
+    """Everyone the field loves is at one club and expensive."""
+    import pandas as pd
+    rows = []
+    pid = 1
+    for pos, n in (("GKP", 4), ("DEF", 12), ("MID", 12), ("FWD", 8)):
+        for i in range(n):
+            star = i < 5
+            rows.append({"player_id": pid, "position": pos,
+                         "team": "T1" if star else f"T{2 + i % 6}",
+                         "price": 13.0 if star else 4.5,
+                         "ownership": 80.0 if star else 3.0,
+                         "xp_next1": 8.0 if star else 2.0, "p_play": 0.9})
+            pid += 1
+    return pd.DataFrame(rows)
+
+
+def test_no_rival_starts_more_than_three_from_one_club():
+    from fpl.optimize.rank import sample_rival_squads, MAX_PER_CLUB
+    pool = _crowded_pool()
+    rivals = sample_rival_squads(pool, n_rivals=300, rng=np.random.default_rng(0))
+    club = pool["team"].to_numpy()
+    for row in rivals:
+        started = np.flatnonzero(row > 0)
+        counts = {}
+        for i in started:
+            counts[club[i]] = counts.get(club[i], 0) + 1
+        assert max(counts.values()) <= MAX_PER_CLUB
+
+
+def test_no_rival_xi_costs_more_than_a_legal_fifteen_allows():
+    from fpl.optimize.rank import sample_rival_squads, _xi_ceiling
+    pool = _crowded_pool()
+    rivals = sample_rival_squads(pool, n_rivals=300, rng=np.random.default_rng(0),
+                                 budget=100.0)
+    price = pool["price"].to_numpy()
+    ceiling = _xi_ceiling(pool, 100.0)
+    for row in rivals:
+        assert price[np.flatnonzero(row > 0)].sum() <= ceiling + 1e-9
+
+
+def test_repair_keeps_eleven_starters_and_one_captain():
+    from fpl.optimize.rank import sample_rival_squads
+    pool = _crowded_pool()
+    rivals = sample_rival_squads(pool, n_rivals=100, rng=np.random.default_rng(0))
+    for row in rivals:
+        assert (row > 0).sum() == 11
+        assert (row == 2).sum() == 1
+
+
+def test_a_pool_without_club_or_price_columns_still_samples():
+    from fpl.optimize.rank import sample_rival_squads
+    rivals = sample_rival_squads(POOL.drop(columns=[c for c in ("team", "price")
+                                                    if c in POOL.columns]),
+                                 n_rivals=20, rng=np.random.default_rng(0))
+    assert rivals.shape[0] == 20

@@ -36,7 +36,7 @@ expectation-only model prices them as three independent bets no matter what.
 import numpy as np
 import pandas as pd
 
-from .squad import XI_SIZE
+from .squad import XI_SIZE, MAX_PER_CLUB
 
 # Rival managers drawn per evaluation. A rank percentile is a mean over these,
 # so the standard error goes as 1/sqrt(RIVALS); 400 puts it near 2.5%, which
@@ -141,14 +141,90 @@ def _systematic_pps(pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndar
     return order[np.clip(np.searchsorted(cum, marks), 0, len(pi) - 1)]
 
 
+# What a rival XI may cost. A legal fifteen fits in the budget, and the four
+# on the bench cost at least the cheapest keeper plus the three cheapest
+# outfielders in the pool -- so an XI dearer than budget minus that bench
+# belongs to nobody. Without the ceiling the sampler assembled elevens of
+# premiums no manager could own together and overstated the field.
+DEFAULT_BUDGET = 100.0
+REPAIR_PASSES = 20
+
+
+def _xi_ceiling(xp_df: pd.DataFrame, budget: float) -> float:
+    if "price" not in xp_df.columns:
+        return float("inf")
+    price = xp_df["price"].astype(float)
+    pos = xp_df["position"]
+    keepers = np.sort(price[pos == "GKP"].to_numpy())
+    outfield = np.sort(price[pos != "GKP"].to_numpy())
+    bench = (keepers[0] if len(keepers) else 0.0) + outfield[:3].sum()
+    return float(budget) - float(bench)
+
+
+def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos, ceiling: float,
+            rng: np.random.Generator) -> np.ndarray:
+    """Swap players out of a drawn XI until it is a squad someone could own.
+
+    Two rules a starting eleven inherits from the fifteen it came from: no
+    more than MAX_PER_CLUB from one club, and a price that leaves room for a
+    bench. Each pass replaces one offender -- the cheapest-pull player of an
+    over-represented club, else the dearest player -- with a same-position
+    player drawn by the same start pull from those who do not re-offend.
+    Gives up after REPAIR_PASSES and returns the best it reached, which keeps
+    the sampler total rather than perfect on a pathological pool.
+    """
+    picked = list(int(i) for i in picked)
+    for _ in range(REPAIR_PASSES):
+        counts: dict = {}
+        for i in picked:
+            counts[club[i]] = counts.get(club[i], 0) + 1
+        over = [c for c, n in counts.items() if n > MAX_PER_CLUB]
+        too_dear = price is not None and sum(price[i] for i in picked) > ceiling
+        if not over and not too_dear:
+            break
+        if over:
+            candidates = [i for i in picked if club[i] == over[0]]
+            out = min(candidates, key=lambda i: start_pull[i])
+        else:
+            out = max(picked, key=lambda i: price[i])
+        remaining = [i for i in picked if i != out]
+        pool = [i for i in by_pos[pos[out]] if i not in remaining]
+        cost_now = sum(price[i] for i in remaining) if price is not None else 0.0
+        counts_now: dict = {}
+        for i in remaining:
+            counts_now[club[i]] = counts_now.get(club[i], 0) + 1
+        # Club first, then price: a replacement that fits both is ideal, one
+        # that at least respects the club cap still makes progress, and only a
+        # pool with nothing else at the position falls back to anyone.
+        club_ok = [i for i in pool if counts_now.get(club[i], 0) < MAX_PER_CLUB]
+        both = [i for i in club_ok if price is None or cost_now + price[i] <= ceiling]
+        if both:
+            legal = both
+        elif club_ok:
+            legal = sorted(club_ok, key=lambda i: price[i] if price is not None else 0)[
+                :max(1, len(club_ok) // 2)]
+        else:
+            legal = [i for i in pool if i != out] or pool
+        w = np.array([max(start_pull[i], 1e-12) for i in legal])
+        new = int(rng.choice(legal, p=w / w.sum()))
+        picked = remaining + [new]
+    return np.array(picked, dtype=int)
+
+
 def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
-                        rng: np.random.Generator) -> np.ndarray:
+                        rng: np.random.Generator,
+                        budget: float = DEFAULT_BUDGET) -> np.ndarray:
     """Draw `n_rivals` plausible starting XIs, shape (n_rivals, n_players).
 
     Entries are 0 (not started), 1 (started) or 2 (captained). Players are
     drawn by systematic PPS into a randomly chosen legal formation, so each
     one's rate of appearing MATCHES HIS OWNERSHIP -- the field looks like the
     field: heavy on the template, occasionally carrying a differential.
+
+    Every XI is then made LEGAL: at most MAX_PER_CLUB from one club, and a
+    price that leaves room for a bench under `budget`. Ownership-weighted
+    draws alone produced elevens of premiums no manager could own together,
+    which overstated the field's strength and its correlation.
 
     Sampling whole rival squads rather than scoring against one averaged
     "field team" matters: an average of many managers has far less variance
@@ -158,6 +234,11 @@ def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
     own = xp_df["ownership"].astype(float).clip(lower=1e-6).to_numpy()
     xp = xp_df["xp_next1"].astype(float).to_numpy()
     pos = xp_df["position"].to_numpy()
+    club = (xp_df["team"].to_numpy() if "team" in xp_df.columns
+            else np.arange(len(xp_df)))          # no club column: nothing to cap
+    price = (xp_df["price"].astype(float).to_numpy() if "price" in xp_df.columns
+             else None)
+    ceiling = _xi_ceiling(xp_df, budget)
     # Owning a player and STARTING him are different things: a manager owns 15
     # and plays 11, benching the cheap fodder. Weighting slots by ownership
     # alone spreads them evenly over everyone owned, which left a 71%-owned
@@ -198,7 +279,8 @@ def sample_rival_squads(xp_df: pd.DataFrame, n_rivals: int,
                                        replace=False, p=w)
                     chosen = np.concatenate([chosen, np.atleast_1d(extra)])
             picked.extend(pool[chosen])
-        picked = np.array(picked, dtype=int)
+        picked = _repair(np.array(picked, dtype=int), pos, club, price, start_pull,
+                         by_pos, ceiling, rng)
         out[r, picked] = 1.0
         # Managers captain the best player they own, which is what makes the
         # field's armband concentrate on a handful of names.
