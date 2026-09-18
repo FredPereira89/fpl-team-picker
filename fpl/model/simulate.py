@@ -269,13 +269,18 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     dc_bar = np.array([DC_THRESHOLD.get(p, 12) for p in positions])[:, None]
     is_keeper = (positions == "GKP")[:, None]
     concedes = np.isin(positions, list(CONCEDED_PENALTY_POSITIONS))[:, None]
-    clean_sheet = (conceded_team == 0)   # this scenario's SIDE clean sheet
+    # PER-PLAYER: the official rule is no goal conceded WHILE ON THE PITCH,
+    # not the match's final score -- a player subbed at 60' keeps his clean
+    # sheet even if his side concedes afterwards. Using the SIDE's final
+    # `conceded_team == 0` credited every player identically regardless of
+    # substitution timing, denying it to anyone subbed before a later
+    # concession. `conceded_on` is already the per-player, per-scenario
+    # thinned count this needs.
+    clean_sheet = (conceded_on == 0)
 
     pts = played * 1.0 + reached_60 * 1.0
     pts += goals * goal_pts + assists * ASSIST_PTS
-    # The clean sheet is the SIDE's, derived from the same scoreline the
-    # opposition's goals came from, and it needs the hour.
-    pts += clean_sheet[None, :] * reached_60 * cs_pts
+    pts += clean_sheet * reached_60 * cs_pts
     pts += (dc >= dc_bar) * DC_PTS
     pts -= concedes * (conceded_on // CONCEDED_PER_PENALTY)
     pts += is_keeper * (saves // SAVES_PER_POINT)

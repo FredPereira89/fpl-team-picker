@@ -73,13 +73,25 @@ def _approx_bps(row, position, dc_weights=None) -> float:
     saves = float(row["saves"])
     yellow_cards = float(row["yellow_cards"])
     red_cards = float(row["red_cards"])
-    cbi = float(row.get("clearances_blocks_interceptions", 0) or 0)
-    recoveries = float(row.get("recoveries", 0) or 0)
-    tackles = float(row.get("tackles", 0) or 0)
-    dc = cbi + recoveries + tackles   # the model's dc90 is this same blended total
+    # Production dc90 (model.scoring.RATE_SPECS) is sourced from FPL's own
+    # `defensive_contribution` field directly -- NOT a sum of the three raw
+    # actions. That field is position-dependent and NOT their sum: it is 0
+    # for GKP (not DC-threshold-eligible), CBI+tackles only for DEF
+    # (recoveries excluded), and does include recoveries for MID/FWD.
+    # Using the raw sum here validated a feature the shipped model never
+    # actually sees for GKP/DEF (confirmed: GKP 815 vs 0, DEF 3771 vs 2584
+    # summed across the cached GW1-4 history).
+    dc = float(row.get("defensive_contribution", 0) or 0)
     conceded_on = float(row["goals_conceded"])
-    opp_score = row["team_a_score"] if row["was_home"] else row["team_h_score"]
-    clean_sheet = float(opp_score) == 0.0
+    # FPL's own `clean_sheets` field already implements the real rule
+    # correctly (no goal conceded WHILE ON THE PITCH, 60+ minutes) --
+    # confirmed via the official rules page: a player subbed at 60' keeps
+    # his clean sheet even if his team concedes after he leaves. An
+    # earlier version of this validator re-derived "clean sheet" from the
+    # match's FINAL score instead, which is the same bug production had
+    # (see model.simulate's own fix, same session) -- using the real field
+    # here is both simpler and correct, rather than re-deriving it wrong.
+    clean_sheet = float(row.get("clean_sheets", 0) or 0) > 0
 
     if not played:
         return -np.inf

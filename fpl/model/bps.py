@@ -96,10 +96,25 @@ BPS_GOAL = {"GKP": 12.0, "DEF": 12.0, "MID": 18.0, "FWD": 24.0}
 BPS_ASSIST = 9.0                       # official
 BPS_CLEAN_SHEET = {"GKP": 12.0, "DEF": 12.0}   # official, GKP/DEF, 60+ minutes only
 # 2026/27 rule: 2 BPS for ANY save, plus 1 more for a save judged a "big
-# chance". The simulator has no big-chance signal for a shot faced (only
-# for a chance created, and only as an official-table entry it does not
-# model either), so this is the guaranteed base only -- a real, likely
-# small, underestimate for busy shot-stoppers facing high-quality chances.
+# chance" -- and possibly a further +1 for a save specifically from inside
+# the box (this codebase has re-checked the exact current save rule twice
+# across review rounds with different results each time; it is flagged
+# here as genuinely UNCERTAIN, not settled, rather than asserted). The
+# simulator has no shot-location or big-chance signal for a shot FACED
+# (only for a chance CREATED, itself an official-table entry not modelled
+# either), so BPS_SAVE is the guaranteed base only, a real underestimate.
+# How much: real GW1-4 validation (scripts/validate_bps.py) finds GKP's
+# approximate BPS undershoots the real value by ~6-9 points per appearance,
+# fairly flat regardless of save count -- too large and too save-count-
+# INDEPENDENT to be the missing save component alone. The likelier
+# dominant driver is the passing-accuracy tiers (70-89-90%+ completion on
+# 30+ attempts, worth 2-6 BPS): goalkeepers routinely attempt 30+ passes a
+# match via goal kicks and build-up distribution, and this codebase has no
+# pass-attempt or completion data at all to model it. Both residuals are
+# real; neither is fixable without a data source this codebase does not
+# have, so GKP's BPS approximation should be treated as directionally
+# useful (goals/assists/CS/cards/conceded/appearance are exact) but
+# systematically low, not a precise per-player number.
 BPS_SAVE = 2.0
 # Official splits a card -3 (yellow) / -9 (red); the simulator draws one
 # undifferentiated `cards` count, so every card scores as a yellow here --
@@ -115,18 +130,28 @@ CONCEDED_BPS_POSITIONS = {"GKP", "DEF"}
 # 2026/27 rules: clearance/block/interception 0.333 (one point per THREE,
 # not two -- halved from the prior season), recovery 0.333 (one point per
 # three, unchanged), successful tackle 2 (the SEPARATE -1-for-being-tackled
-# penalty was removed this season, not the +2 for a successful one).
-# `dc90` is one blended per-90 rate with no split between these three, so
-# this is a documented weighted guess per position, not a precise fit.
-# `scripts/validate_bps.py::logo_cv` (Codex's re-review, finding 2: fitting
-# and evaluating on the SAME gameweeks is in-sample selection, not
-# validation) runs leave-one-gameweek-out cross-validation over real GW1-4
-# fixtures: the SAME candidate weight set was selected on every one of the
-# 4 training folds (not fold-dependent, which would have signalled
-# overfitting), with a mean HELD-OUT MAE of 3.24 -- close to its in-sample
-# 3.26 and consistently below the uniform-0.6 baseline's 3.49 on the same
-# held-out folds. Re-run that script as more gameweeks accumulate.
-BPS_DC_ACTION = {"GKP": 0.5, "DEF": 0.75, "MID": 0.85, "FWD": 0.55}
+# penalty was removed this season, not the +2 for a successful one). `dc90`
+# is one blended per-90 rate (model.scoring.RATE_SPECS sources it from
+# FPL's own `defensive_contribution` field -- NOT a sum of the three raw
+# actions: that field is 0 for GKP and, for DEF specifically, CBI+tackles
+# ONLY, excluding recoveries; an earlier validation pass summed the three
+# raw actions instead, which is a materially different number for GKP/DEF
+# and was fitting/scoring a feature the shipped model never actually sees
+# -- see R10's 4th review), so this weight is a documented approximation
+# per position, not a precise fit. GKP's own weight is moot: `dc` is always
+# 0 for goalkeepers (they are never DC-threshold-eligible), so whatever
+# value sits here never fires; kept only so `.get()` never needs a default.
+# `scripts/validate_bps.py::logo_cv` runs leave-one-gameweek-out cross-
+# validation over real GW1-4 fixtures against the CORRECT feature: the SAME
+# candidate weight set was selected on every one of the 4 training folds
+# (not fold-dependent, which would have signalled overfitting), with a mean
+# HELD-OUT MAE of 3.61 -- close to its in-sample 3.66 and consistently
+# below the uniform-0.6 baseline's 3.98 on the same held-out folds. This is
+# exploratory/grouped CV, not a genuinely independent test (the candidate
+# grid itself was designed after inspecting these same 4 gameweeks) --
+# re-run against fresh, untouched gameweeks as they accumulate for a real
+# prospective check.
+BPS_DC_ACTION = {"GKP": 0.4, "DEF": 0.8, "MID": 0.9, "FWD": 0.6}
 
 
 def score_side_bps(positions: np.ndarray, played: np.ndarray, reached_60: np.ndarray,
@@ -135,10 +160,12 @@ def score_side_bps(positions: np.ndarray, played: np.ndarray, reached_60: np.nda
                    conceded_on: np.ndarray) -> np.ndarray:
     """Approximate BPS per player per scenario, shape (n_players, n_sims).
 
-    All inputs share that shape except `positions` (n_players,) and
-    `clean_sheet` (n_sims,) -- broadcasting handles both. `clean_sheet` is
-    whether the SIDE kept a clean sheet in that scenario; the GKP/DEF bonus
-    still needs `reached_60`, same as the FPL points rule for a clean sheet.
+    All inputs share that shape, `positions` (n_players,) aside.
+    `clean_sheet` is PER PLAYER, not per side: the official rule is no goal
+    conceded WHILE ON THE PITCH, not the match's final score, so a player
+    subbed before a later concession keeps it -- `conceded_on == 0` is the
+    right test, not the side's full-match total. The GKP/DEF bonus still
+    needs `reached_60`, same as the FPL points rule for a clean sheet.
     `conceded_on` is goals conceded while THIS player was on the pitch
     (already computed in `_score_side` for the separate FPL points penalty;
     BPS penalises every goal conceded, not every two).
@@ -151,7 +178,7 @@ def score_side_bps(positions: np.ndarray, played: np.ndarray, reached_60: np.nda
     bps = np.where(reached_60, BPS_APPEARANCE_LONG,
                   np.where(played, BPS_APPEARANCE_SHORT, 0.0))
     bps = bps + goals * goal_pts + assists * BPS_ASSIST
-    bps = bps + is_gk_def * reached_60 * clean_sheet[None, :] * 12.0
+    bps = bps + is_gk_def * reached_60 * clean_sheet * 12.0
     bps = bps + saves * BPS_SAVE
     bps = bps + cards * BPS_CARD
     bps = bps + dc * dc_weight

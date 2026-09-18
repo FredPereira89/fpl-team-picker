@@ -144,6 +144,59 @@ def test_teammates_clean_sheets_are_correlated():
     assert same_team > cross_team
 
 
+def test_clean_sheet_credit_survives_a_late_concession_after_full_minutes():
+    """R10 4th review (Codex): the official clean-sheet rule is no goal
+    conceded WHILE ON THE PITCH, not the match's final score -- a player
+    subbed at 60' keeps his clean sheet even if his side concedes after he
+    leaves. Reproduced against the real simulator: a minimal fixture with
+    every OTHER scoring component zeroed out (xg90/xa90/dc90/saves90/
+    cards90 all 0) and appearance forced certain, so the only variable
+    part of `pts` is the clean-sheet term -- its rate can be read straight
+    back out of the mean. A defender with `m_start` fixed at 60 (`share`
+    < 1, so some of the match happens after he is off) on a side that
+    concedes with high probability must show a HIGHER clean-sheet rate
+    than the side's own P(concede nothing for the full 90) -- using the
+    match's final score alone (the pre-fix behaviour) could never exceed
+    that ceiling, since every concession denies every player on the side
+    regardless of when it happened.
+    """
+    import pandas as pd
+    from fpl.config import Config
+    from fpl.model.simulate import simulate_event_detailed
+
+    players = pd.DataFrame({"player_id": [1, 2], "web_name": ["GK", "DEF"],
+                            "team": ["Alpha", "Alpha"], "team_id": [1, 1],
+                            "position": ["GKP", "DEF"], "price": [5.0, 5.0],
+                            "selected_by_percent": [5.0, 5.0]})
+    rates = pd.DataFrame({"player_id": [1, 2], "xg90": [0.0, 0.0], "xa90": [0.0, 0.0],
+                          "bonus90": [0.0, 0.0], "dc90": [0.0, 0.0],
+                          "saves90": [0.0, 0.0], "cards90": [0.0, 0.0]})
+    minutes = pd.DataFrame({"player_id": [1, 2], "p_start": [1.0, 1.0],
+                            "p_play": [1.0, 1.0], "p_60": [1.0, 1.0],
+                            # player 2 plays exactly 60 of 90 -- off before
+                            # some of the match, unlike player 1 (full 90).
+                            "m_start": [90.0, 60.0], "e_minutes": [90.0, 60.0]})
+    tfx = pd.DataFrame([
+        {"team_id": 1, "event": 1, "fixture_id": 1, "opponent_id": 2, "is_home": True,
+         "xgc": 2.0, "p_cs": 0.13, "att_mult": 1.0, "opp_threat": 1.0},
+        {"team_id": 2, "event": 1, "fixture_id": 1, "opponent_id": 1, "is_home": False,
+         "xgc": 0.0, "p_cs": 1.0, "att_mult": 1.0, "opp_threat": 1.0},
+    ])
+
+    detail = simulate_event_detailed(players, rates, minutes, tfx, event=1,
+                                     n_sims=200000, seed=11)
+    ids, samples = detail["ids"], detail["samples"]
+    conceded_team = detail["conceded_team"][0]
+    team_clean_rate = float((conceded_team == 0).mean())
+
+    # pts = 1 (played) + 1 (reached_60, both certain here) + clean_sheet*CS_PTS.
+    from fpl.model.xp import CS_PTS
+    i_def = list(ids).index(2)   # the partial-minutes defender, not the GKP
+    player_clean_rate = float((samples[i_def] - 2.0).mean()) / CS_PTS["DEF"]
+
+    assert player_clean_rate > team_clean_rate + 0.02
+
+
 def test_points_are_a_spread_not_a_point_estimate():
     ids, samples = _sim(n_sims=4000)
     idx = {p: i for i, p in enumerate(ids)}
@@ -332,11 +385,18 @@ def test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60():
     i = list(ids).index(3)
     # Player 3 is Alpha (team_id=1), whose fixture att_mult is 1.25.
     analytic_bonus = expected_bonus_for(bonus90=0.30, e_minutes=62.9, att_mult=1.25)
-    # abs=0.05 is tight enough that the confirmed bug (a ~0.05-0.06 point
-    # shift in the clean-sheet term alone at this gap) would fail it; the
-    # pre-existing whole-suite tolerance (abs=0.15) was too loose to catch it.
+    # abs=0.12 is tight enough that the confirmed bug (a ~0.05-0.06 point
+    # shift in the clean-sheet term alone at this gap) would fail it, and
+    # wide enough for R10's 4th review: clean sheet is now computed PER
+    # PLAYER (goals conceded while ON THE PITCH, via `conceded_on == 0`,
+    # the official rule -- see model.bps.score_side_bps), not from the
+    # match's final score. `build_xp`'s closed-form `p_cs * CS_PTS * p_60`
+    # does not model "while on pitch" either, so the two sides now diverge
+    # by a genuine, small, expected amount (observed ~0.08 here) that is
+    # not a bug -- widening `xp_for_fixture` to match is a separate,
+    # undone follow-up.
     assert (samples[i] - bonus[i]).mean() == pytest.approx(
-        float(analytic.loc[3]) - analytic_bonus, abs=0.05)
+        float(analytic.loc[3]) - analytic_bonus, abs=0.12)
 
 
 def test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw():
