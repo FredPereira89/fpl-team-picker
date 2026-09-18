@@ -341,3 +341,30 @@ def test_each_gameweek_is_replayed_under_its_own_config():
                                cfg_by_gw={1: _cfg(hit_cost=4)})
     assert results[0].hit_cost == 4       # archived config for GW1
     assert results[1].hit_cost == 8       # falls back to the current config
+
+
+def test_the_starting_squad_is_built_under_the_first_weeks_config():
+    """Budget, bench floor and tilt at GW1 decide the fifteen the tool would
+    have built, and the whole season descends from them. Building the start
+    under today's settings put a different team under a faithful replay."""
+    from fpl.backtest.replay import initial_state
+    pool = POOL.copy()
+    pool["xp_horizon"] = pool["xp_next1"] * 5
+    # Two premium players the tight budget cannot afford.
+    pool.loc[pool.player_id.isin([73, 74]), ["price", "xp_horizon"]] = [[20.0, 50.0]] * 2
+
+    from dataclasses import replace
+    rich = initial_state(pool, replace(_cfg(), budget=120.0))
+    tight = initial_state(pool, replace(_cfg(), budget=75.0))
+    assert 73 in rich.squad and 74 in rich.squad
+    assert 73 not in tight.squad and 74 not in tight.squad
+    assert rich.bank == pytest.approx(120.0 - sum(
+        float(pool.set_index("player_id").loc[p, "price"]) for p in rich.squad), abs=0.05)
+
+
+def test_a_supplied_squad_is_banked_under_the_first_weeks_budget():
+    from fpl.backtest.replay import initial_state
+    from dataclasses import replace
+    state = initial_state(POOL, replace(_cfg(), budget=80.0), squad=CURRENT)
+    assert state.squad == CURRENT
+    assert state.bank == pytest.approx(80.0 - 15 * 5.0)

@@ -300,6 +300,29 @@ def replay_season(xp_by_gw: dict[int, pd.DataFrame], actuals: pd.DataFrame,
     return results, state
 
 
+def initial_state(xp: pd.DataFrame, cfg, squad=None) -> ManagerState:
+    """The state a sequential replay starts from, under the FIRST week's config.
+
+    With no `squad` the start is a synthetic Mode 1 build on the production
+    objective (discounted `xp_horizon`). Both the build and the bank must use
+    the configuration in force at that gameweek: budget, bench weights and
+    floor, ownership tilt and horizon decay all change which fifteen come out,
+    and the whole season then descends from that squad. Building it under
+    today's settings put a different starting team under an otherwise faithful
+    replay.
+    """
+    price = _prices(xp)
+    if squad is None:
+        squad = list(optimize_squad(xp, cfg, xp_col="xp_horizon").player_ids)
+    squad = [int(p) for p in squad]
+    return ManagerState(
+        squad=squad,
+        bank=round(float(cfg.budget) - sum(price[p] for p in squad), 1),
+        purchase_prices={p: float(price[p]) for p in squad},
+        free_transfers=1,
+    )
+
+
 # Policies that describe something a manager could actually do. The oracle is
 # excluded on purpose, and every report has to say so.
 EXECUTABLE_POLICIES = {

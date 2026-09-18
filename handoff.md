@@ -30,6 +30,15 @@ the pinned-snapshot, calibrated, horizon-start path.
 | 2. `config.json` was archived but never applied — every historical week ran under today's settings | `gameweek_inputs` returns the archived config; `config_for_replay` applies its known fields; `replay_season`/`compare_policies` take `cfg_by_gw`; the script labels weeks without an archive a current-configuration challenger. Tests: `test_the_replay_returns_and_applies_the_archived_config`, `test_each_gameweek_is_replayed_under_its_own_config`. |
 | 3. This file was internally inconsistent (status table, branch marker), and a scripted edit had corrupted it to 39 MB in `f71b7e0` | Restored from `96a1591` and corrected; the corrupt commit was dropped from history before any push. |
 
+### Fourth review (2026-09-18)
+
+| Finding | Fix |
+|---|---|
+| 1. The synthetic starting squad and bank used today's config | `replay.initial_state(xp, cfg, squad=None)` builds and banks under the FIRST week's archived config; tests show a budget change moving the squad and the bank. |
+| 2. `rank_sims = 0` silently overrode an archived `rank_transfers=true` | Not implemented in the replay; such a week is now explicitly labelled a current-policy challenger in the output. |
+| 3. Replay provenance hashed today's config | `save_predictions` receives `week_cfg`. |
+| 4. Stale B4 row and replay paragraph | Corrected. |
+
 Codex's re-review findings are kept below for the record.
 
 ## Re-review findings
@@ -380,7 +389,7 @@ the temporary Free Hit picks endpoint.
 | B1 chip inventory/legality | Implemented. The GW19→GW20 Free Hit restriction is now independently verified by the official 2026/27 rules. |
 | B2 FT carry over WC/FH | Implemented and verified. |
 | B3 reversible Free Hit state | Implemented (RB4, RB11 fixed). |
-| B4 chip actions | Mostly implemented. FH scope and TC rule/formula are fixed; TC timing still compares unlike current/future values (RR4). |
+| B4 chip actions | Implemented (RB5, RB6, RR4 fixed). |
 | B5 transfer candidate breadth | Implemented. |
 | B6 horizon vs rank reranking | Implemented for live transfers; `rank_transfers=false` by default. |
 | B9 availability consistency | Implemented (RB7 fixed); invariants tested. |
@@ -395,11 +404,14 @@ the temporary Free Hit picks endpoint.
 | R11 hidden Bench Boost floor | Implemented; default is explicitly `0.0`. |
 
 The GW1–4 sequential totals remain **contaminated smoke-test output** — no
-pre-deadline snapshot can exist for those gameweeks. The replay now uses the
-configured horizon and live armband, but RR2 and RR5–RR7 mean it still should
-not be described as an exact production-policy replay. With the real horizon,
-`expected` made 5 transfers incl. one hit and finished level with `hold` at
-236. Still four gameweeks; still not a verdict.
+pre-deadline snapshot can exist for those gameweeks, and no archived config
+either, so they run as a current-configuration challenger. For gameweeks that
+DO have a snapshot, the replay is now the production policy: pinned capture,
+archived overrides and config (including the starting squad and bank), the
+configured horizon and decay, production calibration, and the live armband.
+The one unreplayed production path is rank-decided transfers
+(`rank_transfers=true`); such a week is labelled a current-policy challenger.
+Still a handful of gameweeks; still not a verdict.
 
 ## Still-open model work (after the blockers)
 

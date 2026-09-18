@@ -51,7 +51,8 @@ from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_s
                                       gameweek_inputs, actioned_snapshot,
                                       replay_calibration, config_for_replay)
 from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
-                                 expected_points_policy, oracle_rebuild_policy)
+                                 expected_points_policy, oracle_rebuild_policy,
+                                 initial_state)
 from fpl.data import snapshots
 from fpl.optimize.squad import optimize_squad
 
@@ -162,7 +163,18 @@ def main() -> int:
         # Today's settings for a gameweek with none -- which is then a
         # current-configuration challenger, not an exact replay, and says so.
         week_cfg, changed = config_for_replay(cfg, inputs["config"])
+        # The rank layer is not run in the replay. Since B6 it only REPORTS on
+        # transfers, so switching it off changes no decision -- unless the
+        # archived config had opted back into rank-decided transfers, which
+        # this replay does not implement. That week is then a current-policy
+        # challenger, not a replay of what the tool did, and is labelled.
+        if bool(getattr(week_cfg, "rank_transfers", False)):
+            config_notes.append(f"GW{gw}: archived config had rank_transfers=true; the "
+                                f"replay does not implement rank-decided transfers, so "
+                                f"this week is replayed as the expected-points policy "
+                                f"(current-policy challenger, not an exact replay)")
         week_cfg.rank_sims = 0
+        week_cfg.rank_transfers = False
         cfg_by_gw[gw] = week_cfg
         if changed:
             config_notes.append(f"GW{gw}: replayed under its archived config "
@@ -187,7 +199,7 @@ def main() -> int:
             # Stamped as a replay so the ledger never loses track of which
             # forecasts were made before the deadline and which were
             # reconstructed afterwards from data the live model never had.
-            save_predictions(xp, gw, args.root, cfg=cfg, origin="replay",
+            save_predictions(xp, gw, args.root, cfg=week_cfg, origin="replay",
                              sources={"origin": "replay",
                                       "replayed_at_gw": max(played)})
 
@@ -217,29 +229,23 @@ def main() -> int:
     print("=" * 62)
 
     first = played[0]
+    # Built and banked under the FIRST week's configuration, not today's: the
+    # budget, bench floor and tilt in force at GW1 decide which fifteen the
+    # tool would have built, and the whole season descends from them.
+    first_cfg = cfg_by_gw[first]
     if args.squad:
-        start_squad = [int(t) for t in args.squad.replace(",", " ").split()]
-        start_label = "your squad"
+        initial = initial_state(xp_by_gw[first], first_cfg,
+                                squad=[int(t) for t in args.squad.replace(",", " ").split()])
     else:
         # The production Mode 1 objective -- discounted xp_horizon -- not the
         # one-week column: a squad built on xp_next1 is a different policy from
         # the one the tool would actually have built at GW1.
-        start_squad = list(optimize_squad(xp_by_gw[first], cfg,
-                                          xp_col="xp_horizon").player_ids)
-        start_label = f"a synthetic Mode 1 build at GW{first}"
-        print(f"No --squad given, so the replay starts from {start_label} (the "
-              f"production squad objective). That start is a CHALLENGER, not your "
-              f"season: pass --squad with your real GW{first} fifteen for the "
-              f"executable-policy claim to be about you.")
-
-    price_at_start = dict(zip(xp_by_gw[first]["player_id"].astype(int),
-                              xp_by_gw[first]["price"].astype(float)))
-    initial = ManagerState(
-        squad=start_squad,
-        bank=round(cfg.budget - sum(price_at_start[p] for p in start_squad), 1),
-        purchase_prices={int(p): float(price_at_start[p]) for p in start_squad},
-        free_transfers=1,
-    )
+        initial = initial_state(xp_by_gw[first], first_cfg)
+        print(f"No --squad given, so the replay starts from a synthetic Mode 1 "
+              f"build at GW{first} (the production squad objective, under GW{first}'s "
+              f"configuration). That start is a CHALLENGER, not your season: pass "
+              f"--squad with your real GW{first} fifteen for the executable-policy "
+              f"claim to be about you.")
 
     wanted = [n.strip() for n in str(args.policies).split(",") if n.strip()]
     catalogue = {"hold": hold_policy, "expected": expected_points_policy}
