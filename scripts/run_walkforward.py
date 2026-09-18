@@ -40,8 +40,6 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fpl.config import load_config
-from fpl.data.normalize import (normalize_players, normalize_teams, normalize_fixtures,
-                                history_past_frame, apply_season_baseline, latest_season)
 from fpl.model.strength import team_ratings, league_goals_per_team_match
 from fpl.model.minutes import minutes_model
 from fpl.model.scoring import blended_rates
@@ -50,7 +48,8 @@ from fpl.model.xp import build_xp
 from fpl.model.calibration import fit_calibration, apply_calibration, scored_history
 from fpl.backtest.ledger import save_predictions
 from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_score,
-                                      squad_ledger, weekly_edge, replayable_gameweeks)
+                                      squad_ledger, weekly_edge, replayable_gameweeks,
+                                      gameweek_inputs)
 from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
                                  expected_points_policy, oracle_rebuild_policy)
 from fpl.data import snapshots
@@ -96,19 +95,19 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    cfg.horizon_gw = 1
-    cfg.rank_sims = 0          # the replay measures the projection, not the rank layer
+    # The CONFIGURED horizon, not 1. The production transfer policy chooses on
+    # the discounted multi-gameweek xp_horizon; forcing one week here turned
+    # the "expected" replay into a greedy weekly chooser that the live tool
+    # never runs, and its result then said nothing about the live optimizer.
+    # rank_sims stays at 0: since B6 the rank layer only reports on transfers,
+    # so switching it off changes no decision this replay makes.
+    cfg.rank_sims = 0
     cache = args.root / "cache"
 
     bootstrap = newest_cached(str(cache / "bootstrap-static_*.json"))
     raw_fixtures = newest_cached(str(cache / "fixtures_*.json"))
     summaries = load_summaries(cache)
-
-    players = normalize_players(bootstrap)
-    teams = normalize_teams(bootstrap)
-    past = history_past_frame(summaries)
-    players = apply_season_baseline(players, past, latest_season(past))
-    fixtures = normalize_fixtures(raw_fixtures)
+    n_players = len(bootstrap.get("elements", []))
 
     actuals = actuals_frame(summaries)
     played = sorted(int(r) for r in actuals["round"].unique() if r > 0)
@@ -123,7 +122,8 @@ def main() -> int:
     writable = set(replayable_gameweeks(played, args.root, overwrite=args.overwrite))
     protected = [gw for gw in played if gw not in writable]
     print(f"Replaying GW{played[0]}..GW{played[-1]} "
-          f"({len(players)} players, {len(summaries)} summaries)")
+          f"({n_players} players, {len(summaries)} summaries, "
+          f"horizon {cfg.horizon_gw} GW)")
     if protected and not args.no_save:
         kept = ", GW".join(str(g) for g in protected)
         print(f"Keeping the live forecast already on file for GW{kept} "
@@ -134,13 +134,20 @@ def main() -> int:
         print(banner)
         print()
 
-    print(f"{'GW':>3}{'squad':>8}{'field':>7}{'edge':>7}  calibration")
+    print(f"{'GW':>3}{'squad':>8}{'field':>7}{'edge':>7}  inputs          calibration")
     results = {}
     xp_by_gw = {}
     for gw in played:
+        # Prices, availability, news, clubs and fixtures AS OF THE DEADLINE when
+        # a pre-deadline snapshot exists; today's otherwise, and flagged. The
+        # earlier script imported the snapshot module and then read only the
+        # current cache, so a valid snapshot silenced the banner without
+        # changing a single input.
+        inputs = gameweek_inputs(args.root, gw, bootstrap, raw_fixtures, summaries)
+        players, teams, fixtures = inputs["players"], inputs["teams"], inputs["fixtures"]
         seen = forecast_inputs(summaries, before_event=gw)
         ratings = team_ratings(players, teams, current=seen["current"])
-        tfx = team_fixture_frame(fixtures, ratings, gw, 1,
+        tfx = team_fixture_frame(fixtures, ratings, gw, cfg.horizon_gw,
                                  league_gc=league_goals_per_team_match(players))
         rates = blended_rates(players, seen["current"], cfg, rounds=seen["rounds"])
         mins = minutes_model(players, cfg, current=seen["current"], rounds=seen["rounds"])
@@ -164,17 +171,18 @@ def main() -> int:
 
         frame = xp.merge(actuals[actuals["round"] == gw][["player_id", "actual", "minutes"]],
                          on="player_id", how="inner").set_index("player_id")
-        pool = xp[xp["player_id"].isin(frame.index)].copy()
-        pool = pool.drop(columns=[c for c in pool.columns if c.startswith("xp_gw")],
-                         errors="ignore")
-        # The same pool the oracle sees, kept for the sequential replay below so
-        # the two comparisons differ only in whether the rules apply.
-        xp_by_gw[gw] = pool
+        # The FULL frame -- horizon columns included -- goes to the sequential
+        # replay, so the production policy sees exactly what a live run sees.
+        # Each one-week policy strips it back to the current event itself.
+        xp_by_gw[gw] = xp[xp["player_id"].isin(frame.index)].copy()
+        pool = xp_by_gw[gw].drop(columns=[c for c in xp.columns if c.startswith("xp_gw")],
+                                 errors="ignore")
         squad = optimize_squad(pool, cfg, xp_col="xp_next1")
         got = realised_score(squad.player_ids, squad.starting_ids, frame)
         avg = averages.get(gw, 0.0)
         results[gw] = (got["points"], avg)
-        print(f"{gw:>3}{got['points']:>8.0f}{avg:>7.0f}{got['points'] - avg:>+7.0f}  {note}")
+        print(f"{gw:>3}{got['points']:>8.0f}{avg:>7.0f}{got['points'] - avg:>+7.0f}  "
+              f"{inputs['source']:<15} {note}")
 
     # --- what a manager could actually have done -----------------------------
     #

@@ -23,6 +23,7 @@ import pandas as pd
 
 from ..chips import chip_available
 from ..optimize.lineup import build_lineup
+from ..optimize.objective import event_columns
 from ..optimize.squad import Squad, optimize_squad
 from ..optimize.transfers import (optimize_transfers, selling_price, bank_after,
                                   TransferPlan)
@@ -77,6 +78,10 @@ class Decision:
     starting_ids: list[int]
     chip: str | None = None
     free_transfers: int | None = None
+    # The armband as the policy actually set it. Left None, scoring falls back
+    # to the two highest projections -- which is not the production decision.
+    captain: int | None = None
+    vice: int | None = None
 
 
 @dataclass
@@ -112,25 +117,56 @@ def selling_values(state: ManagerState, xp: pd.DataFrame) -> dict[int, float]:
 # Decision. It may not mutate the state: the walk below owns that, so every
 # policy is charged for its transfers by the same code.
 
+def one_week_frame(xp: pd.DataFrame) -> pd.DataFrame:
+    """The projection with only the CURRENT event's per-gameweek column.
+
+    The shared objective values the armband in every xp_gw column it can see.
+    A policy that is deciding one week -- the hold XI, the oracle rebuild --
+    must not be nudged by who captains well next month.
+    """
+    cols = event_columns(xp)
+    if len(cols) <= 1:
+        return xp
+    return xp.drop(columns=[c for _, c in cols[1:]])
+
+
+def _with_armband(decision: Decision, xp: pd.DataFrame) -> Decision:
+    """Set captain and vice through the LIVE lineup function.
+
+    `choose_captain` discounts a captain for his chance of not appearing, so
+    the production armband can differ from the raw top projection. Every
+    executable policy goes through here so the replay scores the decision the
+    tool would actually recommend.
+    """
+    lineup = build_lineup(Squad(list(decision.squad_ids),
+                                list(decision.starting_ids), 0.0, 0.0), xp)
+    decision.captain, decision.vice = int(lineup.captain), int(lineup.vice)
+    return decision
+
+
 def hold_policy(xp, state, gw, cfg) -> Decision:
     """Make no transfer, ever. The baseline every other policy must beat."""
     squad = [int(i) for i in state.squad]
-    lineup = build_lineup(Squad(squad, squad[:11], 0.0, 0.0), xp)
-    # build_lineup does not choose the XI, so pick it properly: best eleven that
-    # forms a legal shape, which optimize_transfers gives for zero changes.
-    best, _ = optimize_transfers(xp, squad, state.bank, 0, cfg,
+    week = one_week_frame(xp)
+    best, _ = optimize_transfers(week, squad, state.bank, 0, cfg,
                                  xp_col="xp_next1",
                                  selling_prices=selling_values(state, xp))
-    return Decision(list(best.squad_ids), list(best.starting_ids), None)
+    return _with_armband(Decision(list(best.squad_ids), list(best.starting_ids)), xp)
 
 
 def expected_points_policy(xp, state, gw, cfg) -> Decision:
-    """Maximise expected net points over the horizon, hits charged honestly."""
+    """The production transfer policy: discounted horizon net points.
+
+    `xp` must carry the configured multi-gameweek horizon -- `xp_horizon` and
+    the `xp_gw*` columns as `build_xp` produces them for a live run. Handing
+    this policy a one-week frame turns it into a greedy weekly chooser and the
+    replay then measures something the live tool never does.
+    """
     best, _ = optimize_transfers(xp, [int(i) for i in state.squad], state.bank,
                                  int(state.free_transfers), cfg,
                                  xp_col="xp_horizon",
                                  selling_prices=selling_values(state, xp))
-    return Decision(list(best.squad_ids), list(best.starting_ids), None)
+    return _with_armband(Decision(list(best.squad_ids), list(best.starting_ids)), xp)
 
 
 def oracle_rebuild_policy(xp, state, gw, cfg) -> Decision:
@@ -141,9 +177,9 @@ def oracle_rebuild_policy(xp, state, gw, cfg) -> Decision:
     ceiling -- the score a manager could reach if the rules did not apply --
     because the old harness reported exactly this as if it were a backtest.
     """
-    squad = optimize_squad(xp, cfg, xp_col="xp_next1")
-    return Decision(list(squad.player_ids), list(squad.starting_ids), None,
-                    free_transfers=SQUAD_SIZE)
+    squad = optimize_squad(one_week_frame(xp), cfg, xp_col="xp_next1")
+    return _with_armband(Decision(list(squad.player_ids), list(squad.starting_ids),
+                                  free_transfers=SQUAD_SIZE), xp)
 
 
 def _apply_freehit_restoration(state: ManagerState, gw: int) -> ManagerState:
@@ -192,7 +228,8 @@ def step(xp: pd.DataFrame, actuals: pd.DataFrame, state: ManagerState, gw: int,
     frame = xp.set_index("player_id").join(
         actuals.set_index("player_id")[["actual", "minutes"]], how="left")
     frame[["actual", "minutes"]] = frame[["actual", "minutes"]].fillna(0.0)
-    scored = realised_score(squad, list(decision.starting_ids), frame)
+    scored = realised_score(squad, list(decision.starting_ids), frame,
+                            captain=decision.captain, vice=decision.vice)
 
     after = before.copy()
     # Bank and purchase prices move before the chip bookkeeping, because a Free

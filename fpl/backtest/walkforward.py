@@ -115,25 +115,37 @@ def autosub(squad_ids, starting_ids, frame) -> tuple[list[int], list[tuple[int, 
     return xi, subs
 
 
-def realised_score(squad_ids, starting_ids, frame) -> dict:
+def realised_score(squad_ids, starting_ids, frame, captain=None, vice=None) -> dict:
     """What this squad ACTUALLY scored, with autosubs and the armband applied.
 
-    Captain and vice are the two highest projections in the STARTING XI as it
-    stood at the deadline -- not in the post-substitution XI. A manager names
-    them before kick-off, so a player who was autosubbed IN can never wear the
-    armband, however well he then did.
+    `captain` and `vice` are the armband as it was actually set. When they are
+    given they are honoured exactly: the captain scores double if he appeared,
+    otherwise the vice does. When they are not given -- older callers, and the
+    oracle -- the two highest projections in the deadline XI stand in, which is
+    the old behaviour and NOT the production decision: the live lineup chooses
+    the captain with `choose_captain`, which discounts a captain for his chance
+    of not appearing, so it can differ from the raw top projection. A replay
+    that reselected the armband was scoring a different decision from the one
+    the tool recommends.
+
+    Either way the pair is fixed at the deadline: a player autosubbed IN can
+    never wear the armband, however well he then did.
     """
     xi, subs = autosub(squad_ids, starting_ids, frame)
     mins = frame["minutes"].to_dict()
-    xp = frame["xp_next1"].to_dict()
-    order = sorted([int(p) for p in starting_ids], key=lambda p: (-float(xp[p]), p))
-    captain = order[0]
-    if float(mins.get(captain, 0)) <= 0 and len(order) > 1:
-        captain = order[1]
+    if captain is None:
+        xp = frame["xp_next1"].to_dict()
+        order = sorted([int(p) for p in starting_ids], key=lambda p: (-float(xp[p]), p))
+        captain = order[0]
+        vice = order[1] if len(order) > 1 else captain
+    captain, vice = int(captain), int(vice if vice is not None else captain)
+    armband = captain
+    if float(mins.get(captain, 0)) <= 0 and float(mins.get(vice, 0)) > 0:
+        armband = vice
     points = float(sum(float(frame.loc[p, "actual"]) for p in xi))
-    return {"points": points + float(frame.loc[captain, "actual"]),
-            "xi": xi, "subs": subs, "captain": captain,
-            "vice": order[1] if len(order) > 1 else captain}
+    return {"points": points + float(frame.loc[armband, "actual"]),
+            "xi": xi, "subs": subs, "captain": armband,
+            "named_captain": captain, "vice": vice}
 
 
 def squad_ledger(by_gw: dict[int, tuple[float, float]]) -> pd.DataFrame:
@@ -195,3 +207,45 @@ def weekly_edge(edges) -> dict:
         )
     return {"n": n, "mean": mean, "sd": sd, "ci_low": lo, "ci_high": hi,
             "t": tstat, "p": pval, "detectable_edge": mde, "verdict": verdict}
+
+
+def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
+                    summaries: dict, deadline: str | None = None,
+                    snapshot_version: str | None = None) -> dict:
+    """The bootstrap-derived inputs a replay of `gw` should use.
+
+    From the gameweek's point-in-time snapshot when one exists -- the prices,
+    availability, news, club assignments and fixture list as they stood before
+    the deadline -- and from the current cache otherwise, in which case
+    `point_in_time` is False and the caller must keep saying so. The earlier
+    version of the walk-forward script imported the snapshot module and then
+    read only the current cache, so a valid snapshot silenced the contamination
+    banner without changing a single input.
+
+    Returns {"players", "teams", "fixtures", "point_in_time", "source"}.
+    """
+    from ..data import snapshots
+    from ..data.normalize import (normalize_players, normalize_teams,
+                                  normalize_fixtures, history_past_frame,
+                                  apply_season_baseline, latest_season)
+
+    snap = snapshots.load(root, int(gw), deadline=deadline, version=snapshot_version)
+    pit = snapshots.is_point_in_time(root, int(gw), deadline=deadline,
+                                     version=snapshot_version)
+    if snap is not None and pit:
+        bootstrap, raw_fixtures, source = snap["bootstrap"], snap["fixtures"], "snapshot"
+    else:
+        bootstrap, raw_fixtures, source = current_bootstrap, current_fixtures, "current cache"
+        pit = False
+
+    players = normalize_players(bootstrap)
+    past = history_past_frame(summaries)
+    players = apply_season_baseline(players, past, latest_season(past))
+    return {
+        "players": players,
+        "teams": normalize_teams(bootstrap),
+        "fixtures": normalize_fixtures(raw_fixtures),
+        "point_in_time": bool(pit),
+        "source": source,
+        "events": bootstrap.get("events", []),
+    }

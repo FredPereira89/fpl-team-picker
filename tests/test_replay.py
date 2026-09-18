@@ -273,3 +273,56 @@ def test_an_executable_policy_cannot_waive_its_own_hits():
     result, _ = step(POOL, _actuals(), _state(free_transfers=1), 1, _cfg(),
                      _fixed(swap, swap[:11]))
     assert result.hit_cost == 4
+
+
+# --- RB3: the replay scores the armband the tool would actually set ---
+
+def test_the_replay_scores_the_risk_aware_captain_not_the_top_projection():
+    """choose_captain values the armband as xp[c] + (1 - p_play[c]) * xp[vice],
+    so a slightly lower projection with a good vice behind it can beat the raw
+    top pick. realised_score used to reselect by raw xP alone, scoring a
+    decision the tool never made."""
+    pool = POOL.copy()
+    frame = pool.set_index("player_id")
+    # 73 (FWD): the raw top projection, certain to play. 38 (MID): a touch
+    # lower, but a 20% chance of handing a strong vice the double.
+    #   value(73) = 6.0 + 0.0 * 5.5 = 6.0
+    #   value(38) = 5.5 + 0.2 * 6.0 = 6.7   -> the live armband goes to 38
+    pool.loc[pool.player_id == 73, ["xp_next1", "p_play"]] = [6.0, 1.0]
+    pool.loc[pool.player_id == 38, ["xp_next1", "p_play"]] = [5.5, 0.8]
+    actuals = _actuals(points=2.0)
+
+    result, _ = step(pool, actuals, _state(), 1, _cfg(), hold_policy)
+    assert 73 in result.xi and 38 in result.xi
+    assert result.captain == 38
+
+
+def test_the_vice_takes_the_armband_when_the_captain_does_not_appear():
+    actuals = _actuals(points=2.0)
+    actuals.loc[actuals.player_id == 1, ["actual", "minutes"]] = [0.0, 0.0]
+    actuals.loc[actuals.player_id == 3, "actual"] = 9.0
+    decide = lambda xp, st, gw, c: Decision(list(CURRENT), list(XI), captain=1, vice=3)
+    result, _ = step(POOL, actuals, _state(), 1, _cfg(), decide)
+    assert result.captain == 3
+
+
+def test_an_explicit_armband_is_honoured_over_the_top_projection():
+    pool = POOL.copy()
+    pool.loc[pool.player_id == 73, "xp_next1"] = 9.0     # would be the raw pick
+    decide = lambda xp, st, gw, c: Decision(list(CURRENT), list(XI), captain=38, vice=39)
+    result, _ = step(pool, _actuals(points=2.0), _state(), 1, _cfg(), decide)
+    assert result.captain == 38
+
+
+def test_the_expected_policy_sees_the_full_horizon():
+    """With horizon columns present, a transfer worth little now and a lot
+    later must be visible to the production policy."""
+    pool = POOL.copy()
+    for e in (1, 2, 3):
+        pool[f"xp_gw{e}"] = pool["xp_next1"]
+    # 4 is a GKP outside the squad: nothing this week, huge over the horizon.
+    pool.loc[pool.player_id == 4, "xp_gw1"] = 0.5
+    pool.loc[pool.player_id == 4, ["xp_gw2", "xp_gw3"]] = 30.0
+    pool["xp_horizon"] = pool["xp_gw1"] + 0.85 * pool["xp_gw2"] + 0.85 ** 2 * pool["xp_gw3"]
+    _, after = step(pool, _actuals(), _state(free_transfers=1), 1, _cfg(), expected_points_policy)
+    assert 4 in after.squad

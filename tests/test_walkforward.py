@@ -172,3 +172,77 @@ def test_a_replay_never_overwrites_a_live_forecast(tmp_path):
     assert replayable_gameweeks([1, 2, 3], tmp_path) == [1, 3]
     assert replayable_gameweeks([1, 2, 3], tmp_path, overwrite=True) == [1, 2, 3]
     assert load_predictions(2, tmp_path)["xp_next1"].iloc[0] == 5.0
+
+
+# --- RB1: a replay must READ the snapshot, not merely notice it exists ---
+
+def _bootstrap(cost, status, team):
+    return {
+        "teams": [{"id": t, "name": f"Team{t}", "short_name": f"T{t}",
+                   "strength_overall_home": 3, "strength_overall_away": 3}
+                  for t in (1, 2)],
+        "element_types": [{"id": 1, "singular_name_short": "GKP"},
+                          {"id": 2, "singular_name_short": "DEF"},
+                          {"id": 3, "singular_name_short": "MID"},
+                          {"id": 4, "singular_name_short": "FWD"}],
+        "elements": [{
+            "id": 1, "web_name": "P1", "team": team, "element_type": 3,
+            "now_cost": cost, "status": status, "news": "",
+            "chance_of_playing_next_round": None, "minutes": 900, "starts": 10,
+            "total_points": 50, "goals_scored": 3, "assists": 2, "clean_sheets": 1,
+            "goals_conceded": 10, "saves": 0, "bonus": 2, "bps": 100,
+            "yellow_cards": 1, "red_cards": 0, "own_goals": 0,
+            "expected_goals": "2.0", "expected_assists": "1.0",
+            "expected_goals_conceded": "10.0", "selected_by_percent": "5.0",
+            "defensive_contribution": 10,
+        }],
+        "events": [{"id": 5, "deadline_time": "2026-09-11T17:30:00Z"}],
+    }
+
+
+def _fixtures(event):
+    return [{"id": 1, "event": event, "team_h": 1, "team_a": 2,
+             "team_h_difficulty": 2, "team_a_difficulty": 3,
+             "kickoff_time": "2026-09-12T14:00:00Z", "finished": True}]
+
+
+def test_a_point_in_time_snapshot_is_what_the_replay_reads(tmp_path):
+    """Current cache and the GW5 snapshot deliberately disagree on price,
+    status, club and the fixture list; the snapshot values must win."""
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest.walkforward import gameweek_inputs
+
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(55, "a", 1),
+                      fixtures=_fixtures(5), deadline="2026-09-11T17:30:00Z",
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={})
+    assert got["point_in_time"] is True
+    assert got["source"] == "snapshot"
+    row = got["players"].set_index("player_id").loc[1]
+    assert row["price"] == 5.5 and row["status"] == "a" and row["team_id"] == 1
+    assert list(got["fixtures"]["event"]) == [5]
+
+
+def test_without_a_snapshot_the_current_cache_is_used_and_flagged(tmp_path):
+    from fpl.backtest.walkforward import gameweek_inputs
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={})
+    assert got["point_in_time"] is False
+    assert got["source"] == "current cache"
+    assert got["players"].set_index("player_id").loc[1, "price"] == 9.9
+
+
+def test_a_post_deadline_snapshot_is_not_used_as_point_in_time(tmp_path):
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest.walkforward import gameweek_inputs
+
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(55, "a", 1),
+                      fixtures=_fixtures(5), deadline="2026-09-11T17:30:00Z",
+                      captured_at=datetime(2026, 9, 20, tzinfo=timezone.utc))
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={})
+    assert got["point_in_time"] is False
+    assert got["players"].set_index("player_id").loc[1, "price"] == 9.9
