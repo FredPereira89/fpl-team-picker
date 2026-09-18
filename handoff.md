@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **689 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **692 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -60,6 +60,19 @@ Codex's re-review findings are kept below for the record.
 | R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Assists and bonus still independent (documented residual). `simulate_event_detailed` exposes goals/conceded per scenario. | `fpl/model/simulate.py` |
 | R2 rival field legality | **done (achievable part)** — `rank._repair()` makes every drawn XI ≤3 per club and priced under budget minus the cheapest legal bench (`_xi_ceiling`). Cohort-calibrated formation/captain shares still need pre-deadline public picks, which nothing in the repo fetches — that half stays open. | `fpl/optimize/rank.py` |
 | R1 Mode 1 objective | **done** — expected points decide the Mode 1 squad; rank reports (`rank_stats["decided_by"]`, `rank_would_choose`); `optimizer.rank_squad` opts back in. Ties on the bar are worth half. **Behaviour change for the live Mode 1 run.** |
+
+## P3 progress
+
+| Item | Status | Notes |
+|---|---|---|
+| R9 chip timing beyond the horizon | **window fix done** — holds/patience/FH blank search bounded by the current chip window (GW19 for the first set). Still structure-based past the xP horizon (no chip-value projection); that remainder is documented, not built. | `fpl/optimize/chips.py` |
+| R7 attack double-count | next — plan: cap each player's fixture goal expectation at his share of the team total the strength model gives (`λ_i · min(1, xgc_opp / Σλ_team)`) in `model.xp`, the same rule the R3 allocation applies, so xP and the simulation agree exactly | `fpl/model/xp.py` |
+| Proper probability scoring | planned — Brier + reliability bins for p_play (minutes>0) and p_60 (minutes≥60) in `ledger.score_gameweek`; CRPS for points needs per-player distributions the ledger does not store yet | `fpl/backtest/ledger.py` |
+| R6 cold starts / stale overrides | planned — exposure-weighted positional priors; form blend by effective minutes; stale overrides decay toward the model | `fpl/model/scoring.py`, `fpl/model/minutes.py`, `fpl/data/overrides.py` |
+| R4 confidence into the distribution | not started (posterior draws for p_start / rates) | |
+| R5 event-specific team-coherent minutes | not started (large) | |
+| R8 multi-period MILP | not started (large) | |
+| R10 BPS rebuild | not started (large) | |
 
 ## Re-review findings
 
