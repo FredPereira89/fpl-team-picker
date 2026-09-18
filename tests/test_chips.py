@@ -373,3 +373,20 @@ def test_a_blocked_chip_is_explained_by_the_rule_that_blocked_it():
                      _used("benchboost", event=1))
     assert a.chip is None
     assert "benchboost" in a.reason
+
+
+# --- RR4: timing compares like with like ---
+
+def test_a_better_future_armband_week_still_holds_triple_captain():
+    """This week's REAL marginal value (vice takeover included) was being
+    compared against future weeks' raw captain xP. On the same formula the
+    future week was better, but the mismatch made the advisor play now."""
+    xp = _xp(captain_xp=9.5)
+    xp["xp_gw2"] = xp["xp_next1"]
+    xp["xp_gw3"] = 4.0
+    xp.loc[xp.player_id == 1, "xp_gw3"] = 14.2      # a much better armband week
+    xp.loc[xp.player_id == 1, "p_play"] = 0.6        # inflates the current REAL value
+    counts = pd.DataFrame([{"team_id": 1, "event": e, "n_fixtures": 1} for e in (2, 3)])
+    a = advise_chips(xp, LINEUP, SQUAD, counts, TEAM_BY_PLAYER, EVENT, [])
+    assert a.chip != "triplecaptain"
+    assert a.hold_until == 3

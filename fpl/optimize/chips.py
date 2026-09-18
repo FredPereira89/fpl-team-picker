@@ -202,13 +202,18 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     bench_by_event = bench_value_by_event(xp_df, ids)
     exposure = squad_exposure(counts, ids, team_by_player)
     horizon_last = max(cap_by_event) if cap_by_event else from_event
-    # THIS week's values come from the real lineup: the chip's marginal value
-    # with the triple passing to the vice, and the four players actually
-    # benched rather than the four lowest projections. Future weeks keep the
-    # cheaper per-event approximations -- there is no lineup for them yet --
-    # which if anything understates them, so it cannot make the advisor hasty.
-    cap_xp = triple_captain_value(lineup, xp_df)
-    bench_total = bench_boost_value(lineup, xp_df)
+    # TIMING compares this week against future weeks, so both sides must be
+    # in the same currency: the raw best-armband projection and the four
+    # lowest projections, which are all a future week can offer -- there is
+    # no lineup for it yet. Mixing the real current-week value (vice takeover
+    # included, the actual bench) into that comparison biased the advisor
+    # toward playing now: a current 10.0 with the vice term beat a future 14.2
+    # that had been reduced to 9.5 without it. The real values are still
+    # computed, for the REASON text, where they are the honest number.
+    cap_xp = cap_by_event.get(from_event, float(df.loc[lineup.captain, "xp_next1"]))
+    bench_total = bench_by_event.get(from_event, sum(bench_xp))
+    cap_value_now = triple_captain_value(lineup, xp_df)
+    bench_value_now = bench_boost_value(lineup, xp_df)
     squad_size = len(ids)
 
     holds: list[tuple[str, int, str]] = []
@@ -273,7 +278,8 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     if triple_ok and usable("triplecaptain"):
         detail = "a double gameweek" if cap_fixtures >= 2 else "an outstanding single fixture"
         return ChipAdvice("triplecaptain", (
-            f"{df.loc[lineup.captain, 'web_name']} has {detail} (xP {cap_xp:.1f}), and no "
+            f"{df.loc[lineup.captain, 'web_name']} has {detail} (the extra armband "
+            f"return is worth {cap_value_now:.1f} xP, vice takeover included), and no "
             f"better armband week is visible through GW{horizon_last}. "
             f"Triple Captain turns that into 3x. If he does not appear the triple "
             f"passes to your vice-captain, so the downside is a weaker armband, "
@@ -283,7 +289,7 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     if bench_ok and usable("benchboost"):
         return ChipAdvice("benchboost", (
             f"All four bench players project at {min(bench_xp):.1f}+ xP "
-            f"({bench_total:.1f} total), the best bench week visible through "
+            f"({bench_value_now:.1f} total), the best bench week visible through "
             f"GW{horizon_last}. Bench Boost banks that — though the lineup "
             f"optimizer picks the real bench, so the total may shift slightly."
         ))
