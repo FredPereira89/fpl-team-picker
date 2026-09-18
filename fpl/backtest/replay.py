@@ -278,8 +278,14 @@ def step(xp: pd.DataFrame, actuals: pd.DataFrame, state: ManagerState, gw: int,
 
 def replay_season(xp_by_gw: dict[int, pd.DataFrame], actuals: pd.DataFrame,
                   state: ManagerState, cfg, policy,
-                  gameweeks=None) -> tuple[list[GameweekResult], ManagerState]:
-    """Walk a manager's state through every gameweek, in order."""
+                  gameweeks=None, cfg_by_gw: dict | None = None
+                  ) -> tuple[list[GameweekResult], ManagerState]:
+    """Walk a manager's state through every gameweek, in order.
+
+    `cfg_by_gw` supplies the configuration each gameweek was actually decided
+    under (from its snapshot); `cfg` covers the rest. Running every historical
+    week under today's settings reconstructs decisions the tool never made.
+    """
     results = []
     order = sorted(gameweeks if gameweeks is not None else xp_by_gw)
     for gw in order:
@@ -288,7 +294,8 @@ def replay_season(xp_by_gw: dict[int, pd.DataFrame], actuals: pd.DataFrame,
             continue
         gw_actuals = actuals[actuals["round"] == int(gw)] if "round" in actuals \
             else actuals
-        result, state = step(xp, gw_actuals, state, int(gw), cfg, policy)
+        week_cfg = (cfg_by_gw or {}).get(int(gw), cfg)
+        result, state = step(xp, gw_actuals, state, int(gw), week_cfg, policy)
         results.append(result)
     return results, state
 
@@ -304,7 +311,7 @@ ORACLE_POLICIES = {"oracle": oracle_rebuild_policy}
 
 def compare_policies(xp_by_gw, actuals, initial: ManagerState, cfg,
                      policies=None, field_average=None,
-                     gameweeks=None) -> pd.DataFrame:
+                     gameweeks=None, cfg_by_gw: dict | None = None) -> pd.DataFrame:
     """One row per policy: what it scored, what it paid, and whether it is real.
 
     `executable` is the column that matters. The old harness reported a free
@@ -315,7 +322,8 @@ def compare_policies(xp_by_gw, actuals, initial: ManagerState, cfg,
     rows = []
     for name, policy in chosen.items():
         results, final = replay_season(xp_by_gw, actuals, initial.copy(), cfg,
-                                       policy, gameweeks=gameweeks)
+                                       policy, gameweeks=gameweeks,
+                                       cfg_by_gw=cfg_by_gw)
         weeks = [r.gw for r in results]
         edge = None
         if field_average:

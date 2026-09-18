@@ -321,3 +321,74 @@ def test_the_replay_gets_the_overrides_the_live_run_applied(tmp_path):
                       captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc), news=news)
     got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6), summaries={})
     assert got["news"] == news
+
+
+# --- third review, finding 1: a legacy forecast must not silently read a newer capture ---
+
+def test_a_forecast_that_predates_snapshots_forces_a_flagged_fallback(tmp_path):
+    """None used to mean both "no forecast" and "forecast without a snapshot",
+    and the caller treated both as "pick the newest capture" -- so a legacy
+    decision replayed against data it never saw, with no warning."""
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest import manifest
+    from fpl.backtest.walkforward import actioned_snapshot, gameweek_inputs, NO_SNAPSHOT
+
+    deadline = "2026-09-11T17:30:00Z"
+    manifest.record_version(tmp_path, gw=5, version="legacy", origin="live",
+                            created_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+                            deadline=deadline)                      # no snapshot
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(57, "a", 1),
+                      fixtures=_fixtures(5), deadline=deadline,
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+
+    pin = actioned_snapshot(tmp_path, 5)
+    assert pin == NO_SNAPSHOT
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={}, snapshot_version=pin)
+    assert got["point_in_time"] is False
+    assert "current cache" in got["source"]
+    assert got["players"].set_index("player_id").loc[1, "price"] == 9.9
+    assert snapshots.contamination_note(tmp_path, [5], versions_by_gw={5: pin}) is not None
+
+
+def test_no_forecast_at_all_still_allows_automatic_snapshot_selection(tmp_path):
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest.walkforward import actioned_snapshot, gameweek_inputs
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(57, "a", 1),
+                      fixtures=_fixtures(5), deadline="2026-09-11T17:30:00Z",
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    assert actioned_snapshot(tmp_path, 5) is None
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6),
+                          summaries={}, snapshot_version=None)
+    assert got["source"] == "snapshot"
+
+
+# --- third review, finding 2: the archived configuration is applied ---
+
+def test_the_replay_returns_and_applies_the_archived_config(tmp_path):
+    from datetime import datetime, timezone
+    from fpl.config import Config
+    from fpl.data import snapshots
+    from fpl.backtest.walkforward import gameweek_inputs, config_for_replay
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(55, "a", 1),
+                      fixtures=_fixtures(5), deadline="2026-09-11T17:30:00Z",
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+                      config={"horizon_gw": 3, "horizon_decay": 0.7,
+                              "not_a_real_field": 1})
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6), summaries={})
+    assert got["config"]["horizon_gw"] == 3
+    week_cfg, changed = config_for_replay(Config(horizon_gw=5, horizon_decay=0.85),
+                                          got["config"])
+    assert week_cfg.horizon_gw == 3 and week_cfg.horizon_decay == 0.7
+    assert changed == ["horizon_decay", "horizon_gw"]
+    assert not hasattr(week_cfg, "not_a_real_field")
+
+
+def test_no_archived_config_means_todays_config_unchanged():
+    from fpl.config import Config
+    from fpl.backtest.walkforward import config_for_replay
+    cfg = Config(horizon_gw=5)
+    out, changed = config_for_replay(cfg, {})
+    assert out is cfg and changed == []

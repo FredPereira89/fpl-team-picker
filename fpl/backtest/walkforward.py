@@ -229,17 +229,27 @@ def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
                                   normalize_fixtures, history_past_frame,
                                   apply_season_baseline, latest_season)
 
-    snap = snapshots.load(root, int(gw), deadline=deadline, version=snapshot_version)
-    pit = snapshots.is_point_in_time(root, int(gw), deadline=deadline,
-                                     version=snapshot_version)
     news: dict = {}
-    if snap is not None and pit:
-        bootstrap, raw_fixtures, source = snap["bootstrap"], snap["fixtures"], "snapshot"
-        # The manual overrides the live run applied. Recomputing minutes
-        # without them reconstructs a decision the live run never made.
-        news = dict(snap.get("news") or {})
+    config: dict = {}
+    if snapshot_version == NO_SNAPSHOT:
+        # A decision is on record but nothing says what it saw. Reading any
+        # capture would be a guess dressed as the record; fall back, flagged.
+        snap, pit = None, False
+        source = "current cache (forecast predates snapshots)"
     else:
-        bootstrap, raw_fixtures, source = current_bootstrap, current_fixtures, "current cache"
+        snap = snapshots.load(root, int(gw), deadline=deadline, version=snapshot_version)
+        pit = snapshots.is_point_in_time(root, int(gw), deadline=deadline,
+                                         version=snapshot_version)
+        source = "snapshot" if (snap is not None and pit) else "current cache"
+    if snap is not None and pit:
+        bootstrap, raw_fixtures = snap["bootstrap"], snap["fixtures"]
+        # The manual overrides and the configuration the live run applied.
+        # Recomputing under today's settings reconstructs a decision the live
+        # run never made -- a changed horizon or decay changes every objective.
+        news = dict(snap.get("news") or {})
+        config = dict(snap.get("config") or {})
+    else:
+        bootstrap, raw_fixtures = current_bootstrap, current_fixtures
         pit = False
 
     players = normalize_players(bootstrap)
@@ -253,20 +263,32 @@ def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
         "source": source,
         "events": bootstrap.get("events", []),
         "news": news,
+        "config": config,
     }
 
 
-def actioned_snapshot(root, gw: int) -> str | None:
-    """The snapshot version the gameweek's acted-on forecast read, if any.
+# A forecast is on record for the gameweek but predates snapshots, so nothing
+# can say what it saw. Distinct from None (no forecast at all): None lets the
+# replay pick the newest pre-deadline capture, which is a fair reconstruction
+# when no decision was recorded; this sentinel must NOT, because a capture the
+# actioned forecast never read would be presented as uncontaminated.
+NO_SNAPSHOT = "<no-snapshot>"
 
-    The manifest records it and `gameweek_inputs` accepts it, but the script
-    was passing neither, so the replay silently read the NEWEST pre-deadline
-    capture rather than the one the actioned forecast used -- two captures a
-    day apart gave two different prices for the same replayed decision.
+
+def actioned_snapshot(root, gw: int) -> str | None:
+    """The snapshot version the gameweek's acted-on forecast read.
+
+    Three answers, and the caller has to tell them apart: a version id when
+    the forecast recorded one; `NO_SNAPSHOT` when a forecast exists but was
+    made before snapshots did; None when no forecast is on record. Collapsing
+    the middle case into None let a legacy forecast replay against a NEWER
+    capture -- data it never saw -- with no contamination warning.
     """
     from .manifest import select_version
     chosen = select_version(root, int(gw))
-    return chosen.get("snapshot") if chosen else None
+    if chosen is None:
+        return None
+    return chosen.get("snapshot") or NO_SNAPSHOT
 
 
 def replay_calibration(xp, root, summaries, gw: int, cfg):
@@ -290,3 +312,20 @@ def replay_calibration(xp, root, summaries, gw: int, cfg):
         return xp, "-"
     return (apply_calibration(xp, cal, decay=float(getattr(cfg, "horizon_decay", 1.0))),
             f"fitted on {cal.n_gameweeks} GW")
+
+
+def config_for_replay(cfg, archived: dict | None):
+    """The configuration a replay of one gameweek should run under.
+
+    The archived settings from the gameweek's snapshot where they exist; the
+    current configuration otherwise. Only fields the Config dataclass actually
+    has are applied, so an archive from a newer or older version of the tool
+    cannot break construction. Returns (config, changed_fields).
+    """
+    from dataclasses import fields, replace
+    if not archived:
+        return cfg, []
+    known = {f.name for f in fields(cfg)}
+    updates = {k: v for k, v in archived.items() if k in known}
+    changed = sorted(k for k, v in updates.items() if getattr(cfg, k) != v)
+    return (replace(cfg, **updates) if updates else cfg), changed

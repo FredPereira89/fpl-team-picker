@@ -49,7 +49,7 @@ from fpl.backtest.ledger import save_predictions
 from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_score,
                                       squad_ledger, weekly_edge, replayable_gameweeks,
                                       gameweek_inputs, actioned_snapshot,
-                                      replay_calibration)
+                                      replay_calibration, config_for_replay)
 from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
                                  expected_points_policy, oracle_rebuild_policy)
 from fpl.data import snapshots
@@ -147,6 +147,8 @@ def main() -> int:
     print(f"{'GW':>3}{'squad':>8}{'field':>7}{'edge':>7}  inputs          calibration")
     results = {}
     xp_by_gw = {}
+    cfg_by_gw = {}
+    config_notes = []
     for gw in played:
         # Prices, availability, news, clubs and fixtures AS OF THE DEADLINE when
         # a pre-deadline snapshot exists; today's otherwise, and flagged. The
@@ -156,14 +158,23 @@ def main() -> int:
         inputs = gameweek_inputs(args.root, gw, bootstrap, raw_fixtures, summaries,
                                  snapshot_version=pinned.get(gw))
         players, teams, fixtures = inputs["players"], inputs["teams"], inputs["fixtures"]
+        # The configuration this gameweek was DECIDED under, from its snapshot.
+        # Today's settings for a gameweek with none -- which is then a
+        # current-configuration challenger, not an exact replay, and says so.
+        week_cfg, changed = config_for_replay(cfg, inputs["config"])
+        week_cfg.rank_sims = 0
+        cfg_by_gw[gw] = week_cfg
+        if changed:
+            config_notes.append(f"GW{gw}: replayed under its archived config "
+                                f"({', '.join(changed)} differ from today's)")
         seen = forecast_inputs(summaries, before_event=gw)
         ratings = team_ratings(players, teams, current=seen["current"])
-        tfx = team_fixture_frame(fixtures, ratings, gw, cfg.horizon_gw,
+        tfx = team_fixture_frame(fixtures, ratings, gw, week_cfg.horizon_gw,
                                  league_gc=league_goals_per_team_match(players))
-        rates = blended_rates(players, seen["current"], cfg, rounds=seen["rounds"])
-        mins = minutes_model(players, cfg, news=inputs["news"],
+        rates = blended_rates(players, seen["current"], week_cfg, rounds=seen["rounds"])
+        mins = minutes_model(players, week_cfg, news=inputs["news"],
                              current=seen["current"], rounds=seen["rounds"])
-        xp = build_xp(players, rates, mins, tfx, cfg, gw)
+        xp = build_xp(players, rates, mins, tfx, week_cfg, gw)
 
         # Calibrate on gameweeks strictly before this one, exactly as a live run
         # would -- fitting on the gameweek being predicted would be circular.
@@ -171,7 +182,7 @@ def main() -> int:
         if args.no_calibrate:
             note = "off"
         else:
-            xp, note = replay_calibration(xp, args.root, summaries, gw, cfg)
+            xp, note = replay_calibration(xp, args.root, summaries, gw, week_cfg)
         if not args.no_save and gw in writable:
             # Stamped as a replay so the ledger never loses track of which
             # forecasts were made before the deadline and which were
@@ -188,7 +199,7 @@ def main() -> int:
         xp_by_gw[gw] = xp[xp["player_id"].isin(frame.index)].copy()
         pool = xp_by_gw[gw].drop(columns=[c for c in xp.columns if c.startswith("xp_gw")],
                                  errors="ignore")
-        squad = optimize_squad(pool, cfg, xp_col="xp_next1")
+        squad = optimize_squad(pool, week_cfg, xp_col="xp_next1")
         got = realised_score(squad.player_ids, squad.starting_ids, frame)
         avg = averages.get(gw, 0.0)
         results[gw] = (got["points"], avg)
@@ -239,7 +250,15 @@ def main() -> int:
     chosen["oracle"] = oracle_rebuild_policy
 
     table = compare_policies(xp_by_gw, actuals, initial, cfg, policies=chosen,
-                             field_average=averages, gameweeks=played)
+                             field_average=averages, gameweeks=played,
+                             cfg_by_gw=cfg_by_gw)
+    if config_notes:
+        print()
+        for line in config_notes:
+            print(f"  {line}")
+    if any(gw not in cfg_by_gw or cfg_by_gw[gw] is cfg for gw in played):
+        print("  Gameweeks without an archived config were replayed under today's "
+              "settings: a current-configuration challenger, not an exact replay.")
     print()
     for _, row in table.iterrows():
         tag = "" if row["executable"] else "   <- ORACLE CEILING (not executable)"

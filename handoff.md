@@ -1,13 +1,12 @@
 # Handoff — FPL audit remediation, post-review
 
-**Review status:** Codex re-reviewed `ad025d1..ed0092c` and found four
-partial fixes (RB5, RB8, RB9, RB10) and three further replay-fidelity gaps
-(RR1–RR7 below). Claude verified all seven against the source — all stood —
-and fixed them at `880fbc9..dfd6f10`.
+**Review status:** three Codex reviews so far. Review 1 (RB1–RB11) fixed at
+`ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`; review 3
+(three findings, below) fixed in the commit that also restored this file.
 
-**Branch:** `master` — through `dfd6f10`
+**Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **662 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **667 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -22,6 +21,14 @@ the pinned-snapshot, calibrated, horizon-start path.
 | RR5 calibration gated on `--no-save`, applied without decay | `walkforward.replay_calibration()` is independent of writing and passes `horizon_decay`; `--no-calibrate` opts out | `aaa2275` |
 | RR7 synthetic start on `xp_next1` | starts on `xp_horizon` (production Mode 1) and is labelled a challenger; `--squad` for the manager's own season | `aaa2275` |
 | RR6 snapshots omitted overrides/config | each capture stores `news.json` + `config.json`; the replay applies the overrides; element-summary reconstruction is classified explicitly via `SUMMARIES_NOTE`, printed by the script | `dfd6f10` |
+
+### Third review (2026-09-18)
+
+| Finding | Fix |
+|---|---|
+| 1. A legacy forecast (recorded before snapshots existed) replayed against a NEWER capture with no contamination warning, because `actioned_snapshot()` returned `None` for both "no forecast" and "forecast without snapshot" | `NO_SNAPSHOT` sentinel; `gameweek_inputs` forces a flagged fallback to the current cache; `contamination_note` lists the gameweek. Tests: `test_a_forecast_that_predates_snapshots_forces_a_flagged_fallback`, `test_no_forecast_at_all_still_allows_automatic_snapshot_selection`. |
+| 2. `config.json` was archived but never applied — every historical week ran under today's settings | `gameweek_inputs` returns the archived config; `config_for_replay` applies its known fields; `replay_season`/`compare_policies` take `cfg_by_gw`; the script labels weeks without an archive a current-configuration challenger. Tests: `test_the_replay_returns_and_applies_the_archived_config`, `test_each_gameweek_is_replayed_under_its_own_config`. |
+| 3. This file was internally inconsistent (status table, branch marker), and a scripted edit had corrupted it to 39 MB in `f71b7e0` | Restored from `96a1591` and corrected; the corrupt commit was dropped from history before any push. |
 
 Codex's re-review findings are kept below for the record.
 
@@ -380,8 +387,8 @@ the temporary Free Hit picks endpoint.
 | B10 calibration fixture-count application | Implemented. |
 | B11 DGW role evidence | Implemented. |
 | B12 Tier 1 cutoff leakage | Implemented. |
-| B13 point-in-time executable replay | Partially implemented. Snapshots are consumed and state/horizon/armband are replayed, but the actioned snapshot id, calibration, manual overrides and default initial objective remain mismatched (RR2, RR5–RR7). GW1–4 remain irrecoverably contaminated. |
-| B14 immutable/actioned ledger | Immutable selection is implemented. Exact action identity is still optional, and the default pre-deadline confirmation marks its own rerun (RR1). |
+| B13 point-in-time executable replay | Implemented: pinned actioned snapshot, production calibration and decay, archived overrides and config, production start objective (RR2, RR5–RR7, third-review 1–2). GW1–4 remain irrecoverably contaminated and every replay says so. |
+| B14 immutable/actioned ledger | Implemented: the planning forecast is captured before a confirmation writes (RR1); `--forecast-version` pins one explicitly; post-deadline versions refused. |
 | B15 Tier 2 DNP/minutes leakage | Implemented as designed. |
 | B16 failed fetch vs newcomer | Implemented as designed. |
 | B17 inherited four-player club overage | Implemented. |
@@ -422,8 +429,8 @@ horizon, and R10 goalkeeper/bonus structure.
 4. ~~Make Free Hit restoration work offline from `base_*` state (RB11).~~
 5. ~~Run the full suite and one end-to-end historical replay whose snapshot values
    deliberately differ from current cache.~~
-6. **Next:** close RR1–RR7, in the order RR1/RR2/RR3 → RR5/RR6/RR7 → RR4.
-7. Then continue P2 — B8 → B7 → R3. Do not tune the model from the current
+6. ~~Close RR1–RR7.~~ Done at `880fbc9..dfd6f10`; third-review findings done after.
+7. **Next:** continue P2 — B8 → B7 → R3. Do not tune the model from the current
    sequential replay numbers.
 
 Two things to know before the next live run:
@@ -449,20 +456,18 @@ Two things to know before the next live run:
 - `tests/test_minutes.py::test_a_doubtful_player_with_a_strong_override_still_respects_availability`
   and `test_minutes_invariants_hold_for_every_player`.
 
-Those tests validate the helpers they name, but the re-review found missing
-caller-level cases:
+The re-review's missing caller-level cases, each now with a named test:
 
-- RB8 tests only a **post-deadline** confirmation rerun; they do not test the
-  normal pre-deadline rerun that is still selected by default (RR1).
-- Snapshot tests prove named selection works, but `run_walkforward.py` never
-  supplies the actioned forecast's snapshot id (RR2).
-- Chip tests cover same-chip idempotence but not replacing a different chip in
-  the same gameweek (RR3).
-- Triple Captain tests prove the corrected current-week formula, not timing
-  against future weeks measured with the old raw-xP approximation (RR4).
-- Replay tests cover horizon and armband but not calibrated multi-week runs,
-  `--no-save`, manual overrides, or the synthetic initial-squad objective
-  (RR5–RR7).
+- RR1: `tests/test_cli.py::test_a_pre_deadline_confirmation_marks_the_planning_forecast`,
+  `::test_forecast_version_flag_pins_the_marked_version`.
+- RR2: `tests/test_walkforward.py::test_the_replay_pins_the_actioned_forecasts_snapshot`.
+- RR3: `tests/test_cli.py::test_a_different_chip_in_the_same_gameweek_is_refused`.
+- RR4: `tests/test_chips.py::test_a_better_future_armband_week_still_holds_triple_captain`.
+- RR5: `tests/test_walkforward.py::test_replay_calibration_uses_the_configured_decay`,
+  `::test_replay_calibration_can_be_switched_off_independently`.
+- RR6: `tests/test_snapshots.py::test_a_capture_keeps_the_overrides_and_config_the_run_used`,
+  `tests/test_walkforward.py::test_the_replay_gets_the_overrides_the_live_run_applied`.
+- RR7: script-level (`xp_horizon` start, labelled a challenger); verified by running
+  `python scripts/run_walkforward.py --through 3 --no-save`.
 
-Codex changed no production source during its review. Claude's fixes are the
-eleven commits listed at the top.
+Codex changed no production source in any of its reviews.

@@ -326,3 +326,18 @@ def test_the_expected_policy_sees_the_full_horizon():
     pool["xp_horizon"] = pool["xp_gw1"] + 0.85 * pool["xp_gw2"] + 0.85 ** 2 * pool["xp_gw3"]
     _, after = step(pool, _actuals(), _state(free_transfers=1), 1, _cfg(), expected_points_policy)
     assert 4 in after.squad
+
+
+def test_each_gameweek_is_replayed_under_its_own_config():
+    """A hit that cost 4 when the decision was made must not be re-priced at
+    today's hit_cost."""
+    swap = [p for p in CURRENT if p not in (1, 2)] + [4, 5]
+    # Two transfers in GW1, then two back in GW2: a paid hit in both weeks.
+    decide = lambda xp, st, gw, c: (Decision(swap, swap[:11]) if gw == 1
+                                    else Decision(list(CURRENT), XI))
+    actuals = pd.concat([_actuals().assign(round=gw) for gw in (1, 2)])
+    results, _ = replay_season({1: POOL, 2: POOL}, actuals,
+                               _state(free_transfers=1), _cfg(hit_cost=8), decide,
+                               cfg_by_gw={1: _cfg(hit_cost=4)})
+    assert results[0].hit_cost == 4       # archived config for GW1
+    assert results[1].hit_cost == 8       # falls back to the current config
