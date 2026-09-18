@@ -8,8 +8,11 @@ are closed. Review 1 (RB1–RB11)
 fixed at `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`;
 review 3 (three findings) fixed with the file's restoration; review 4 (four
 findings) and review 5 (two cleanups) fixed after. **R10 (bonus from ranked
-simulated BPS) is now implemented** — see its design section below, now
-marked done. **R8 (rolling multi-period transfer MILP) is still not started**
+simulated BPS) is implemented and re-reviewed** — Codex's re-review found
+the calibration hadn't reached the primary `build_xp`/Mode 1 decision path
+and two coefficients were stale for the 2026/27 rules; both fixed, and the
+approximation is now validated against real GW1-4 fixtures (see its design
+section below). **R8 (rolling multi-period transfer MILP) is still not started**
 and remains designed below.
 
 ### Review 6 fix progress (2026-09-18)
@@ -125,7 +128,7 @@ Codex's re-review findings are kept below for the record.
 | B8 exact one-week XI for the report | **done (C6-1/C6-2 fixed)**. `lineup.best_xi()` enumerates legal formations; `replay._with_armband()` now copies the exact weekly XI back into the Decision it scores; `pipeline._with_weekly_xi()` substitutes the exact one-week XI into every candidate before rank scoring runs. | `fpl/optimize/lineup.py`, `fpl/backtest/replay.py`, `fpl/pipeline.py` |
 | B7a simulated means agree with calibrated xP | **done** — `simulate.moment_match()` scales each player's samples to `xp_next1` inside `pipeline._rank_context` | `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | B7b report the captain the rank layer scored | **done (C6-2/C6-3/review 7 fixed)**. Rank evaluates captain/vice pairs with vice inheritance and legal autosubs on the exact weekly XI. `_honour_rank_captain()` re-scores whichever final pair is reported; `rank_stats["captain"]`/`["vice"]` identify that pair, while `rank_preferred_*` preserves the rank layer's suggestion. | `fpl/optimize/rank.py`, `fpl/pipeline.py`, `fpl/report/weekly.py` |
-| R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Assists and bonus still independent (documented residual). `simulate_event_detailed` exposes goals/conceded per scenario. | `fpl/model/simulate.py` |
+| R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Bonus is now match-ranked, not independent (R10). Assists remain independent (documented residual). `simulate_event_detailed` exposes goals/conceded/bonus per scenario. | `fpl/model/simulate.py` |
 | R2 rival field legality | **done (C6-6 fixed)**. `rank._repair()` enforces the XI club cap and an exact per-XI `_cheapest_legal_bench()` check, which proves a distinct, position-correct, club-legal bench can complete the squad within budget — not merely a coarse pool-wide price ceiling. Cohort calibration remains open. | `fpl/optimize/rank.py` |
 | R1 Mode 1 objective | **done** — expected points decide the Mode 1 squad; rank reports (`rank_stats["decided_by"]`, `rank_would_choose`); `optimizer.rank_squad` opts back in. Ties on the bar are worth half. **Behaviour change for the live Mode 1 run.** |
 
@@ -140,7 +143,7 @@ Codex's re-review findings are kept below for the record.
 | R4 confidence into the distribution | **open for epistemic uncertainty; C6-5 and decision consistency fixed**. `start_evidence` is emitted but intentionally does not alter one-event Bernoulli draws. The biased random denominator was removed, restoring the modeled `p_60` marginal. Gain diagnostics now use the final XI, bench, captain and vice with appearance-aware scenario scoring. Persistent posterior worlds for starts, rates and team strengths remain open and are R8-adjacent. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | R5 event-specific team-coherent minutes | **slice done** — `minutes.reconcile_team_starts` scales a side's starts down to eleven (never up). Open: per-event minute distributions, depth chart, injury redistribution to named deputies, override event ranges. | `fpl/model/minutes.py` |
 | R8 multi-period MILP | **not started — design below** | `fpl/optimize/transfers.py` (new module `fpl/optimize/multiperiod.py` suggested) |
-| R10 BPS rebuild | **not started — design below** | `fpl/model/bps.py`, `fpl/model/simulate.py` |
+| R10 BPS rebuild | **done, with documented residuals — see design section below** | `fpl/model/bps.py`, `fpl/model/simulate.py`, `fpl/model/xp.py` |
 
 ### Behaviour changes in this session, for the next live run
 
@@ -235,10 +238,32 @@ exclude bonus from the comparison (via a new `bonus` field on
 `simulate_event_detailed`) rather than have their tolerances loosened past
 the point of still catching a real regression in the other components.
 
-Not done, and left as the two options the design above already named:
-recalibrating the analytic `bonus90` rate itself against real per-position
-season totals (needs historical-data fitting, out of scope here), and a
-`--legacy-bonus` challenger flag in the replay for a one-off comparison run.
+### R10 re-review (2026-09-18) — Codex found the fix hadn't reached the primary decision path, and three coefficients were stale; all now fixed
+
+The re-review's core point: R10 as first landed only touched
+`model.simulate` (the rank layer's diagnostic simulation). `build_xp`'s
+`xp_next1` -- Mode 1's DEFAULT squad-selection objective -- still called
+`expected_bonus_for()` uncalibrated, and `moment_match()` rescales the
+simulation back to `xp_next1`'s mean, so neither the primary decision nor
+the rank layer (once moment-matched) actually reflected the fix.
+
+| Finding | Fix |
+|---|---|
+| High — `build_xp`'s bonus term (hence `xp_next1`, hence Mode 1's default pick, hence `moment_match`'s target) was still the old, uncalibrated independent-rate estimate. | `expected_bonus_for`/`expected_bonus` take a `position` and apply `BONUS_CALIBRATION` (GKP 0.42, DEF 0.35, MID 0.41, FWD 0.80) -- how much of the independent-rate prediction survives real match-wide competition, derived by running the corrected `score_side_bps`/`award_match_bonus` ranking over a large simulated league built from domain-knowledge bonus90/xg90/xa90/dc90/saves90/cards90 tiers (NOT fitted to precise historical rates -- a full refit against the production `blended_rates` pipeline's real historical output remains a follow-up). `build_xp` now passes `position=pos` at its one call site. Omitting `position` keeps the OLD, uncorrected number rather than a silent change for any caller without one. |
+| High — the scorer omitted the GKP/DEF goals-conceded BPS penalty entirely (`conceded_on` was already computed in `_score_side` for the separate FPL POINTS penalty) and had two stale season-specific values: `BPS_SAVE` was a 2025/26-era inside/outside-box blend (2026/27 changed saves to a flat 2 BPS + 1 for a "big chance save" the simulator has no signal for -- now 2.0, the guaranteed base) and the DC blend used a single flat weight (2026/27 also halved the CBI rate from 1-per-2 to 1-per-3). | Added `BPS_CONCEDED = -4.0` (per goal, GKP/DEF, not per two) using the already-simulated `conceded_on`. Corrected `BPS_SAVE` to 2.0. `BPS_DC_ACTION` is now per-position (`{"GKP": 0.5, "DEF": 0.7, "MID": 0.8, "FWD": 0.5}`), informed by the real-fixture validation below. Penalty-goal handling (always 12 BPS regardless of position) remains a documented residual: the simulator's `_allocate` has no penalty-vs-open-play distinction to key off. |
+| Medium — no predictive validation existed, only ranking-mechanics tests. | New `scripts/validate_bps.py` reads cached `element-summary` history (real per-fixture minutes/goals/assists/cards/saves/DC/conceded, and FPL's own real `bps`/`bonus`) and reports exact-recipient match rate, Jaccard, recall and BPS MAE, overall and by position. Against real GW1-4 fixtures (40 matches): **42.5% exact bonus-recipient match** (up from 37.5% before the per-position DC weights), **0.675 mean Jaccard**, **0.76 recall**, **3.28 BPS MAE** (GKP 2.41 / DEF 3.39 / MID 3.49 / FWD 2.60). The residual is structural, not a further tuning target: FPL's public `element-summary` API does not expose crosses, key passes, dribbles, shots, passing-accuracy tiers, fouls or errors at ALL (confirmed by inspecting its full field list), so several official BPS components cannot be reconstructed from this data source regardless of coefficient choice. A 6-fixture frozen sample (`tests/data/real_bps_sample.json`, since `data/cache` is gitignored) backs a permanent regression floor in `tests/test_bps.py`. |
+| Low — this file was internally contradictory: said bonus was still independent in one place (P3 table, R3 row) and "not started" in another (P3 table, R10 row) while the design section above said done. | Corrected both stale rows. |
+
+Not done, and left as documented follow-ups: a full `bonus90` recalibration
+against the production `blended_rates` pipeline's real historical output
+(the calibration above uses a large simulated league instead, since wiring
+into the historical rate pipeline for a one-off fit was judged a
+disproportionate amount of new integration for this pass); a
+`--legacy-bonus` challenger flag in the replay for a one-off comparison
+run; and closing the remaining structural BPS gap would need a different,
+richer data source than FPL's public API provides.
+
+Suite after the R10 re-review fixes: **746 passed, 1 warning**.
 
 ### Open residuals worth knowing
 
