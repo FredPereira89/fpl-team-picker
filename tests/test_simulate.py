@@ -182,6 +182,21 @@ def _goals_and_cs(ids, samples, rates, minutes, tfx, n_sims=3000):
                                    n_sims=n_sims, seed=1)
 
 
+def test_detailed_simulation_exposes_appearance_separately_from_points():
+    from fpl.model.simulate import simulate_event_detailed
+
+    mins = MINUTES.copy()
+    mins.loc[mins.player_id == 4, ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
+    detail = simulate_event_detailed(
+        PLAYERS, RATES, mins, TFX, event=1, n_sims=200, seed=4)
+
+    played = detail["played"]
+    unavailable = detail["ids"].index(4)
+    assert played.shape == detail["samples"].shape
+    assert played.dtype == bool
+    assert not played[unavailable].any()
+
+
 def test_a_goal_never_coexists_with_an_opposing_clean_sheet():
     """Each side's goals were drawn independently of the other side's goals
     conceded, so an attacker could score in a scenario where the opposing

@@ -191,9 +191,9 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         p_pos = (rec.rank or {}).get("p_gain_positive")
         if p_pos is not None:
             # The expected gain is the decision; this is how sure the model is
-            # of it THIS week, with the uncertainty in each player's starts
-            # drawn rather than assumed away. A thin edge on a new signing
-            # reads differently from the same edge on a nailed regular.
+            # of it THIS week under its own appearance and points scenarios,
+            # including the reported captain/vice and legal autosubs. It does
+            # not yet include epistemic parameter uncertainty (R4).
             out.append(f"In this week's scenarios the move comes out ahead of holding "
                        f"{p_pos:.0%} of the time (hit included).")
     out.append("")

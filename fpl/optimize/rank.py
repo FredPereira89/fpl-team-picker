@@ -33,10 +33,12 @@ The effect the simulation captures unambiguously is CORRELATION. Three
 defenders from one club are one clean-sheet bet placed three times, and an
 expectation-only model prices them as three independent bets no matter what.
 """
+from itertools import combinations, product
+
 import numpy as np
 import pandas as pd
 
-from .squad import XI_SIZE, MAX_PER_CLUB
+from .squad import XI_SIZE, XI_MIN, XI_MAX, MAX_PER_CLUB
 
 # Rival managers drawn per evaluation. A rank percentile is a mean over these,
 # so the standard error goes as 1/sqrt(RIVALS); 400 puts it near 2.5%, which
@@ -486,10 +488,175 @@ def squad_indicator(starting_ids, captain, ids) -> np.ndarray:
     return out
 
 
+def _lineup_base_scores(lineup, ids: list[int], samples: np.ndarray,
+                        played: np.ndarray, positions) -> np.ndarray:
+    """Scenario scores before captaincy, including legal automatic subs.
+
+    `played` is deliberately separate from `samples`: zero points does not
+    mean zero minutes.  An appearing starter who scores zero stays in the XI;
+    only a player with `played == False` can be replaced.
+
+    The reserve goalkeeper can replace only the starting goalkeeper.  The
+    three outfield substitutes are considered in bench order.  For each
+    scenario we choose the largest legal set of replacements, then the
+    lexicographically earliest set by bench priority.  There are at most three
+    outfield bench players, so exhaustively checking their eight subsets is
+    both exact and cheap.
+    """
+    samples = np.asarray(samples, dtype=float)
+    played = np.asarray(played, dtype=bool)
+    if samples.shape != played.shape:
+        raise ValueError("played mask must have the same shape as samples")
+
+    row = {int(pid): i for i, pid in enumerate(ids)}
+    if hasattr(positions, "get"):
+        position_of = lambda pid: str(positions.get(int(pid)))
+    else:
+        position_of = lambda pid: str(positions[row[int(pid)]])
+
+    xi = [int(pid) for pid in lineup.xi]
+    bench = [int(pid) for pid in lineup.bench]
+    missing = [pid for pid in xi + bench if pid not in row]
+    if missing:
+        raise ValueError(f"lineup players missing from simulation: {missing}")
+
+    xi_rows = [row[pid] for pid in xi]
+    base = np.where(played[xi_rows], samples[xi_rows], 0.0).sum(axis=0)
+
+    # Goalkeeper substitution is independent of the outfield formation.
+    starting_gk = next((pid for pid in xi if position_of(pid) == "GKP"), None)
+    bench_gk = next((pid for pid in bench if position_of(pid) == "GKP"), None)
+    if starting_gk is not None and bench_gk is not None:
+        use_gk = ~played[row[starting_gk]] & played[row[bench_gk]]
+        base = base + np.where(use_gk, samples[row[bench_gk]], 0.0)
+
+    outfield_positions = ("DEF", "MID", "FWD")
+    starting_outfield = [pid for pid in xi if position_of(pid) != "GKP"]
+    bench_outfield = [pid for pid in bench if position_of(pid) != "GKP"]
+    if not bench_outfield:
+        return base
+
+    start_counts = {
+        pos: sum(position_of(pid) == pos for pid in starting_outfield)
+        for pos in outfield_positions
+    }
+    missing_counts = {
+        pos: sum((~played[row[pid]] for pid in starting_outfield
+                  if position_of(pid) == pos), np.zeros(samples.shape[1], dtype=int))
+        for pos in outfield_positions
+    }
+
+    # Prefer fielding as many players as possible; among equally full legal
+    # outcomes, honour the manager's bench order.
+    subsets = []
+    for size in range(len(bench_outfield) + 1):
+        subsets.extend(combinations(range(len(bench_outfield)), size))
+    subsets.sort(key=lambda subset: (
+        -len(subset),
+        tuple(-int(i in subset) for i in range(len(bench_outfield))),
+    ))
+
+    assigned = np.zeros(samples.shape[1], dtype=bool)
+    for subset in subsets:
+        if not subset:
+            continue
+        selected = [bench_outfield[i] for i in subset]
+        selected_counts = {
+            pos: sum(position_of(pid) == pos for pid in selected)
+            for pos in outfield_positions
+        }
+
+        # Which positions can the selected bench players replace while leaving
+        # the nominal XI in a legal FPL formation?  Unreplaced DNP starters
+        # remain empty slots; they do not license an otherwise-illegal shape.
+        removal_patterns = []
+        for removals in product(range(len(subset) + 1), repeat=3):
+            if sum(removals) != len(subset):
+                continue
+            final = {
+                pos: start_counts[pos] - removals[j] + selected_counts[pos]
+                for j, pos in enumerate(outfield_positions)
+            }
+            if all(XI_MIN[pos] <= final[pos] <= XI_MAX[pos]
+                   for pos in outfield_positions):
+                removal_patterns.append(removals)
+        if not removal_patterns:
+            continue
+
+        available = np.ones(samples.shape[1], dtype=bool)
+        for pid in selected:
+            available &= played[row[pid]]
+        replaceable = np.zeros(samples.shape[1], dtype=bool)
+        for removals in removal_patterns:
+            possible = np.ones(samples.shape[1], dtype=bool)
+            for j, pos in enumerate(outfield_positions):
+                possible &= missing_counts[pos] >= removals[j]
+            replaceable |= possible
+
+        use = available & replaceable & ~assigned
+        if np.any(use):
+            sub_points = samples[[row[pid] for pid in selected]].sum(axis=0)
+            base = base + np.where(use, sub_points, 0.0)
+            assigned |= use
+        if np.all(assigned):
+            break
+    return base
+
+
+def lineup_scores(lineup, ids: list[int], samples: np.ndarray,
+                  played: np.ndarray, positions, captain: int | None = None,
+                  vice: int | None = None) -> np.ndarray:
+    """Score the reported lineup under FPL autosub and armband rules."""
+    samples = np.asarray(samples, dtype=float)
+    played = np.asarray(played, dtype=bool)
+    captain = int(lineup.captain if captain is None else captain)
+    vice = int(lineup.vice if vice is None else vice)
+    xi = {int(pid) for pid in lineup.xi}
+    if captain not in xi or vice not in xi or captain == vice:
+        raise ValueError("captain and vice must be distinct members of the starting XI")
+
+    row = {int(pid): i for i, pid in enumerate(ids)}
+    base = _lineup_base_scores(lineup, ids, samples, played, positions)
+    cap_row, vice_row = row[captain], row[vice]
+    bonus = np.where(played[cap_row], samples[cap_row],
+                     np.where(played[vice_row], samples[vice_row], 0.0))
+    return base + bonus
+
+
+def best_armband_by_rank(lineup, ids: list[int], samples: np.ndarray,
+                         played: np.ndarray, positions,
+                         rival_scores: np.ndarray, target: float = 0.5,
+                         bar: np.ndarray | None = None) -> tuple[int, int]:
+    """Exhaustively choose the captain/vice pair for the rank objective."""
+    samples = np.asarray(samples, dtype=float)
+    played = np.asarray(played, dtype=bool)
+    base = _lineup_base_scores(lineup, ids, samples, played, positions)
+    row = {int(pid): i for i, pid in enumerate(ids)}
+    best = None
+    for captain in lineup.xi:
+        for vice in lineup.xi:
+            if int(vice) == int(captain):
+                continue
+            cap_row, vice_row = row[int(captain)], row[int(vice)]
+            bonus = np.where(played[cap_row], samples[cap_row],
+                             np.where(played[vice_row], samples[vice_row], 0.0))
+            total = base + bonus
+            p = (p_beat_bar(total, bar) if bar is not None
+                 else p_beat_target(total, rival_scores, target))
+            key = (p, float(total.mean()), -int(captain), -int(vice))
+            if best is None or key > best[0]:
+                best = (key, int(captain), int(vice))
+    if best is None:
+        raise ValueError("no legal captain/vice pair in lineup")
+    return best[1], best[2]
+
+
 def score_candidate(squad, ids: list[int], samples: np.ndarray,
                     rival_scores: np.ndarray, target: float = 0.5,
                     bar: np.ndarray | None = None, penalty: float = 0.0,
-                    captain: int | None = None) -> dict:
+                    captain: int | None = None, vice: int | None = None,
+                    lineup=None, played: np.ndarray | None = None,
+                    positions=None) -> dict:
     """How one candidate squad actually fares against the simulated field.
 
     The armband is re-chosen per candidate by default, because the best
@@ -507,13 +674,26 @@ def score_candidate(squad, ids: list[int], samples: np.ndarray,
     the field on the same terms as one costing nothing, which quietly makes
     hits free.
     """
-    if captain is None:
-        captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
-                                       rival_scores, target, bar=bar)
-    mine = squad_scores(squad_indicator(squad.starting_ids, captain, ids)[None, :],
-                        samples)[0] - float(penalty)
+    if lineup is not None:
+        if played is None or positions is None:
+            raise ValueError("lineup scoring requires played masks and positions")
+        if captain is None:
+            captain, vice = best_armband_by_rank(
+                lineup, ids, samples, played, positions, rival_scores,
+                target=target, bar=bar)
+        elif vice is None:
+            vice = int(lineup.vice)
+        mine = lineup_scores(lineup, ids, samples, played, positions,
+                             captain=int(captain), vice=int(vice)) - float(penalty)
+    else:
+        if captain is None:
+            captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
+                                           rival_scores, target, bar=bar)
+        mine = squad_scores(squad_indicator(squad.starting_ids, captain, ids)[None, :],
+                            samples)[0] - float(penalty)
     return {
         "captain": captain,
+        "vice": vice,
         "p_beat_target": (p_beat_bar(mine, bar) if bar is not None
                           else p_beat_target(mine, rival_scores, target)),
         "rank_percentile": rank_percentile(mine, rival_scores),
@@ -524,7 +704,9 @@ def score_candidate(squad, ids: list[int], samples: np.ndarray,
 
 def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
                     rival_scores: np.ndarray, target: float = 0.5,
-                    bar: np.ndarray | None = None, penalties=None):
+                    bar: np.ndarray | None = None, penalties=None,
+                    lineups=None, played: np.ndarray | None = None,
+                    positions=None):
     """(best squad, [scores for every candidate]) by P(beating the field).
 
     Ties break on expected points, so when the simulation cannot separate two
@@ -538,8 +720,12 @@ def pick_best_squad(candidates: list, ids: list[int], samples: np.ndarray,
             "choose between"
         )
     costs = list(penalties) if penalties is not None else [0.0] * len(candidates)
+    decisions = list(lineups) if lineups is not None else [None] * len(candidates)
+    if len(decisions) != len(candidates):
+        raise ValueError("one lineup is required for each candidate")
     scored = [score_candidate(c, ids, samples, rival_scores, target, bar=bar,
-                              penalty=float(costs[i]))
+                              penalty=float(costs[i]), lineup=decisions[i],
+                              played=played, positions=positions)
               for i, c in enumerate(candidates)]
     best = max(range(len(candidates)),
                key=lambda i: (scored[i]["p_beat_target"], scored[i]["mean_points"]))

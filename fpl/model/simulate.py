@@ -58,10 +58,14 @@ def simulate_event_detailed(players, rates, minutes, tfx, event: int,
                             n_sims: int = DEFAULT_SIMS, seed: int = 0) -> dict:
     """The same draw with its parts exposed, for tests and diagnostics.
 
-    {"ids", "samples", "goals", "conceded_team", "team_of"} -- `goals` is each
-    player's goals per scenario and `conceded_team` the goals his SIDE conceded
-    in that scenario, so the coherence property (no goal against a clean sheet
-    in the same match) can be asserted directly rather than inferred.
+    {"ids", "samples", "played", "goals", "conceded_team", "team_of"} --
+    `played` records whether each player appeared in at least one fixture in the
+    gameweek.  Keeping appearance separate from points matters because a player
+    can appear and score zero: captaincy passes to the vice only on NO
+    appearance, and autosubs use the same rule.  `goals` is each player's goals
+    per scenario and `conceded_team` the goals his SIDE conceded in that
+    scenario, so the coherence property (no goal against a clean sheet in the
+    same match) can be asserted directly rather than inferred.
     """
     ids, samples, detail = _simulate(players, rates, minutes, tfx, event, n_sims, seed)
     return {"ids": ids, "samples": samples, **detail}
@@ -71,6 +75,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     rng = np.random.default_rng(seed)
     ids = [int(i) for i in players["player_id"]]
     samples = np.zeros((len(ids), n_sims), dtype=float)
+    played_all = np.zeros((len(ids), n_sims), dtype=bool)
     goals_all = np.zeros((len(ids), n_sims), dtype=float)
     conceded_all = np.zeros((len(ids), n_sims), dtype=float)
 
@@ -120,10 +125,13 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             pts, goals = _score_side(R[rows], M[rows], positions[rows], fx, pitch[team],
                                      scored[team], conceded, lam_of[team], n_sims, rng)
             samples[rows] += pts
+            # In a double gameweek one appearance is enough to keep the
+            # captain's armband and prevent an autosub, so aggregate with OR.
+            played_all[rows] |= pitch[team]["played"]
             goals_all[rows] += goals
             conceded_all[rows] += conceded[None, :]
-    return ids, samples, {"goals": goals_all, "conceded_team": conceded_all,
-                          "team_of": team_of}
+    return ids, samples, {"played": played_all, "goals": goals_all,
+                          "conceded_team": conceded_all, "team_of": team_of}
 
 
 def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:

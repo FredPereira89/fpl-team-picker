@@ -25,10 +25,11 @@ from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
 from .backtest.ledger import save_predictions, load_scored_summary
 from .model.calibration import fit_calibration, apply_calibration, scored_history
-from .model.simulate import simulate_event, moment_match
+from .model.simulate import simulate_event_detailed, moment_match
 from .optimize.squad import optimize_squad, enumerate_squads, Squad
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
-                            field_bar, required_rivals, RIVALS, score_candidate)
+                            field_bar, required_rivals, RIVALS, score_candidate,
+                            lineup_scores)
 from .optimize.lineup import build_lineup, best_xi
 from .optimize.chips import advise_chips, ChipAdvice
 from .optimize.actions import wildcard_action, freehit_action
@@ -156,8 +157,9 @@ def coverage_gate(players, summaries, fetch_failed, owned_ids,
 
 def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
     """Simulated player points and the field to judge candidates against."""
-    ids, samples = simulate_event(players, rates, minutes, tfx, from_event,
-                                  n_sims=int(cfg.rank_sims))
+    detail = simulate_event_detailed(players, rates, minutes, tfx, from_event,
+                                     n_sims=int(cfg.rank_sims))
+    ids, samples, played = detail["ids"], detail["samples"], detail["played"]
     # The MILP chose on CALIBRATED projections; the samples were drawn from raw
     # rates. Matching the means is what makes the rank layer score the squad
     # the solver actually proposed rather than an uncalibrated cousin of it.
@@ -169,10 +171,12 @@ def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
     n_needed = required_rivals(target)
     bar = (field_bar(xp, samples, target, rng, n_rivals=n_needed)
            if n_needed > RIVALS else None)
-    return ids, samples, rival_scores, target, n_needed, bar
+    positions = xp.set_index("player_id")["position"].astype(str).to_dict()
+    return ids, samples, played, positions, rival_scores, target, n_needed, bar
 
 
-def _p_gain_positive(chosen, plans, ids, samples) -> float | None:
+def _p_gain_positive(chosen, plans, lineups, ids, samples, played,
+                     positions) -> float | None:
     """P(this week's net gain over holding is positive), from the scenarios.
 
     A transfer is irreversible and a hit is a fixed cost, so the expected gain
@@ -189,15 +193,14 @@ def _p_gain_positive(chosen, plans, ids, samples) -> float | None:
     needs uncertainty reused across a multi-week horizon, which is unbuilt).
     A confidence-sensitive version of this number remains open work.
     """
-    from .optimize.rank import squad_indicator, squad_scores as _scores
     hold = next((p for p in plans if p.n_transfers == 0), None)
     if hold is None or chosen is hold or chosen.n_transfers == 0:
         return None
-    frame = {i: k for k, i in enumerate(ids)}
+
     def week(plan):
-        cap = max(plan.starting_ids, key=lambda i: samples[frame[i]].mean()
-                  if i in frame else -1.0)
-        return _scores(squad_indicator(plan.starting_ids, cap, ids)[None, :], samples)[0]
+        lineup = lineups[plans.index(plan)]
+        return lineup_scores(lineup, ids, samples, played, positions)
+
     gain = week(chosen) - week(hold) - float(chosen.hit_cost)
     return float(np.mean(gain > 0) + 0.5 * np.mean(gain == 0))
 
@@ -231,19 +234,32 @@ def _honour_rank_captain(lineup, rank_stats, xp):
     if not rank_stats:
         return lineup, rank_stats
     decided = rank_stats.get("decided_by", "rank") == "rank"
-    captain = rank_stats.get("captain")
+    preferred_captain = rank_stats.get("captain")
+    preferred_vice = rank_stats.get("vice")
     stats = dict(rank_stats)
     ctx = stats.pop("_ctx", None)
-    honoured = decided and captain is not None and int(captain) in set(lineup.xi)
+    xi = set(lineup.xi)
+    if (decided and preferred_captain is not None
+            and int(preferred_captain) in xi and preferred_vice is None):
+        frame = xp.set_index("player_id")
+        others = [pid for pid in lineup.xi if pid != int(preferred_captain)]
+        preferred_vice = max(
+            others, key=lambda pid: (float(frame.loc[pid, "xp_next1"]), -pid))
+    honoured = (
+        decided
+        and preferred_captain is not None
+        and int(preferred_captain) in xi
+        and preferred_vice is not None
+        and int(preferred_vice) in xi
+        and int(preferred_captain) != int(preferred_vice)
+    )
     if not honoured:
         stats["captain_reported"] = False
     else:
-        captain = int(captain)
-        if captain != lineup.captain:
+        captain, vice = int(preferred_captain), int(preferred_vice)
+        if captain != lineup.captain or vice != lineup.vice:
             from dataclasses import replace
             frame = xp.set_index("player_id")
-            others = [i for i in lineup.xi if i != captain]
-            vice = max(others, key=lambda i: (float(frame.loc[i, "xp_next1"]), -i))
             # Lineup.xp = sum(XI xp) + the captain's own xp again (the armband
             # double). Overriding the captain without recomputing this left
             # the report's headline total describing the OLD captain: the
@@ -253,16 +269,32 @@ def _honour_rank_captain(lineup, rank_stats, xp):
             new_xp = round(xi_total + float(frame.loc[captain, "xp_next1"]), 3)
             lineup = replace(lineup, captain=captain, vice=vice, xp=new_xp)
         stats["captain_reported"] = True
-    if ctx is not None and lineup.captain in set(ctx["starting_ids"]):
+    ctx_ids = (set(ctx["lineup"].xi) if ctx is not None and "lineup" in ctx
+               else set(ctx.get("starting_ids", ())) if ctx is not None else set())
+    if ctx is not None and lineup.captain in ctx_ids:
         from types import SimpleNamespace
+        score_args = dict(
+            target=ctx["target"], bar=ctx["bar"], penalty=ctx["penalty"],
+            captain=lineup.captain,
+        )
+        if "played" in ctx and "positions" in ctx:
+            score_args.update(
+                vice=lineup.vice, lineup=lineup, played=ctx["played"],
+                positions=ctx["positions"],
+            )
         rescored = score_candidate(
-            SimpleNamespace(starting_ids=ctx["starting_ids"]), ctx["ids"], ctx["samples"],
-            ctx["rival_scores"], target=ctx["target"], bar=ctx["bar"],
-            penalty=ctx["penalty"], captain=lineup.captain)
+            SimpleNamespace(starting_ids=lineup.xi), ctx["ids"], ctx["samples"],
+            ctx["rival_scores"], **score_args)
         stats["mean_points"] = rescored["mean_points"]
         stats["sd_points"] = rescored["sd_points"]
         stats["p_beat_target"] = rescored["p_beat_target"]
         stats["rank_percentile"] = rescored["rank_percentile"]
+    # Keep the alternative armband as explicitly labelled diagnostic metadata;
+    # `captain`/`vice` always identify the decision the stored statistics score.
+    stats["rank_preferred_captain"] = preferred_captain
+    stats["rank_preferred_vice"] = preferred_vice
+    stats["captain"] = int(lineup.captain)
+    stats["vice"] = int(lineup.vice)
     return lineup, stats
 
 
@@ -274,17 +306,18 @@ def _rank_stats(scored, index, n_candidates, target, n_rivals) -> dict:
     return stats
 
 
-def _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
-                        starting_ids, penalty=0.0) -> dict:
+def _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
+                        bar, target, lineup, penalty=0.0) -> dict:
     """Attach what `_honour_rank_captain` needs to re-score the FINAL
-    captain later, once `build_lineup` (and any chip override) have settled
-    what is actually reported. Private to this module -- `_honour_rank_captain`
-    pops `_ctx` back off before the stats reach the report or get serialised.
+    decision later, once `build_lineup` has settled what is reported. Chip
+    overrides that replace the squad clear rank stats separately. Private to
+    this module -- `_honour_rank_captain` pops `_ctx` before the stats reach
+    the report or get serialised.
     """
     stats["_ctx"] = {
         "ids": ids, "samples": samples, "rival_scores": rival_scores,
-        "bar": bar, "target": float(target), "starting_ids": list(starting_ids),
-        "penalty": float(penalty),
+        "played": played, "positions": positions, "bar": bar,
+        "target": float(target), "lineup": lineup, "penalty": float(penalty),
     }
     return stats
 
@@ -371,6 +404,24 @@ def _with_weekly_xi(candidates, xp):
     return out
 
 
+def _candidate_lineups(candidates, xp):
+    """Build the complete production decision for each rank candidate.
+
+    `_with_weekly_xi` has already selected the exact XI.  `exact=False` keeps
+    that XI while deriving the same bench order and risk-aware captain/vice
+    pair the final report uses.  These objects are then shared by rank scoring,
+    gain diagnostics, and the final reconciliation step.
+    """
+    out = []
+    for candidate in candidates:
+        full = list(getattr(candidate, "squad_ids", None) or candidate.player_ids)
+        out.append(build_lineup(
+            Squad(full, list(candidate.starting_ids), 0.0, 0.0), xp,
+            exact=False,
+        ))
+    return out
+
+
 def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                       current_squad, bank, free_transfers, selling):
     """This week's transfer plan, chosen on discounted multi-gameweek net points.
@@ -389,6 +440,7 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
     because a one-week target cannot price a five-week decision.
     """
     plans = []
+    lineups = []
     if int(cfg.rank_sims) > 0:
         # Enumerated even when rank does not decide: the candidate set is how a
         # hit and a coordinated two-move restructure get onto the table at all,
@@ -398,18 +450,22 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
                                          k=int(cfg.rank_candidates))
         if plans:
             plans = _with_weekly_xi(plans, xp)
+            lineups = _candidate_lineups(plans, xp)
 
     if plans and int(cfg.rank_sims) > 0 and bool(getattr(cfg, "rank_transfers", False)):
-        ids, samples, rival_scores, target, n_needed, bar = _rank_context(
-            xp, players, rates, minutes, tfx, cfg, from_event)
+        (ids, samples, played, positions, rival_scores,
+         target, n_needed, bar) = _rank_context(
+             xp, players, rates, minutes, tfx, cfg, from_event)
         chosen, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
-                                         bar=bar, penalties=[p.hit_cost for p in plans])
+                                         bar=bar, penalties=[p.hit_cost for p in plans],
+                                         lineups=lineups, played=played,
+                                         positions=positions)
         index = plans.index(chosen)
         stats = _rank_stats(scored, index, len(plans), target, n_needed)
         stats["hit_cost"] = int(chosen.hit_cost)
         stats["decided_by"] = "rank"
-        _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
-                           chosen.starting_ids, penalty=chosen.hit_cost)
+        _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
+                           bar, target, lineups[index], penalty=chosen.hit_cost)
         return chosen, None, stats
 
     if plans:
@@ -420,16 +476,21 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
         if int(cfg.rank_sims) > 0:
             # Diagnostic only: how the CHOSEN plan fares against the field. It
             # no longer selects anything, so it cannot overrule the horizon.
-            ids, samples, rival_scores, target, n_needed, bar = _rank_context(
-                xp, players, rates, minutes, tfx, cfg, from_event)
+            (ids, samples, played, positions, rival_scores,
+             target, n_needed, bar) = _rank_context(
+                 xp, players, rates, minutes, tfx, cfg, from_event)
             _, scored = pick_best_squad(plans, ids, samples, rival_scores, target=target,
-                                        bar=bar, penalties=[p.hit_cost for p in plans])
-            stats = _rank_stats(scored, plans.index(best), len(plans), target, n_needed)
+                                        bar=bar, penalties=[p.hit_cost for p in plans],
+                                        lineups=lineups, played=played,
+                                        positions=positions)
+            best_index = plans.index(best)
+            stats = _rank_stats(scored, best_index, len(plans), target, n_needed)
             stats["hit_cost"] = int(best.hit_cost)
             stats["decided_by"] = "expected points over the horizon"
-            stats["p_gain_positive"] = _p_gain_positive(best, plans, ids, samples)
-            _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
-                               best.starting_ids, penalty=best.hit_cost)
+            stats["p_gain_positive"] = _p_gain_positive(
+                best, plans, lineups, ids, samples, played, positions)
+            _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
+                               bar, target, lineups[best_index], penalty=best.hit_cost)
         return best, plans, stats
 
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
@@ -456,20 +517,23 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     if not candidates:
         return optimize_squad(xp, cfg, xp_col=HORIZON_COL), None
     candidates = _with_weekly_xi(candidates, xp)
+    lineups = _candidate_lineups(candidates, xp)
 
     # The bar for the configured target is drawn from as many rivals as that
     # target needs -- 400 cannot locate anything past about the 99th
     # percentile, and "top of FPL" lives far beyond it.
-    ids, samples, rival_scores, target, n_needed, bar = _rank_context(
-        xp, players, rates, minutes, tfx, cfg, from_event)
+    (ids, samples, played, positions, rival_scores,
+     target, n_needed, bar) = _rank_context(
+         xp, players, rates, minutes, tfx, cfg, from_event)
     chosen, scored = pick_best_squad(candidates, ids, samples, rival_scores,
-                                     target=target, bar=bar)
+                                     target=target, bar=bar, lineups=lineups,
+                                     played=played, positions=positions)
     if bool(getattr(cfg, "rank_squad", False)):
-        stats = _rank_stats(scored, candidates.index(chosen), len(candidates),
-                            target, n_needed)
+        chosen_index = candidates.index(chosen)
+        stats = _rank_stats(scored, chosen_index, len(candidates), target, n_needed)
         stats["decided_by"] = "rank"
-        _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
-                           chosen.starting_ids)
+        _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
+                           bar, target, lineups[chosen_index])
         return chosen, stats
     # Expected points decide -- candidates[0] is the solver's optimum -- and
     # the rank layer only reports how that squad fares. A one-week
@@ -480,7 +544,8 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     stats = _rank_stats(scored, 0, len(candidates), target, n_needed)
     stats["decided_by"] = "expected points over the horizon"
     stats["rank_would_choose"] = candidates.index(chosen)
-    _stash_rank_context(stats, ids, samples, rival_scores, bar, target, best.starting_ids)
+    _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
+                       bar, target, lineups[0])
     return best, stats
 
 

@@ -544,6 +544,9 @@ def test_the_report_says_how_often_the_squad_beats_the_field(tmp_path):
     assert 0.0 <= rec.rank["rank_percentile"] <= 1.0
     assert rec.rank["sd_points"] > 0
     assert rec.rank["n_candidates"] == 3
+    assert rec.rank["captain"] == rec.lineup.captain
+    assert rec.rank["vice"] == rec.lineup.vice
+    assert "rank_preferred_captain" in rec.rank
 
 
 def test_turning_the_simulation_off_falls_back_to_the_plain_optimum(tmp_path):
@@ -894,6 +897,8 @@ def test_honour_rank_captain_rescores_stats_for_the_final_captain():
     assert stats["captain_reported"] is False
     assert stats["mean_points"] == pytest.approx(28.0), (
         "must describe the reported captain (2), not rank's own captain (1)")
+    assert stats["captain"] == 2
+    assert stats["rank_preferred_captain"] == 1
     assert "_ctx" not in stats, "the private context must not leak into the report"
 
 
@@ -922,6 +927,41 @@ def test_honour_rank_captain_rescores_even_when_the_rank_captain_is_honoured():
     assert out_lineup.captain == 1
     assert stats["captain_reported"] is True
     assert stats["mean_points"] == pytest.approx(29.0)
+    assert stats["captain"] == 1
+    assert stats["rank_preferred_captain"] == 1
+
+
+def test_gain_probability_uses_each_plans_reported_armband():
+    """The gain diagnostic must not silently pick a different captain from
+    the one the report tells the manager to use.  The reported risky captain
+    wins only in the final scenario; the old highest-sample-mean shortcut
+    captained player 1 and never beat this deliberately high hold score."""
+    from types import SimpleNamespace
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _p_gain_positive
+
+    ids = [1, 2, 3, 4]
+    samples = np.array([
+        [10.0] * 10,
+        [0.0] * 9 + [90.0],
+        [50.0] * 10,
+        [50.0] * 10,
+    ])
+    played = np.ones_like(samples, dtype=bool)
+    played[1, :9] = False
+    positions = {pid: "MID" for pid in ids}
+
+    hold = SimpleNamespace(starting_ids=[3, 4], n_transfers=0, hit_cost=0)
+    move = SimpleNamespace(starting_ids=[1, 2], n_transfers=1, hit_cost=0)
+    lineups = [
+        Lineup(xi=[3, 4], bench=[], formation="x", captain=3, vice=4, xp=0.0),
+        Lineup(xi=[1, 2], bench=[], formation="x", captain=2, vice=1, xp=0.0),
+    ]
+
+    p_gain = _p_gain_positive(
+        move, [hold, move], lineups, ids, samples, played, positions)
+
+    assert p_gain == pytest.approx(0.1)
 
 
 def test_a_wildcard_chip_clears_the_stale_rank_stats(tmp_path, monkeypatch):

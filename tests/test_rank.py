@@ -13,7 +13,8 @@ import pytest
 
 from fpl.optimize.rank import (sample_rival_squads, squad_scores, rank_percentile,
                                best_captain_by_rank, p_beat_target, field_weights,
-                               RIVALS)
+                               lineup_scores, RIVALS)
+from fpl.optimize.lineup import Lineup
 
 # 40 players over 8 clubs: enough for legal XIs, small enough to reason about.
 POOL = pd.DataFrame([
@@ -181,6 +182,60 @@ def test_scoring_a_candidate_reports_where_it_lands_against_the_field():
     assert 0.0 <= out["p_beat_target"] <= 1.0
     assert 0.0 <= out["rank_percentile"] <= 1.0
     assert out["mean_points"] > 0
+
+
+def _scenario_lineup():
+    positions = {
+        1: "GKP", 2: "DEF", 3: "DEF", 4: "DEF",
+        5: "MID", 6: "MID", 7: "MID", 8: "MID",
+        9: "FWD", 10: "FWD", 11: "FWD",
+        12: "GKP", 13: "MID", 14: "DEF", 15: "FWD",
+    }
+    lineup = Lineup(
+        xi=list(range(1, 12)), bench=[12, 13, 14, 15],
+        formation="3-4-3", captain=6, vice=7, xp=0.0,
+    )
+    return lineup, positions
+
+
+def test_scenario_lineup_passes_the_armband_only_when_the_captain_does_not_play():
+    lineup, positions = _scenario_lineup()
+    ids = list(range(1, 16))
+    samples = np.ones((15, 3), dtype=float)
+    samples[4] = [0.0, 7.0, 0.0]  # player 5: captain in this focused decision
+    samples[5] = [4.0, 4.0, 4.0]  # player 6: vice
+    played = np.ones_like(samples, dtype=bool)
+    played[4] = [False, True, True]
+    played[11:] = False       # keep this test about the armband, not autosubs
+
+    scores = lineup_scores(
+        lineup, ids, samples, played, positions, captain=5, vice=6)
+
+    # Scenario 1: captain DNP, so vice's four points are counted twice.
+    # Scenario 2: captain appears, so his seven are doubled even if the vice
+    # also scores. Scenario 3 pins the distinction between zero points and no
+    # appearance: the captain keeps the armband and the vice does not inherit.
+    assert scores.tolist() == pytest.approx([17.0, 27.0, 13.0])
+
+
+def test_scenario_lineup_applies_bench_order_without_breaking_formation():
+    lineup, positions = _scenario_lineup()
+    ids = list(range(1, 16))
+    samples = np.ones((15, 3), dtype=float)
+    played = np.ones_like(samples, dtype=bool)
+    played[11] = False  # reserve goalkeeper is irrelevant here
+    played[1, 0] = False    # DEF 2 misses scenario 1
+    played[4, 1] = False    # MID 5 misses scenario 2
+    played[1, 2] = False    # DEF 2 and MID 5 miss scenario 3
+    played[4, 2] = False
+
+    scores = lineup_scores(lineup, ids, samples, played, positions)
+
+    # First outfield sub is MID 13. He cannot replace the lone missing DEF in
+    # scenario 1 (that would leave only two defenders), so DEF 14 enters. He
+    # does replace the missing MID in scenarios 2/3; DEF 14 then also enters
+    # in scenario 3. Every scenario finishes with eleven scorers plus captain.
+    assert scores.tolist() == pytest.approx([12.0, 12.0, 12.0])
 
 
 def test_the_chosen_squad_is_the_one_that_beats_the_field_most_often():
