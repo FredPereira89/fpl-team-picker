@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **685 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **689 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -59,7 +59,7 @@ Codex's re-review findings are kept below for the record.
 | B7b report the captain the rank layer scored | **done** — `pipeline._honour_rank_captain()`; `rank_stats["captain_reported"]` says whether it applied | `fpl/pipeline.py` |
 | R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Assists and bonus still independent (documented residual). `simulate_event_detailed` exposes goals/conceded per scenario. | `fpl/model/simulate.py` |
 | R2 rival field legality | **done (achievable part)** — `rank._repair()` makes every drawn XI ≤3 per club and priced under budget minus the cheapest legal bench (`_xi_ceiling`). Cohort-calibrated formation/captain shares still need pre-deadline public picks, which nothing in the repo fetches — that half stays open. | `fpl/optimize/rank.py` |
-| R1 Mode 1 objective | needs a decision from the user (see "Still-open model work") | — |
+| R1 Mode 1 objective | **done** — expected points decide the Mode 1 squad; rank reports (`rank_stats["decided_by"]`, `rank_would_choose`); `optimizer.rank_squad` opts back in. Ties on the bar are worth half. **Behaviour change for the live Mode 1 run.** |
 
 ## Re-review findings
 
