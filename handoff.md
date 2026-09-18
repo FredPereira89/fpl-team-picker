@@ -1,28 +1,152 @@
 # Handoff — FPL audit remediation, post-review
 
-**Review status:** Codex reviewed `98ada9f` and found 11 blockers (RB1–RB11
-below). Claude verified every finding against the source — all eleven stood —
-and fixed them in Codex's recommended order at `ad025d1..ed0092c`.
+**Review status:** Codex re-reviewed Claude's fixes at
+`ad025d1..ed0092c`. Seven blockers are closed; four are **partially fixed**
+(RB5, RB8, RB9, RB10), and three additional replay-fidelity gaps were found.
+The full suite is green, but its current tests do not exercise the failing
+sequences documented in "Re-review findings" below.
 
-**Branch:** `master` — `370de0e..ed0092c`
+**Branch:** `master` — reviewed through `fc28d5a`
 
-**Verification:** `python -m pytest -q` → **653 passed, 1 warning**.
+**Verification (independently rerun by Codex):** `python -m pytest -q` →
+**653 passed, 1 warning**.
 End-to-end: a synthetic pre-deadline GW4 snapshot with shifted prices was
 captured, the walk-forward script read it (`inputs` column = `snapshot`, GW4
 dropped from the contamination banner, oracle score moved 80→78), and it was
 deleted afterwards. No snapshots are committed.
 
-**Last updated:** 2026-09-18
+**Last updated:** 2026-09-18 (Codex re-review)
+
+## Re-review findings
+
+### RR1 — High: a normal pre-deadline `--confirm` still marks its own rerun
+
+**Where:** `run_gameweek.py:191`; `fpl/backtest/manifest.py:155-197`.
+
+`--confirm` runs the complete pipeline first, creating a new live forecast, and
+then calls `mark_actioned(deadline=...)`. If confirmation is before the deadline
+(the normal case), that just-created forecast is eligible and is the newest, so
+it is marked instead of the earlier planning forecast the manager actually
+used. The deadline fix only distinguishes a **post-deadline** confirmation.
+`--forecast-version` is an exact escape hatch, but it is optional and the report
+does not surface a ready-to-copy version id.
+
+Codex reproduced this with a planning version at September 10 and a confirmation
+rerun at 13:00 on September 11, both before a 17:30 deadline:
+
+`predeadline_confirm_marks = confirm-rerun`
+
+**Fix:** make the forecast version explicit in the rendered recommendation and
+require it on confirmation, or capture the candidate version before the
+confirmation pipeline writes another one. Add the missing pre-deadline
+planning → confirmation regression test.
+
+### RR2 — High validation risk: the actioned forecast's snapshot link is recorded but ignored
+
+**Where:** `scripts/run_walkforward.py:132,146`;
+`fpl/backtest/walkforward.py:212-234`; `fpl/backtest/manifest.py:119-136`.
+
+The manifest correctly stores `snapshot`, and `gameweek_inputs()` accepts a
+`snapshot_version`, but the walk-forward caller passes neither the actioned
+forecast's snapshot nor a deadline. It therefore selects the newest
+pre-deadline capture, not the capture used by the actioned forecast. The
+contamination banner makes the same unpinned selection.
+
+Codex reproduced two pre-deadline snapshots: the actioned forecast referenced
+the first (£5.5), while the replay silently read the later one (£5.7). Passing
+the manifest's snapshot id returned the correct £5.5 input.
+
+**Fix:** for each gameweek call `manifest.select_version()`, pass its
+`snapshot` to both `gameweek_inputs(..., snapshot_version=...)` and
+`contamination_note(..., versions_by_gw=...)`, and test the complete caller
+path rather than the snapshot helper alone.
+
+### RR3 — Medium: same-gameweek reconfirmation can replace one chip with another
+
+**Where:** `run_gameweek.py:162-163`.
+
+The legality check removes **all** chip events from the current gameweek before
+calling `chip_blocked_reason()`. That correctly makes reconfirming the same chip
+idempotent, but also hides a different chip already recorded in that gameweek.
+For example, a recorded GW8 Bench Boost is removed and a GW8 Wildcard is then
+accepted, violating the one-active-chip rule.
+
+**Fix:** remove only the matching `(chip, event)` record for idempotence; retain
+other same-event chips. Add a Bench Boost → Wildcard same-GW regression test.
+
+### RR4 — Medium decision risk: current and future Triple Captain values use different currencies
+
+**Where:** `fpl/optimize/chips.py:201-231`.
+
+This week's value correctly includes vice takeover via
+`triple_captain_value()`, but future weeks still use the best player's raw xP
+from `captain_value_by_event()`. Comparing those directly biases the advisor
+toward playing now. Codex constructed a case where this week was worth 10.0
+including the vice and next week was worth 14.2 on the same formula; the advisor
+reported that no better week was visible and recommended Triple Captain now
+because it compared 10.0 against future raw xP of 9.5.
+
+**Fix:** compute future armband marginal value on the same formula, with an
+event-specific legal XI/captain/vice (B8), or conservatively compare raw captain
+xP on both sides until that exists.
+
+### RR5 — High validation risk once calibration activates: replay calibration is not production calibration
+
+**Where:** `scripts/run_walkforward.py:159-162`.
+
+The handoff recommends `--no-save`, but that flag also disables calibration,
+even though production has `calibrate=true`. Without `--no-save`, the replay
+calls `apply_calibration(xp, cal)` without the configured
+`horizon_decay=0.85`, so the function's default `1.0` rebuilds an undiscounted
+`xp_horizon`. This is dormant before five scored live gameweeks, then the
+"expected" replay ceases to match the production transfer objective.
+
+**Fix:** separate "write replay forecasts" from "apply available live
+calibration", and always pass `decay=cfg.horizon_decay`. Add a calibrated
+multi-week replay test with `--no-save` semantics.
+
+### RR6 — Medium validation risk: snapshots still omit decision inputs
+
+**Where:** `fpl/pipeline.py:411,440`; `scripts/run_walkforward.py:153`;
+`fpl/data/snapshots.py`.
+
+Production minutes use the loaded manual `news` overrides, but snapshots store
+only bootstrap and fixtures and the replay calls `minutes_model()` without
+`news`. Exact element-summary payload versions and the configuration payload are
+also not archived (only collapsed source timestamps and a config hash are
+recorded). The action-time forecast itself remains scoreable, but the replay
+cannot yet reconstruct all inputs that produced it.
+
+**Fix:** version the resolved overrides and config beside each snapshot, and
+either archive exact element-summary inputs or explicitly classify their later
+reconstruction as contamination.
+
+### RR7 — Medium validation risk: the default replay starts from a one-week squad
+
+**Where:** `scripts/run_walkforward.py:201-202`.
+
+With no `--squad`, the initial squad is optimized on `xp_next1`; production Mode
+1 builds on discounted `xp_horizon`. The script already admits that synthesizing
+the initial squad is an advantage, but it is also a different objective. The
+reported `hold`/`expected` totals therefore still do not represent the live
+policy unless the actual starting squad is supplied.
+
+**Fix:** require `--squad` for an executable-policy claim, or use
+`xp_horizon` for the synthetic start and label that path as a challenger rather
+than the manager's replay.
+
+No production source was changed during this re-review; only this handoff was
+updated.
 
 | Blocker | Fix | Commit |
 |---|---|---|
 | RB4 same-GW Free Hit re-confirm corrupts base | first record of the base is final for that Free Hit | `ad025d1` |
-| RB5 Triple Captain formula / rule / prose; BB/TC not wired | `captain_xp + (1-p_play)*vice_xp`; triple passes to vice; advisor uses real bench and armband values for the current week | `d85c0ae` |
+| RB5 Triple Captain formula / rule / prose; BB/TC not wired | **Partial:** formula, vice takeover, prose and current-week wiring fixed; future timing still compares raw captain xP against current marginal armband value (RR4) | `d85c0ae` |
 | RB6 Free Hit solve bought future captaincy | only the current event's column reaches the FH solve | `893cf27` |
 | RB7 override bypassed availability | override blends into the fully-fit rate, availability applies once; invariants tested for every player | `01584a1` |
-| RB8 `--confirm` marks the wrong forecast | `mark_actioned(deadline=…)` picks the newest live version strictly before the deadline; post-deadline refused; `--forecast-version` pins one; timestamps compared as instants | `aa1644d` |
-| RB9 illegal/unknown chips at confirm | argparse `choices`; `chip_blocked_reason` at confirm, exit 1 without writing; same-GW re-confirm stays idempotent | `8645fc2` |
-| RB10 first-snapshot-wins | every capture versioned; forecast manifest records `snapshot`; selection = named version, else newest pre-deadline | `f47db52` |
+| RB8 `--confirm` marks the wrong forecast | **Partial:** post-deadline selection and explicit pinning fixed; an ordinary pre-deadline confirmation still marks the forecast its own rerun just created (RR1) | `aa1644d` |
+| RB9 illegal/unknown chips at confirm | **Partial:** unknown and repeated-window chips rejected; a different chip can replace one already recorded in the same GW (RR3) | `8645fc2` |
+| RB10 first-snapshot-wins | **Partial:** captures are versioned and forecasts record `snapshot`; the walk-forward caller does not consume the actioned forecast's snapshot id (RR2) | `f47db52` |
 | RB1 snapshots never consumed | `walkforward.gameweek_inputs()` selects the point-in-time snapshot per gameweek, falls back to cache and flags it | `81ea874` |
 | RB2 replay forced `horizon_gw=1` | configured horizon used; `expected_points_policy` documents that it needs the horizon frame; one-week policies strip to the current event via `one_week_frame()` | `81ea874` |
 | RB3 replay reselected the armband | `Decision.captain/vice` set through `build_lineup`; `realised_score` honours them incl. vice takeover | `81ea874` |
@@ -242,25 +366,26 @@ the temporary Free Hit picks endpoint.
 | B1 chip inventory/legality | Implemented. The GW19→GW20 Free Hit restriction is now independently verified by the official 2026/27 rules. |
 | B2 FT carry over WC/FH | Implemented and verified. |
 | B3 reversible Free Hit state | Implemented (RB4, RB11 fixed). |
-| B4 chip actions | Implemented (RB5, RB6 fixed). |
+| B4 chip actions | Mostly implemented. FH scope and TC rule/formula are fixed; TC timing still compares unlike current/future values (RR4). |
 | B5 transfer candidate breadth | Implemented. |
 | B6 horizon vs rank reranking | Implemented for live transfers; `rank_transfers=false` by default. |
 | B9 availability consistency | Implemented (RB7 fixed); invariants tested. |
 | B10 calibration fixture-count application | Implemented. |
 | B11 DGW role evidence | Implemented. |
 | B12 Tier 1 cutoff leakage | Implemented. |
-| B13 point-in-time executable replay | Implemented (RB1, RB2, RB3, RB10 fixed). Still contaminated for GW1–4 because no pre-deadline snapshot can exist for them; every run from now on captures one. |
-| B14 immutable/actioned ledger | Implemented (RB8 fixed). |
+| B13 point-in-time executable replay | Partially implemented. Snapshots are consumed and state/horizon/armband are replayed, but the actioned snapshot id, calibration, manual overrides and default initial objective remain mismatched (RR2, RR5–RR7). GW1–4 remain irrecoverably contaminated. |
+| B14 immutable/actioned ledger | Immutable selection is implemented. Exact action identity is still optional, and the default pre-deadline confirmation marks its own rerun (RR1). |
 | B15 Tier 2 DNP/minutes leakage | Implemented as designed. |
 | B16 failed fetch vs newcomer | Implemented as designed. |
 | B17 inherited four-player club overage | Implemented. |
 | R11 hidden Bench Boost floor | Implemented; default is explicitly `0.0`. |
 
 The GW1–4 sequential totals remain **contaminated smoke-test output** — no
-pre-deadline snapshot can exist for those gameweeks. After RB1–RB3 the policy
-being measured IS the production one (5-GW horizon, live armband), and with the
-real horizon `expected` made 5 transfers incl. one hit and finished level with
-`hold` at 236. Still four gameweeks; still not a verdict.
+pre-deadline snapshot can exist for those gameweeks. The replay now uses the
+configured horizon and live armband, but RR2 and RR5–RR7 mean it still should
+not be described as an exact production-policy replay. With the real horizon,
+`expected` made 5 transfers incl. one hit and finished level with `hold` at
+236. Still four gameweeks; still not a verdict.
 
 ## Still-open model work (after the blockers)
 
@@ -290,8 +415,9 @@ horizon, and R10 goalkeeper/bonus structure.
 4. ~~Make Free Hit restoration work offline from `base_*` state (RB11).~~
 5. ~~Run the full suite and one end-to-end historical replay whose snapshot values
    deliberately differ from current cache.~~
-6. **Next:** continue P2 — B8 → B7 → R3 (see "Still-open model work"). Do not
-   tune the model from the current sequential replay numbers.
+6. **Next:** close RR1–RR7, in the order RR1/RR2/RR3 → RR5/RR6/RR7 → RR4.
+7. Then continue P2 — B8 → B7 → R3. Do not tune the model from the current
+   sequential replay numbers.
 
 Two things to know before the next live run:
 
@@ -302,7 +428,7 @@ Two things to know before the next live run:
   post-deadline forecast as acted on (it still records the squad and chip, and
   prints a warning).
 
-## Tests Codex flagged as false reassurance — all addressed
+## Test coverage after re-review
 
 - TC formula test replaced (`test_triple_captain_is_worth_one_more_armband_return_and_passes_to_the_vice`).
 - `tests/test_walkforward.py::test_a_point_in_time_snapshot_is_what_the_replay_reads`
@@ -315,6 +441,21 @@ Two things to know before the next live run:
 - `tests/test_cli.py::test_reconfirming_a_free_hit_keeps_the_original_permanent_squad`.
 - `tests/test_minutes.py::test_a_doubtful_player_with_a_strong_override_still_respects_availability`
   and `test_minutes_invariants_hold_for_every_player`.
+
+Those tests validate the helpers they name, but the re-review found missing
+caller-level cases:
+
+- RB8 tests only a **post-deadline** confirmation rerun; they do not test the
+  normal pre-deadline rerun that is still selected by default (RR1).
+- Snapshot tests prove named selection works, but `run_walkforward.py` never
+  supplies the actioned forecast's snapshot id (RR2).
+- Chip tests cover same-chip idempotence but not replacing a different chip in
+  the same gameweek (RR3).
+- Triple Captain tests prove the corrected current-week formula, not timing
+  against future weeks measured with the old raw-xP approximation (RR4).
+- Replay tests cover horizon and armband but not calibrated multi-week runs,
+  `--no-save`, manual overrides, or the synthetic initial-squad objective
+  (RR5–RR7).
 
 Codex changed no production source during its review. Claude's fixes are the
 eleven commits listed at the top.
