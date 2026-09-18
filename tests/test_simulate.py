@@ -65,6 +65,43 @@ def _sim(n_sims=4000, seed=0):
                           n_sims=n_sims, seed=seed)
 
 
+def _mean_excluding_bonus(n_sims=20000, seed=0):
+    """(ids, per-player mean with the match-ranked bonus term subtracted,
+    analytic projection with its bonus90-rate term subtracted).
+
+    Bonus is now a match-wide RANKED resource (R10), not an independent
+    per-player rate: only the top three BPS in the whole match score, with
+    FPL's tie rule, so the true mean depends on how many players are
+    competing for those three slots and how their BPS is distributed --
+    properties a per-player `bonus90` rate was never fitted to reproduce,
+    and this fixture's 6-player "match" exaggerates the gap further (six
+    players contesting the same three slots a real ~20-a-side match spreads
+    much thinner). Excluding bonus from both sides keeps these tests
+    checking what they actually test: that the OTHER components (goals,
+    assists, clean sheets, minutes, DC, cards) agree with `model.xp`.
+    """
+    from fpl.model.bps import expected_bonus_for
+    from fpl.model.simulate import simulate_event_detailed
+
+    detail = simulate_event_detailed(PLAYERS, RATES, MINUTES, TFX, event=1,
+                                     n_sims=n_sims, seed=seed)
+    ids, samples, bonus = detail["ids"], detail["samples"], detail["bonus"]
+    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG,
+                        from_event=1).set_index("player_id")["xp_next1"]
+    att_mult_by_team = TFX.set_index("team_id")["att_mult"].astype(float)
+    team_of = PLAYERS.set_index("player_id")["team_id"]
+    bonus90_of = RATES.set_index("player_id")["bonus90"]
+    e_minutes_of = MINUTES.set_index("player_id")["e_minutes"]
+
+    sim_mean, analytic_mean = {}, {}
+    for i, pid in enumerate(ids):
+        analytic_bonus = expected_bonus_for(bonus90_of.loc[pid], e_minutes_of.loc[pid],
+                                            att_mult_by_team.loc[team_of.loc[pid]])
+        sim_mean[pid] = float((samples[i] - bonus[i]).mean())
+        analytic_mean[pid] = float(analytic.loc[pid]) - analytic_bonus
+    return ids, sim_mean, analytic_mean
+
+
 def test_simulation_returns_a_sample_matrix_per_player():
     ids, samples = _sim(n_sims=500)
     assert list(ids) == [1, 2, 3, 4, 5, 6]
@@ -80,23 +117,30 @@ def test_the_same_seed_reproduces_the_same_draws():
 def test_simulated_mean_agrees_with_the_analytic_projection():
     """The simulation and model.xp implement the same FPL scoring rules by
     different routes -- one in closed form, one by drawing outcomes. If their
-    means disagree, one of them has the rules wrong."""
-    ids, samples = _sim(n_sims=20000)
-    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG,
-                        from_event=1).set_index("player_id")["xp_next1"]
-    for i, pid in enumerate(ids):
-        assert samples[i].mean() == pytest.approx(float(analytic.loc[pid]), abs=0.15), \
-            f"player {pid}: sim {samples[i].mean():.3f} vs analytic {analytic.loc[pid]:.3f}"
+    means disagree (outside of bonus, see `_mean_excluding_bonus`), one of
+    them has the rules wrong."""
+    ids, sim_mean, analytic_mean = _mean_excluding_bonus()
+    for pid in ids:
+        assert sim_mean[pid] == pytest.approx(analytic_mean[pid], abs=0.15), \
+            f"player {pid}: sim {sim_mean[pid]:.3f} vs analytic {analytic_mean[pid]:.3f}"
 
 
 def test_teammates_clean_sheets_are_correlated():
     """Two defenders on the same side keep the same clean sheet. Pricing them
-    as independent is what makes the optimizer blind to stacking."""
+    as independent is what makes the optimizer blind to stacking.
+
+    Bonus (R10) now also correlates points a little across the WHOLE match,
+    not only within a side -- both teams' players compete for the same
+    three ranked slots -- which narrows the same-team/cross-team gap
+    slightly versus clean sheets alone. 0.12 (was 0.15) still clears both
+    substantive claims: a real same-team effect, and same-team beating
+    cross-team.
+    """
     ids, samples = _sim(n_sims=8000)
     idx = {p: i for i, p in enumerate(ids)}
     same_team = np.corrcoef(samples[idx[2]], samples[idx[3]])[0, 1]
     cross_team = np.corrcoef(samples[idx[2]], samples[idx[5]])[0, 1]
-    assert same_team > 0.15
+    assert same_team > 0.12
     assert same_team > cross_team
 
 
@@ -217,12 +261,12 @@ def test_a_goal_never_coexists_with_an_opposing_clean_sheet():
 
 
 def test_attacker_marginal_means_survive_the_allocation():
-    """Allocating team goals to players must not move the projection."""
-    ids, samples = _sim(n_sims=20000)
-    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG,
-                        from_event=1).set_index("player_id")["xp_next1"]
-    for i, pid in enumerate(ids):
-        assert samples[i].mean() == pytest.approx(float(analytic.loc[pid]), abs=0.15)
+    """Allocating team goals to players must not move the projection
+    (excluding bonus, now a match-ranked resource -- see
+    `_mean_excluding_bonus`)."""
+    ids, sim_mean, analytic_mean = _mean_excluding_bonus()
+    for pid in ids:
+        assert sim_mean[pid] == pytest.approx(analytic_mean[pid], abs=0.15)
 
 
 def test_a_lone_team_row_without_an_opponent_still_simulates():
@@ -266,18 +310,33 @@ def test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60():
     the model's own p_60 -- which is exactly what the removed Beta-draw
     mechanism did whenever evidence was thin. Player id=3 (p_start=0.75,
     p_60=0.66) has a real gap between the two, which is what the old bug
-    needed to bite."""
+    needed to bite.
+
+    Bonus is excluded from both sides of the comparison (R10): it is now a
+    match-wide RANKED resource, not an independent per-player rate, so its
+    own mean no longer has to agree with the analytic `bonus90`-based
+    estimate -- mixing it in would dilute this test's actual target (the
+    OTHER components, which the p_60 bug touches) with noise from a
+    mechanism this test was never about.
+    """
+    from fpl.model.bps import expected_bonus_for
+    from fpl.model.simulate import simulate_event_detailed
+
     mins = MINUTES.copy()
     mins["start_evidence"] = 3.0     # thin -- exactly where the old bug bit hardest
-    ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1,
-                                  n_sims=300000, seed=5)
+    detail = simulate_event_detailed(PLAYERS, RATES, mins, TFX, event=1,
+                                     n_sims=300000, seed=5)
+    ids, samples, bonus = detail["ids"], detail["samples"], detail["bonus"]
     analytic = build_xp(PLAYERS, RATES, mins, TFX, CFG, from_event=1).set_index(
         "player_id")["xp_next1"]
     i = list(ids).index(3)
+    # Player 3 is Alpha (team_id=1), whose fixture att_mult is 1.25.
+    analytic_bonus = expected_bonus_for(bonus90=0.30, e_minutes=62.9, att_mult=1.25)
     # abs=0.05 is tight enough that the confirmed bug (a ~0.05-0.06 point
     # shift in the clean-sheet term alone at this gap) would fail it; the
     # pre-existing whole-suite tolerance (abs=0.15) was too loose to catch it.
-    assert samples[i].mean() == pytest.approx(float(analytic.loc[3]), abs=0.05)
+    assert (samples[i] - bonus[i]).mean() == pytest.approx(
+        float(analytic.loc[3]) - analytic_bonus, abs=0.05)
 
 
 def test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw():

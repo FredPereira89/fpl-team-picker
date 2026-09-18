@@ -24,7 +24,7 @@ import pandas as pd
 from .minutes import M_START, M_SUB
 from .xp import (GOAL_PTS, CS_PTS, ASSIST_PTS, DC_PTS, DC_THRESHOLD,
                  SAVES_PER_POINT, CONCEDED_PER_PENALTY, CONCEDED_PENALTY_POSITIONS)
-from .bps import FIXTURE_SENSITIVITY, MAX_BONUS_PER_MATCH
+from .bps import score_side_bps, award_match_bonus
 
 DEFAULT_SIMS = 4000
 # Dispersion of a team's attacking output around its expectation, as the shape
@@ -58,14 +58,19 @@ def simulate_event_detailed(players, rates, minutes, tfx, event: int,
                             n_sims: int = DEFAULT_SIMS, seed: int = 0) -> dict:
     """The same draw with its parts exposed, for tests and diagnostics.
 
-    {"ids", "samples", "played", "goals", "conceded_team", "team_of"} --
+    {"ids", "samples", "played", "goals", "conceded_team", "team_of", "bonus"} --
     `played` records whether each player appeared in at least one fixture in the
     gameweek.  Keeping appearance separate from points matters because a player
     can appear and score zero: captaincy passes to the vice only on NO
     appearance, and autosubs use the same rule.  `goals` is each player's goals
     per scenario and `conceded_team` the goals his SIDE conceded in that
     scenario, so the coherence property (no goal against a clean sheet in the
-    same match) can be asserted directly rather than inferred.
+    same match) can be asserted directly rather than inferred. `bonus` is each
+    player's own share of the match-wide 3/2/1 ranking (see `model.bps`),
+    exposed separately from `samples` so a caller can compare the OTHER
+    scoring components against the analytic projection without the bonus
+    mechanism's own mean (which is a ranked, scarce match resource, not an
+    independent per-player rate) obscuring the comparison.
     """
     ids, samples, detail = _simulate(players, rates, minutes, tfx, event, n_sims, seed)
     return {"ids": ids, "samples": samples, **detail}
@@ -78,6 +83,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     played_all = np.zeros((len(ids), n_sims), dtype=bool)
     goals_all = np.zeros((len(ids), n_sims), dtype=float)
     conceded_all = np.zeros((len(ids), n_sims), dtype=float)
+    bonus_all = np.zeros((len(ids), n_sims), dtype=float)
 
     rate_cols = ["xg90", "xa90", "bonus90", "dc90", "saves90", "cards90"]
     mins_cols = ["p_start", "p_play", "p_60", "m_start", "e_minutes"]
@@ -114,6 +120,10 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             lam_of[team] = (float(opp["xgc"]) if opp is not None
                             else float(pitch[team]["w"].sum(axis=0).mean()))
             scored[team] = rng.poisson(lam_of[team], size=n_sims)
+        # Bonus is a MATCH-wide ranking (the three best BPS across BOTH sides),
+        # not a per-side one, so every side's BPS is collected before any of
+        # them is awarded -- see the loop below.
+        match_rows, match_bps = [], []
         for fx in sides:
             team = int(fx["team_id"])
             rows = np.flatnonzero(team_of == team)
@@ -122,16 +132,26 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             opp = next((o for o in sides if int(o["team_id"]) != team), None)
             conceded = scored[int(opp["team_id"])] if opp is not None \
                 else rng.poisson(float(fx["xgc"]), size=n_sims)
-            pts, goals = _score_side(R[rows], M[rows], positions[rows], fx, pitch[team],
-                                     scored[team], conceded, lam_of[team], n_sims, rng)
+            pts, goals, bps = _score_side(R[rows], M[rows], positions[rows], fx, pitch[team],
+                                          scored[team], conceded, lam_of[team], n_sims, rng)
             samples[rows] += pts
             # In a double gameweek one appearance is enough to keep the
             # captain's armband and prevent an autosub, so aggregate with OR.
             played_all[rows] |= pitch[team]["played"]
             goals_all[rows] += goals
             conceded_all[rows] += conceded[None, :]
+            match_rows.append(rows)
+            match_bps.append(bps)
+        if match_rows:
+            bonus = award_match_bonus(np.concatenate(match_bps, axis=0))
+            offset = 0
+            for rows in match_rows:
+                samples[rows] += bonus[offset:offset + len(rows)]
+                bonus_all[rows] += bonus[offset:offset + len(rows)]
+                offset += len(rows)
     return ids, samples, {"played": played_all, "goals": goals_all,
-                          "conceded_team": conceded_all, "team_of": team_of}
+                          "conceded_team": conceded_all, "team_of": team_of,
+                          "bonus": bonus_all}
 
 
 def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
@@ -218,7 +238,10 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     `side_lambda` is the expected goals the side's total was drawn at, and is
     the cap the allocation preserves player means against.
     """
-    xg90, xa90, bonus90, dc90, saves90, cards90 = (R[:, i][:, None] for i in range(6))
+    # bonus90 (column 2) is not used here -- bonus now comes from ranking
+    # BPS across the match (see below), not from an independent per-player
+    # rate.
+    xg90, xa90, _, dc90, saves90, cards90 = (R[:, i][:, None] for i in range(6))
     played, reached_60, share = pitch["played"], pitch["reached_60"], pitch["share"]
     n = len(R)
 
@@ -240,27 +263,30 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     threat = float(fx["opp_threat"]) if "opp_threat" in fx else 1.0
     saves = rng.poisson(np.maximum(saves90 * share * threat, 0.0))
     cards = rng.poisson(np.maximum(cards90 * share, 0.0))
-    scale = 1.0 + (att - 1.0) * FIXTURE_SENSITIVITY
-    b = np.clip(bonus90 * share * scale, 0.0, MAX_BONUS_PER_MATCH)
-    bonus = rng.binomial(int(MAX_BONUS_PER_MATCH), b / MAX_BONUS_PER_MATCH)
 
     goal_pts = np.array([GOAL_PTS[p] for p in positions])[:, None]
     cs_pts = np.array([CS_PTS[p] for p in positions])[:, None]
     dc_bar = np.array([DC_THRESHOLD.get(p, 12) for p in positions])[:, None]
     is_keeper = (positions == "GKP")[:, None]
     concedes = np.isin(positions, list(CONCEDED_PENALTY_POSITIONS))[:, None]
+    clean_sheet = (conceded_team == 0)   # this scenario's SIDE clean sheet
 
     pts = played * 1.0 + reached_60 * 1.0
     pts += goals * goal_pts + assists * ASSIST_PTS
     # The clean sheet is the SIDE's, derived from the same scoreline the
     # opposition's goals came from, and it needs the hour.
-    pts += (conceded_team[None, :] == 0) * reached_60 * cs_pts
+    pts += clean_sheet[None, :] * reached_60 * cs_pts
     pts += (dc >= dc_bar) * DC_PTS
-    pts += bonus
     pts -= concedes * (conceded_on // CONCEDED_PER_PENALTY)
     pts += is_keeper * (saves // SAVES_PER_POINT)
     pts -= cards
-    return pts.astype(float), goals
+    # Bonus is not awarded here: it is a MATCH-wide ranking of BPS across
+    # both sides (see `_simulate`), not an independent per-player draw, so
+    # this returns the ingredients for that ranking rather than a bonus
+    # value of its own.
+    bps = score_side_bps(positions, played, reached_60, goals, assists,
+                         clean_sheet, saves, cards, dc)
+    return pts.astype(float), goals, bps
 
 
 def moment_match(samples: np.ndarray, ids: list[int], xp: pd.DataFrame,
