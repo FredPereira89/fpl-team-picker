@@ -119,3 +119,62 @@ def test_uniform_appearance_odds_reproduce_the_old_ordering():
     """Where nobody carries extra risk this must not move the armband."""
     lu = build_lineup(SQUAD, _with_p_play({}))
     assert (lu.captain, lu.vice) == (8, 13)
+
+
+# --- B8: the reported XI is the best legal eleven THIS week ---
+
+def _squad_frame():
+    import pandas as pd
+    rows = []
+    for pid, pos, now, later in [
+        (1, "GKP", 3.0, 3.0), (2, "GKP", 1.0, 1.0),
+        (3, "DEF", 4.0, 4.0), (4, "DEF", 4.0, 4.0), (5, "DEF", 4.0, 4.0),
+        (6, "DEF", 1.0, 6.0),   # benched this week, a horizon starter
+        (7, "DEF", 5.5, 2.0),   # the reverse: big this week, weak later
+        (8, "MID", 4.0, 4.0), (9, "MID", 4.0, 4.0), (10, "MID", 4.0, 4.0),
+        (11, "MID", 4.0, 4.0), (12, "MID", 0.5, 0.5),
+        (13, "FWD", 4.0, 4.0), (14, "FWD", 4.0, 4.0), (15, "FWD", 0.5, 0.5),
+    ]:
+        rows.append({"player_id": pid, "position": pos, "xp_next1": now,
+                     "xp_horizon": later, "p_play": 0.9})
+    return pd.DataFrame(rows)
+
+
+def test_best_xi_picks_the_best_legal_eleven_for_the_week():
+    from fpl.optimize.lineup import best_xi
+    xi = best_xi(list(range(1, 16)), _squad_frame(), xp_col="xp_next1")
+    assert len(xi) == 11
+    assert 7 in xi and 6 not in xi
+    assert 1 in xi and 2 not in xi
+
+
+def test_best_xi_respects_the_formation_limits():
+    from fpl.optimize.lineup import best_xi
+    frame = _squad_frame()
+    # Make every defender enormous: at most five may start, and a forward
+    # and two midfielders must still be in.
+    frame.loc[frame.position == "DEF", "xp_next1"] = 20.0
+    xi = best_xi(list(range(1, 16)), frame)
+    pos = frame.set_index("player_id").loc[xi, "position"].value_counts()
+    assert pos["GKP"] == 1 and pos["DEF"] == 5 and pos["MID"] >= 2 and pos["FWD"] >= 1
+
+
+def test_build_lineup_re_picks_the_xi_on_this_weeks_projection():
+    """The solver's XI serves the whole horizon; the report is for one week.
+    A player who is more valuable as a horizon-long starter was being shown
+    in this week's XI over one who is clearly better now."""
+    from fpl.optimize.lineup import build_lineup
+    from fpl.optimize.squad import Squad
+    horizon_xi = [1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14]      # 6 in, 7 out
+    lineup = build_lineup(Squad(list(range(1, 16)), horizon_xi, 0.0, 0.0),
+                          _squad_frame())
+    assert 7 in lineup.xi and 6 in lineup.bench
+
+
+def test_build_lineup_can_keep_the_supplied_xi():
+    from fpl.optimize.lineup import build_lineup
+    from fpl.optimize.squad import Squad
+    horizon_xi = [1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14]
+    lineup = build_lineup(Squad(list(range(1, 16)), horizon_xi, 0.0, 0.0),
+                          _squad_frame(), exact=False)
+    assert set(lineup.xi) == set(horizon_xi)
