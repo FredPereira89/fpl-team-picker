@@ -101,7 +101,13 @@ def test_bench_boost_is_worth_the_real_bench_not_the_four_lowest():
     assert bench_boost_value(lineup, pool) == pytest.approx(expected)
 
 
-def test_triple_captain_is_worth_one_more_captain_return():
+def test_triple_captain_is_worth_one_more_armband_return_and_passes_to_the_vice():
+    """xp_next1 is already the UNCONDITIONAL expectation -- it includes the
+    chance he does not play -- so multiplying it by p_play again discounted the
+    captain twice. And the chip is not wasted when he does not play: FPL's FAQ
+    says the triple passes to the vice-captain. The extra multiple is therefore
+    worth the captain's unconditional xP plus, in the scenarios where he does
+    not appear, the vice's."""
     pool = _pool()
     lineup = Lineup(xi=list(range(1, 12)), bench=[12, 13, 14, 15],
                     formation="4-4-2", captain=3, vice=2, xp=40.0)
@@ -109,5 +115,14 @@ def test_triple_captain_is_worth_one_more_captain_return():
     captain_xp = float(frame.loc[3, "xp_next1"])
     p_play = float(frame.loc[3, "p_play"])
     vice_xp = float(frame.loc[2, "xp_next1"])
-    expected = p_play * captain_xp + (1 - p_play) * vice_xp
+    expected = captain_xp + (1 - p_play) * vice_xp
     assert triple_captain_value(lineup, pool) == pytest.approx(expected)
+
+
+def test_a_certain_starter_makes_triple_captain_worth_exactly_his_xp():
+    pool = _pool()
+    pool.loc[pool.player_id == 3, "p_play"] = 1.0
+    lineup = Lineup(xi=list(range(1, 12)), bench=[12, 13, 14, 15],
+                    formation="4-4-2", captain=3, vice=2, xp=40.0)
+    assert triple_captain_value(lineup, pool) == pytest.approx(
+        float(pool.set_index("player_id").loc[3, "xp_next1"]))

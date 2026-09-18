@@ -128,12 +128,19 @@ def bench_boost_value(lineup, xp_df, xp_col: str = ONE_WEEK_COL) -> float:
 
 
 def triple_captain_value(lineup, xp_df, xp_col: str = ONE_WEEK_COL) -> float:
-    """What a Triple Captain adds: ONE more captain return, not three.
+    """What a Triple Captain adds: ONE more armband return.
 
-    The armband already pays double. The chip pays a third multiple, and only
-    if the captain appears -- if he does not, the vice inherits an ordinary
-    double and the chip is wasted, which is exactly the risk the advice text
-    warns about and the number never used to include.
+    The armband already pays double; the chip pays a third multiple. `xp_col`
+    is the UNCONDITIONAL expectation -- it already contains the chance the
+    captain does not appear -- so the extra multiple is worth exactly that
+    figure when he plays. Multiplying it by `p_play` again, which an earlier
+    version did, discounted him twice.
+
+    And the chip is not wasted when he does not play: FPL's rules pass the
+    triple to the vice-captain, so in those scenarios the third multiple lands
+    on the vice instead. Under the usual independence approximation that is
+    `(1 - p_play) * vice_xp`, the same shape `choose_captain` already uses for
+    ordinary vice inheritance.
     """
     frame = xp_df.set_index("player_id")
     captain = int(lineup.captain)
@@ -142,4 +149,4 @@ def triple_captain_value(lineup, xp_df, xp_col: str = ONE_WEEK_COL) -> float:
               if "p_play" in frame.columns else 1.0)
     vice_xp = (float(frame.loc[int(lineup.vice), xp_col])
                if lineup.vice is not None else 0.0)
-    return round(p_play * captain_xp + (1.0 - p_play) * vice_xp, 3)
+    return round(captain_xp + (1.0 - p_play) * vice_xp, 3)

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from ..chips import chip_available, chip_blocked_reason
+from .actions import bench_boost_value, triple_captain_value
 from .objective import event_columns
 
 BENCH_BOOST_MIN_XP = 2.5
@@ -201,8 +202,13 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
     bench_by_event = bench_value_by_event(xp_df, ids)
     exposure = squad_exposure(counts, ids, team_by_player)
     horizon_last = max(cap_by_event) if cap_by_event else from_event
-    cap_xp = cap_by_event.get(from_event, float(df.loc[lineup.captain, "xp_next1"]))
-    bench_total = bench_by_event.get(from_event, sum(bench_xp))
+    # THIS week's values come from the real lineup: the chip's marginal value
+    # with the triple passing to the vice, and the four players actually
+    # benched rather than the four lowest projections. Future weeks keep the
+    # cheaper per-event approximations -- there is no lineup for them yet --
+    # which if anything understates them, so it cannot make the advisor hasty.
+    cap_xp = triple_captain_value(lineup, xp_df)
+    bench_total = bench_boost_value(lineup, xp_df)
     squad_size = len(ids)
 
     holds: list[tuple[str, int, str]] = []
@@ -269,8 +275,9 @@ def advise_chips(xp_df: pd.DataFrame, lineup, squad_ids: list[int],
         return ChipAdvice("triplecaptain", (
             f"{df.loc[lineup.captain, 'web_name']} has {detail} (xP {cap_xp:.1f}), and no "
             f"better armband week is visible through GW{horizon_last}. "
-            f"Triple Captain turns that into 3x, but a blank or an early substitution "
-            f"wastes the chip entirely."
+            f"Triple Captain turns that into 3x. If he does not appear the triple "
+            f"passes to your vice-captain, so the downside is a weaker armband, "
+            f"not a wasted chip."
         ))
 
     if bench_ok and usable("benchboost"):
