@@ -368,3 +368,41 @@ def test_a_supplied_squad_is_banked_under_the_first_weeks_budget():
     state = initial_state(POOL, replace(_cfg(), budget=80.0), squad=CURRENT)
     assert state.squad == CURRENT
     assert state.bank == pytest.approx(80.0 - 15 * 5.0)
+
+
+# --- C6-1: the replay must score the SAME XI it built the armband from ---
+
+def test_with_armband_copies_the_exact_xi_not_only_the_captain():
+    """_with_armband asked build_lineup for the exact weekly XI to pick a
+    captain, but only copied the captain/vice back to the Decision -- leaving
+    `starting_ids` as the policy's original (horizon) XI. A captain chosen
+    from the exact XI could then be a player absent from the very
+    `starting_ids` the caller goes on to score."""
+    from fpl.backtest.replay import _with_armband
+    pool = POOL.copy()
+    # Bench forward 75 dwarfs both starting forwards this week, so the exact
+    # weekly XI swaps him in -- but the ORIGINAL decision's starting_ids
+    # (XI) still lists the old forwards.
+    pool.loc[pool.player_id == 75, "xp_next1"] = 100.0
+    decision = Decision(list(CURRENT), list(XI))
+    out = _with_armband(decision, pool)
+    assert 75 in out.starting_ids, "the exact weekly XI must replace the horizon one"
+    assert len(out.starting_ids) == 11
+    assert out.captain in out.starting_ids
+
+
+def test_a_policy_using_with_armband_scores_the_exact_weekly_xi():
+    """End to end through step(): the armband and the scored XI must describe
+    the same eleven players, whichever policy produced the Decision."""
+    from fpl.backtest.replay import _with_armband
+    pool = POOL.copy()
+    pool.loc[pool.player_id == 75, "xp_next1"] = 100.0
+
+    def policy(xp, state, gw, cfg):
+        return _with_armband(Decision(list(CURRENT), list(XI)), xp)
+
+    result, _ = step(pool, _actuals(points=2.0), _state(), 1, _cfg(), policy)
+    assert result.captain in result.xi, (
+        "the reported captain must be a player who is actually in the scored XI")
+    assert 75 in result.xi
+    assert len(result.xi) == 11

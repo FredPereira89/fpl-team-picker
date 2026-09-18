@@ -131,15 +131,22 @@ def one_week_frame(xp: pd.DataFrame) -> pd.DataFrame:
 
 
 def _with_armband(decision: Decision, xp: pd.DataFrame) -> Decision:
-    """Set captain and vice through the LIVE lineup function.
+    """Set the exact weekly XI, captain and vice through the LIVE lineup function.
 
-    `choose_captain` discounts a captain for his chance of not appearing, so
-    the production armband can differ from the raw top projection. Every
-    executable policy goes through here so the replay scores the decision the
-    tool would actually recommend.
+    `build_lineup` (exact=True, the default) re-picks the eleven for THIS
+    week rather than reusing whatever `decision.starting_ids` held, and then
+    chooses the armband from that re-picked XI -- `choose_captain` discounts a
+    captain for his chance of not appearing, so the production armband can
+    differ from the raw top projection too. This used to copy back only the
+    captain and vice, leaving `decision.starting_ids` as the policy's
+    ORIGINAL (horizon) XI: `step()` then scored that stale XI while crediting
+    an armband chosen from a possibly different eleven, so a captain who was
+    exact-week-correct could be a player benched in the XI actually scored.
+    Copying `lineup.xi` back too makes the two agree by construction.
     """
     lineup = build_lineup(Squad(list(decision.squad_ids),
                                 list(decision.starting_ids), 0.0, 0.0), xp)
+    decision.starting_ids = list(lineup.xi)
     decision.captain, decision.vice = int(lineup.captain), int(lineup.vice)
     return decision
 
