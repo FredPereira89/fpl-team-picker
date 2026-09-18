@@ -170,3 +170,48 @@ def test_moment_matching_leaves_a_zero_mean_player_alone():
     calibrated = pd.DataFrame({"player_id": ids, "xp_next1": [2.0] * len(ids)})
     matched = moment_match(samples, ids, calibrated)
     assert matched[list(ids).index(4)].sum() == 0
+
+
+# --- R3: one coherent match per fixture ---
+
+def _goals_and_cs(ids, samples, rates, minutes, tfx, n_sims=3000):
+    """Recompute per-scenario team goals and opposing clean sheets from a
+    detailed simulation, via the diagnostic hook."""
+    from fpl.model.simulate import simulate_event_detailed
+    return simulate_event_detailed(PLAYERS, rates, minutes, tfx, event=1,
+                                   n_sims=n_sims, seed=1)
+
+
+def test_a_goal_never_coexists_with_an_opposing_clean_sheet():
+    """Each side's goals were drawn independently of the other side's goals
+    conceded, so an attacker could score in a scenario where the opposing
+    defenders kept a clean sheet. That impossible pair is exactly where a rank
+    objective built on stacks and opposing players goes wrong."""
+    detail = _goals_and_cs(*_sim(n_sims=10), RATES, MINUTES, TFX)
+    goals = detail["goals"]              # (n_players, n_sims)
+    conceded = detail["conceded_team"]   # (n_players, n_sims), the SIDE's conceded
+    team = detail["team_of"]
+    alpha = [i for i, t in enumerate(team) if t == 1]
+    beta = [i for i, t in enumerate(team) if t == 2]
+    alpha_goals = goals[alpha].sum(axis=0)
+    beta_conceded = conceded[beta[0]]
+    assert (alpha_goals <= beta_conceded).all()
+    # And with no unmodelled remainder in this fixture the two are identical
+    # whenever the modelled attackers account for the whole team total.
+    assert (alpha_goals[beta_conceded == 0] == 0).all()
+
+
+def test_attacker_marginal_means_survive_the_allocation():
+    """Allocating team goals to players must not move the projection."""
+    ids, samples = _sim(n_sims=20000)
+    analytic = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG,
+                        from_event=1).set_index("player_id")["xp_next1"]
+    for i, pid in enumerate(ids):
+        assert samples[i].mean() == pytest.approx(float(analytic.loc[pid]), abs=0.15)
+
+
+def test_a_lone_team_row_without_an_opponent_still_simulates():
+    tfx = TFX[TFX.team_id == 1]
+    ids, samples = simulate_event(PLAYERS, RATES, MINUTES, tfx, event=1,
+                                  n_sims=500, seed=0)
+    assert samples[list(ids).index(2)].sum() > 0

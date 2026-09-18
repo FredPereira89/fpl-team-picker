@@ -50,10 +50,29 @@ def simulate_event(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataF
     team with two is summed over both -- blanks and doubles fall out of the
     fixture loop exactly as they do in `model.xp`.
     """
+    ids, samples, _ = _simulate(players, rates, minutes, tfx, event, n_sims, seed)
+    return ids, samples
+
+
+def simulate_event_detailed(players, rates, minutes, tfx, event: int,
+                            n_sims: int = DEFAULT_SIMS, seed: int = 0) -> dict:
+    """The same draw with its parts exposed, for tests and diagnostics.
+
+    {"ids", "samples", "goals", "conceded_team", "team_of"} -- `goals` is each
+    player's goals per scenario and `conceded_team` the goals his SIDE conceded
+    in that scenario, so the coherence property (no goal against a clean sheet
+    in the same match) can be asserted directly rather than inferred.
+    """
+    ids, samples, detail = _simulate(players, rates, minutes, tfx, event, n_sims, seed)
+    return {"ids": ids, "samples": samples, **detail}
+
+
+def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     rng = np.random.default_rng(seed)
     ids = [int(i) for i in players["player_id"]]
-    row_of = {pid: i for i, pid in enumerate(ids)}
     samples = np.zeros((len(ids), n_sims), dtype=float)
+    goals_all = np.zeros((len(ids), n_sims), dtype=float)
+    conceded_all = np.zeros((len(ids), n_sims), dtype=float)
 
     rate_cols = ["xg90", "xa90", "bonus90", "dc90", "saves90", "cards90"]
     mins_cols = ["p_start", "p_play", "p_60", "m_start", "e_minutes"]
@@ -66,64 +85,132 @@ def simulate_event(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataF
     positions = players.set_index("player_id").reindex(ids)["position"].to_numpy()
     team_of = players.set_index("player_id").reindex(ids)["team_id"].astype(int).to_numpy()
 
-    for _, fx in tfx[tfx["event"] == int(event)].iterrows():
-        rows = np.flatnonzero(team_of == int(fx["team_id"]))
-        if len(rows) == 0:
-            continue
-        samples[rows] += _simulate_fixture(
-            R[rows], M[rows], positions[rows], fx, n_sims, rng)
-    return ids, samples
+    rows_in = tfx[tfx["event"] == int(event)]
+    # One MATCH at a time, both sides together. Simulating each team-row on
+    # its own drew a side's goals independently of what the other side
+    # conceded, so an attacker could score in a scenario where the opposing
+    # defenders kept a clean sheet -- an impossible outcome, and exactly the
+    # covariance a rank objective built on stacks and opposing players needs.
+    key = "fixture_id" if "fixture_id" in rows_in.columns else None
+    groups = rows_in.groupby(key) if key else [(None, rows_in.iloc[[i]]) for i in range(len(rows_in))]
+    for _, match in groups:
+        sides = [fx for _, fx in match.iterrows()]
+        # Who is on the pitch, drawn once per side, then the scoreline.
+        pitch = {int(fx["team_id"]): _on_pitch(R, M, np.flatnonzero(team_of == int(fx["team_id"])),
+                                               fx, n_sims, rng) for fx in sides}
+        scored, lam_of = {}, {}
+        for fx in sides:
+            team = int(fx["team_id"])
+            opp = next((o for o in sides if int(o["team_id"]) != team), None)
+            # A side's goals are Poisson at the OPPONENT's expected goals
+            # conceded -- the strength model's own number, and the one
+            # model.xp's clean-sheet probability is built on. A lone row with
+            # no opponent in the frame falls back to its players' own total.
+            lam_of[team] = (float(opp["xgc"]) if opp is not None
+                            else float(pitch[team]["w"].sum(axis=0).mean()))
+            scored[team] = rng.poisson(lam_of[team], size=n_sims)
+        for fx in sides:
+            team = int(fx["team_id"])
+            rows = np.flatnonzero(team_of == team)
+            if len(rows) == 0:
+                continue
+            opp = next((o for o in sides if int(o["team_id"]) != team), None)
+            conceded = scored[int(opp["team_id"])] if opp is not None \
+                else rng.poisson(float(fx["xgc"]), size=n_sims)
+            pts, goals = _score_side(R[rows], M[rows], positions[rows], fx, pitch[team],
+                                     scored[team], conceded, lam_of[team], n_sims, rng)
+            samples[rows] += pts
+            goals_all[rows] += goals
+            conceded_all[rows] += conceded[None, :]
+    return ids, samples, {"goals": goals_all, "conceded_team": conceded_all,
+                          "team_of": team_of}
 
 
-def _simulate_fixture(R, M, positions, fx, n_sims, rng) -> np.ndarray:
-    """One team's points in one fixture, shape (n_players, n_sims)."""
-    n = len(R)
-    xg90, xa90, bonus90, dc90, saves90, cards90 = (R[:, i][:, None] for i in range(6))
-    p_start, p_play, p_60, m_start = (M[:, i][:, None] for i in range(4))
-
-    # --- who is on the pitch -------------------------------------------------
-    # One uniform per player-sim splits start / substitute / absent, so the
-    # three outcomes stay mutually exclusive and sum to p_play.
+def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
+    """Minutes on the pitch per player-scenario, and each one's goal weight."""
+    p_start, p_play, p_60, m_start = (M[rows, i][:, None] for i in range(4))
+    n = len(rows)
     u = rng.random((n, n_sims))
     started = u < p_start
     subbed = (u >= p_start) & (u < p_play)
-    played = started | subbed
     mins = np.where(started, m_start, np.where(subbed, M_SUB, 0.0))
-    # Reaching the hour is drawn separately rather than read off `mins`:
-    # `m_start` is a player's AVERAGE start length, so thresholding it would
-    # make every start either always or never reach 60. p_60/p_start is the
-    # model's own conditional probability.
     with np.errstate(divide="ignore", invalid="ignore"):
         p60_given_start = np.where(p_start > 0, p_60 / np.maximum(p_start, 1e-12), 0.0)
     reached_60 = started & (rng.random((n, n_sims)) < np.clip(p60_given_start, 0.0, 1.0))
     share = mins / 90.0
-
-    # --- the shared half of the match ---------------------------------------
-    # Goals conceded is drawn ONCE for the side. This is the correlation the
-    # whole module exists for: every defender's clean sheet is the same event.
-    conceded_team = rng.poisson(float(fx["xgc"]), size=n_sims)[None, :]
-    # Goals conceded while a given player was on the pitch. Thinning a Poisson
-    # by time-on-pitch is again Poisson, so each player's MARGINAL matches
-    # model.xp exactly while remaining tied to his teammates'.
-    conceded_on = rng.binomial(np.broadcast_to(conceded_team, (n, n_sims)),
-                               np.clip(share, 0.0, 1.0))
-    # A mean-1 team attacking multiplier, shared like the clean sheet.
-    theta = rng.gamma(TEAM_FORM_SHAPE, 1.0 / TEAM_FORM_SHAPE, size=n_sims)[None, :]
-
     att = float(fx["att_mult"])
-    goals = rng.poisson(np.maximum(xg90 * share * att * theta, 0.0))
+    # Each player's expected goals in this scenario, given his minutes. The
+    # same quantity model.xp integrates; here it is the weight his side's
+    # goals are allocated by.
+    w = np.maximum(R[rows, 0][:, None] * share * att, 0.0)
+    return {"played": started | subbed, "reached_60": reached_60, "share": share, "w": w}
+
+
+def _allocate(total: np.ndarray, w: np.ndarray, cap: float, rng) -> np.ndarray:
+    """Hand a side's goals to its players, preserving each player's mean.
+
+    Goal by goal, each of the side's `total` goals goes to player i with
+    probability w_i / D, where D = max(sum w, cap) per scenario. When the
+    players' modelled total is within the side's expected total the shares
+    sum to less than one and the remainder is a goal by nobody in the frame
+    -- an own goal, a player with no minutes on record -- so every player's
+    marginal stays exactly Poisson(w_i). When the players' total EXCEEDS the
+    side's, shares are normalised and every attacker is scaled down to fit
+    the side's total: the strength model's team number wins over the sum of
+    individual rates, which is also the audit's R7 remedy for counting team
+    quality twice. Drawn as successive conditional binomials, which is a
+    multinomial without the per-scenario loop.
+    """
+    n, n_sims = w.shape
+    W = w.sum(axis=0)
+    D = np.maximum(W, cap)
+    out = np.zeros((n, n_sims), dtype=float)
+    remaining = total.astype(int).copy()
+    remaining_p = np.ones(n_sims)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for i in range(n):
+            p_i = np.where(D > 0, w[i] / D, 0.0)
+            cond = np.where(remaining_p > 1e-12, np.clip(p_i / remaining_p, 0.0, 1.0), 0.0)
+            g = rng.binomial(remaining, cond)
+            out[i] = g
+            remaining = remaining - g
+            remaining_p = remaining_p - p_i
+    return out
+
+
+def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lambda,
+                n_sims, rng):
+    """One side's points in one fixture, given the match's scoreline.
+
+    `side_lambda` is the expected goals the side's total was drawn at, and is
+    the cap the allocation preserves player means against.
+    """
+    xg90, xa90, bonus90, dc90, saves90, cards90 = (R[:, i][:, None] for i in range(6))
+    played, reached_60, share = pitch["played"], pitch["reached_60"], pitch["share"]
+    n = len(R)
+
+    goals = _allocate(team_goals, pitch["w"], float(side_lambda), rng)
+
+    # Goals conceded while a given player was on the pitch: thinning the side's
+    # conceded count by time on pitch keeps his marginal tied to his teammates'.
+    conceded_on = rng.binomial(np.broadcast_to(conceded_team[None, :], (n, n_sims)).astype(int),
+                               np.clip(share, 0.0, 1.0))
+    # A mean-1 team attacking multiplier for the parts still drawn per player.
+    theta = rng.gamma(TEAM_FORM_SHAPE, 1.0 / TEAM_FORM_SHAPE, size=n_sims)[None, :]
+    att = float(fx["att_mult"])
+    # Assists stay independent of the allocated goals: a coherent assist model
+    # (at most one per goal, allocated by xA share) would move assist means
+    # away from model.xp unless the two were re-derived together. Recorded as
+    # a residual; goals and clean sheets are the pair the rank layer turns on.
     assists = rng.poisson(np.maximum(xa90 * share * att * theta, 0.0))
     dc = rng.poisson(np.maximum(dc90 * share, 0.0))
     threat = float(fx["opp_threat"]) if "opp_threat" in fx else 1.0
     saves = rng.poisson(np.maximum(saves90 * share * threat, 0.0))
     cards = rng.poisson(np.maximum(cards90 * share, 0.0))
-    # Bonus is 0-3 whole points. A binomial with the model's expected bonus as
-    # its mean keeps `model.xp` intact while giving the tail somewhere to go.
     scale = 1.0 + (att - 1.0) * FIXTURE_SENSITIVITY
     b = np.clip(bonus90 * share * scale, 0.0, MAX_BONUS_PER_MATCH)
     bonus = rng.binomial(int(MAX_BONUS_PER_MATCH), b / MAX_BONUS_PER_MATCH)
 
-    # --- the scoring rules ---------------------------------------------------
     goal_pts = np.array([GOAL_PTS[p] for p in positions])[:, None]
     cs_pts = np.array([CS_PTS[p] for p in positions])[:, None]
     dc_bar = np.array([DC_THRESHOLD.get(p, 12) for p in positions])[:, None]
@@ -132,15 +219,15 @@ def _simulate_fixture(R, M, positions, fx, n_sims, rng) -> np.ndarray:
 
     pts = played * 1.0 + reached_60 * 1.0
     pts += goals * goal_pts + assists * ASSIST_PTS
-    # A clean sheet is the SIDE keeping the ball out for the whole match, not
-    # only while this player was on it, and it needs the hour.
-    pts += (conceded_team == 0) * reached_60 * cs_pts
+    # The clean sheet is the SIDE's, derived from the same scoreline the
+    # opposition's goals came from, and it needs the hour.
+    pts += (conceded_team[None, :] == 0) * reached_60 * cs_pts
     pts += (dc >= dc_bar) * DC_PTS
     pts += bonus
     pts -= concedes * (conceded_on // CONCEDED_PER_PENALTY)
     pts += is_keeper * (saves // SAVES_PER_POINT)
     pts -= cards
-    return pts.astype(float)
+    return pts.astype(float), goals
 
 
 def moment_match(samples: np.ndarray, ids: list[int], xp: pd.DataFrame,
