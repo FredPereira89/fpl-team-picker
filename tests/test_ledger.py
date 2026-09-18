@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -360,3 +361,40 @@ def test_calibration_skips_a_gameweek_whose_only_forecast_is_a_replay(tmp_path):
     summaries = {1: {"history": [{"round": 5, "total_points": 6, "minutes": 90}]},
                  2: {"history": [{"round": 5, "total_points": 2, "minutes": 90}]}}
     assert len(scored_history(tmp_path, summaries, before_event=6)) == 0
+
+
+# --- proper probability scoring ---
+
+def test_brier_rewards_calibrated_probabilities():
+    from fpl.backtest.ledger import brier
+    rng = np.random.default_rng(0)
+    p = pd.Series(rng.uniform(0, 1, 4000))
+    y = pd.Series((rng.uniform(0, 1, 4000) < p).astype(float))     # calibrated
+    good = brier(p, y)
+    bad = brier(pd.Series(1 - p.to_numpy()), y)                       # inverted
+    assert good["brier"] < good["climatology"] < bad["brier"]
+    assert good["skill"] > 0.3
+    for row in good["reliability"]:
+        assert abs(row["forecast"] - row["observed"]) < 0.08
+
+
+def test_probability_scores_settle_appearance_and_the_hour():
+    from fpl.backtest.ledger import probability_scores
+    df = pd.DataFrame({"p_play": [0.9, 0.9, 0.1, 0.1], "p_60": [0.8, 0.2, 0.05, 0.05],
+                       "minutes": [90, 30, 0, 0]})
+    out = probability_scores(df)
+    assert out["p_play"]["n"] == 4 and out["p_60"]["n"] == 4
+    assert out["p_play"]["brier"] < 0.05
+    assert "p_start" not in out
+
+
+def test_a_scored_gameweek_carries_its_probability_scores():
+    from fpl.backtest.ledger import score_gameweek
+    pred = PRED.copy()
+    pred["p_play"] = [0.95, 0.9, 0.9, 0.9]
+    pred["p_60"] = [0.9, 0.8, 0.8, 0.8]
+    actuals = pd.DataFrame({"player_id": [1, 2, 3, 4], "actual": [6.0, 2.0, 8.0, 1.0],
+                            "minutes": [90.0, 90.0, 75.0, 0.0]})
+    scored = score_gameweek(pred, actuals)
+    assert "p_play" in scored["probability"]
+    assert scored["probability"]["p_play"]["n"] == 4

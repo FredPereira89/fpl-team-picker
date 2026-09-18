@@ -19,7 +19,7 @@ from .minutes import M_START, M_SUB
 # the fixture-by-fixture projection that produced it.
 CONTRACT_COLUMNS = [
     "player_id", "web_name", "team", "position", "price",
-    "xp_next1", "xp_next5", "xp_horizon", "p_start", "p_play", "e_minutes",
+    "xp_next1", "xp_next5", "xp_horizon", "p_start", "p_play", "p_60", "e_minutes",
     # Percent of FPL managers who own him. Leagues are won on RANK, so points
     # scored by a player most of the field also owns move you nowhere. The
     # optimizer needs this to express that (optimize.objective.effective_xp).
@@ -238,6 +238,9 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
             ), 4),
             "p_start": float(mins_row["p_start"]),
             "p_play": float(mins_row["p_play"]),
+            # Kept so the ledger can score the hour as a probability forecast,
+            # not only the points it feeds into.
+            "p_60": float(mins_row["p_60"]) if "p_60" in mins_row else float("nan"),
             "e_minutes": float(mins_row["e_minutes"]),
             "confidence": mins_row["confidence"],
             "flags": list(mins_row["flags"]),

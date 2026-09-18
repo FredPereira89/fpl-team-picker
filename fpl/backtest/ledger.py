@@ -265,6 +265,64 @@ def spearman_ci(frame: pd.DataFrame, pred_col: str, n_boot: int = N_BOOT,
             float(np.percentile(stats, 100 * (1 - alpha / 2))))
 
 
+# Reliability bins for probability forecasts. Wide on purpose: a gameweek has
+# a few hundred player rows and ten bins is already thin at the extremes.
+RELIABILITY_BINS = np.array([0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0001])
+
+
+def brier(prob: pd.Series, outcome: pd.Series) -> dict:
+    """A proper score for a probability forecast, with its decomposition.
+
+    Rank correlation and MAE on points say nothing about whether a 70%
+    start probability comes true about 70% of the time -- and the minutes
+    model is the part of this system that carries the skill, so its
+    probabilities deserve to be judged as probabilities. Brier is the mean
+    squared error of the forecast against the 0/1 outcome; the climatology
+    baseline is what a forecast of the base rate would score, and the skill
+    score is the fraction of that error removed. Reliability bins show WHERE
+    the forecast is over- or under-confident, which a single number cannot.
+    """
+    p = pd.to_numeric(prob, errors="coerce").astype(float)
+    y = pd.to_numeric(outcome, errors="coerce").astype(float)
+    ok = p.notna() & y.notna()
+    p, y = p[ok].clip(0.0, 1.0).to_numpy(), y[ok].to_numpy()
+    if len(p) == 0:
+        return {"brier": float("nan"), "climatology": float("nan"),
+                "skill": float("nan"), "n": 0, "reliability": []}
+    score = float(np.mean((p - y) ** 2))
+    base_rate = float(y.mean())
+    clim = float(np.mean((base_rate - y) ** 2))
+    skill = float(1.0 - score / clim) if clim > 0 else float("nan")
+    bins = []
+    idx = np.digitize(p, RELIABILITY_BINS[1:-1], right=False)
+    for b in range(len(RELIABILITY_BINS) - 1):
+        mask = idx == b
+        if mask.sum() == 0:
+            continue
+        bins.append({"lo": float(RELIABILITY_BINS[b]),
+                     "hi": float(min(RELIABILITY_BINS[b + 1], 1.0)),
+                     "forecast": float(p[mask].mean()),
+                     "observed": float(y[mask].mean()),
+                     "n": int(mask.sum())})
+    return {"brier": score, "climatology": clim, "skill": skill,
+            "n": int(len(p)), "reliability": bins}
+
+
+def probability_scores(df: pd.DataFrame) -> dict:
+    """Brier for every probability the forecast carried that the actuals can settle.
+
+    `p_play` against minutes > 0, `p_60` against minutes >= 60. `p_start` has
+    no counterpart in the actuals frame (it records minutes, not starts) and is
+    deliberately not scored against a proxy.
+    """
+    out = {}
+    if "p_play" in df.columns and "minutes" in df.columns:
+        out["p_play"] = brier(df["p_play"], (df["minutes"].astype(float) > 0).astype(float))
+    if "p_60" in df.columns and "minutes" in df.columns:
+        out["p_60"] = brier(df["p_60"], (df["minutes"].astype(float) >= 60).astype(float))
+    return out
+
+
 def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
                    pred_col: str = "xp_next1", top_n: int = CANDIDATE_POOL) -> dict:
     """Score one gameweek's forecast against what happened."""
@@ -314,6 +372,8 @@ def score_gameweek(pred: pd.DataFrame, actuals: pd.DataFrame,
         "bias_absent": float(absent[pred_col].astype(float).mean())
         if len(absent) else 0.0,
         "n_absent": int(len(absent)),
+        # The minutes model judged as the probability forecast it is.
+        "probability": probability_scores(df),
     }
 
 
@@ -374,6 +434,18 @@ def scored_summary(scored: dict, gw: int, provisional: bool = False) -> str:
             "  WARNING: over-predicting " + ", ".join(sorted(over)) +
             f" by more than 0.4 pts/player. Look at {culprit}."
         )
+    probs = scored.get("probability") or {}
+    for name, label in (("p_play", "P(appears)"), ("p_60", "P(60+ mins)")):
+        if name in probs and probs[name]["n"]:
+            b = probs[name]
+            lines.append(f"  {label:<24} Brier {b['brier']:.3f} vs climatology "
+                         f"{b['climatology']:.3f} (skill {b['skill']:+.2f}, n={b['n']})")
+            worst = max(b["reliability"], key=lambda r: abs(r["forecast"] - r["observed"]),
+                        default=None)
+            if worst and abs(worst["forecast"] - worst["observed"]) > 0.1:
+                lines.append(f"    least reliable bin {worst['lo']:.1f}-{worst['hi']:.1f}: "
+                             f"forecast {worst['forecast']:.2f}, observed "
+                             f"{worst['observed']:.2f} (n={worst['n']})")
     # The intervals above are wide for a reason. Rank correlation on one
     # gameweek of one pool is a noisy statistic, and acting on a single week's
     # movement is how a working model gets tuned into a worse one.
