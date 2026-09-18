@@ -186,12 +186,23 @@ def record_transfers(state_path: Path, cfg, gw: int, transfers_made: int,
     applied_bank = float(state.bank) if bank is None else float(bank)
 
     if canonical_chip(chip) == "freehit":
-        keep = ([int(i) for i in base_squad] if base_squad is not None
-                else list(state.base_squad) or list(state.squad))
-        keep_bank = (float(base_bank) if base_bank is not None
-                     else (state.base_bank if state.base_squad else float(state.bank)))
-        keep_prices = dict(base_purchase_prices if base_purchase_prices is not None
-                           else (state.base_purchase_prices or state.purchase_prices))
+        if state.freehit_event == int(gw) and state.base_squad:
+            # The SAME Free Hit confirmed again. Whatever the caller supplies as
+            # the base now is the temporary squad the first confirmation wrote
+            # -- resolve_current_squad returns the confirmed fifteen on a
+            # same-gameweek re-run -- so honouring it would overwrite the only
+            # copy of the real team with the one-week one. The first record of
+            # the base is the true one; a re-confirmation cannot change it.
+            keep = list(state.base_squad)
+            keep_bank = float(state.base_bank)
+            keep_prices = dict(state.base_purchase_prices)
+        else:
+            keep = ([int(i) for i in base_squad] if base_squad is not None
+                    else list(state.base_squad) or list(state.squad))
+            keep_bank = (float(base_bank) if base_bank is not None
+                         else (state.base_bank if state.base_squad else float(state.bank)))
+            keep_prices = dict(base_purchase_prices if base_purchase_prices is not None
+                               else (state.base_purchase_prices or state.purchase_prices))
         fh_event: int | None = int(gw)
     else:
         keep, keep_bank, keep_prices, fh_event = [], 0.0, {}, None

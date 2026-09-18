@@ -398,3 +398,32 @@ def run_gameweek_live(squad):
 def _fake_xp(squad):
     import pandas as pd
     return pd.DataFrame({"player_id": squad, "price": [5.0] * len(squad)})
+
+
+# --- RB4: a same-gameweek Free Hit re-confirmation must not corrupt the base ---
+
+def test_reconfirming_a_free_hit_keeps_the_original_permanent_squad(tmp_path):
+    """On a same-GW re-run resolve_current_squad returns the already-confirmed
+    TEMPORARY squad, and the CLI hands that back as base_squad. The chip record
+    was idempotent; the base was not, and a second --confirm overwrote the only
+    copy of the real fifteen with the one-week team."""
+    path = tmp_path / "state.json"
+    cfg = Config(free_transfers=1)
+    permanent = list(range(1, 16))
+    temporary = list(range(101, 116))
+
+    record_transfers(path, cfg, gw=6, transfers_made=9, chip="freehit",
+                     squad=temporary, bank=0.3,
+                     base_squad=permanent, base_bank=1.2,
+                     base_purchase_prices={i: 5.0 for i in permanent})
+    # Second confirmation of the SAME Free Hit, with the temporary squad
+    # resupplied as the base -- exactly what run_gameweek.py does on a re-run.
+    record_transfers(path, cfg, gw=6, transfers_made=0, chip="freehit",
+                     squad=temporary, bank=0.3,
+                     base_squad=temporary, base_bank=0.3,
+                     base_purchase_prices={i: 6.0 for i in temporary})
+
+    written = load_state(path, cfg)
+    assert written.base_squad == permanent
+    assert written.base_bank == 1.2
+    assert written.base_purchase_prices == {i: 5.0 for i in permanent}
