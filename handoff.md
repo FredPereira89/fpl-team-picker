@@ -293,54 +293,77 @@ above.
 
 Suite after this correction: **746 passed, 1 warning**.
 
-### R10 fourth review (2026-09-18, IN PROGRESS) — Codex found the CV itself used the wrong feature
+### R10 fourth review (2026-09-18) — CV used the wrong dc feature; clean sheet used the wrong scope. Both fixed and verified
 
-Checkpoint written mid-fix, per a request to update this file often given
-the session's remaining budget. Four findings, verification status below;
-code fixes not yet all landed at the time of this checkpoint.
+1. **High, FIXED.** `scripts/validate_bps.py` had computed its `dc` feature
+   as `clearances_blocks_interceptions + recoveries + tackles`, but
+   production `dc90` (`model.scoring.RATE_SPECS`) is sourced from the
+   `defensive_contribution` field directly -- a DIFFERENT, position-
+   dependent aggregate. Confirmed against the cached GW1-4 history: GKP's
+   `defensive_contribution` is always 0 (815 in the validator's old sum, 0
+   in production -- goalkeepers are not DC-threshold-eligible,
+   `DC_THRESHOLD` in `xp.py` sets their bar at 99, effectively
+   unreachable); for DEF, `defensive_contribution` = CBI + tackles ONLY,
+   excluding recoveries (2,584 vs the old validator's 3,771); MID/FWD
+   happen to match exactly, since their official DC definition does
+   include recoveries. Fixed: the validator now reads
+   `defensive_contribution` directly; `logo_cv` re-run against the
+   correct feature selected the SAME candidate on every fold again
+   (`{"GKP": 0.4, "DEF": 0.8, "MID": 0.9, "FWD": 0.6}`, mean held-out MAE
+   3.61 vs uniform-0.6's 3.98), and production `BPS_DC_ACTION` now ships
+   these corrected weights.
 
-1. **High, CONFIRMED with exact numbers.** `scripts/validate_bps.py` computed
-   its `dc` feature as `clearances_blocks_interceptions + recoveries +
-   tackles`, but production `dc90` (`model.scoring.RATE_SPECS`) is sourced
-   from the `defensive_contribution` field directly -- a DIFFERENT, position-
-   dependent aggregate. Verified against the cached GW1-4 history: GKP's
-   `defensive_contribution` is always 0 (815 in the validator's sum, 0 in
-   production -- goalkeepers are not DC-threshold-eligible, `DC_THRESHOLD`
-   in `xp.py` sets their bar at 99, effectively unreachable); for DEF,
-   `defensive_contribution` = CBI + tackles ONLY, excluding recoveries
-   (2,584 vs the validator's 3,771 = CBI+recoveries+tackles); MID/FWD
-   happen to match exactly (2,994 and 340 respectively), because their
-   official DC definition does include recoveries. The leave-one-gameweek-
-   out cross-validation was therefore run against a feature the shipped
-   model never actually sees for GKP/DEF -- not a validation of the
-   production code path. Fix in progress: switch the validator to
-   `defensive_contribution` directly, re-run `logo_cv`, and ship whatever
-   weights that CORRECTED cross-validation selects (expected to be
-   materially different for GKP/DEF, since the feature itself changes).
-2. **High, likely correct, FPL rule being verified before fixing.** Clean
-   sheet credit (both the FPL points term and this session's BPS
-   approximation) uses `conceded_team == 0` -- the FULL match final score
-   -- even though `_score_side` already computes `conceded_on` (goals
+   This ALSO surfaced a genuine, previously undiagnosed finding: GKP's
+   BPS approximation undershoots the real value by ~6-9 points per
+   appearance, fairly flat regardless of save count -- too large and too
+   save-count-independent to be the missing save-BPS component alone.
+   Likely dominant cause: the passing-accuracy tiers (30+ attempts,
+   2-6 BPS), which goalkeepers routinely clear via goal-kick distribution
+   and which this codebase has no pass-attempt data to model at all.
+   Documented in `BPS_SAVE`'s docstring rather than guessed at with an
+   arbitrary correction constant.
+2. **High, FIXED, FPL rule confirmed via the official rules page.** Clean
+   sheet credit used `conceded_team == 0` (the match's FULL final score)
+   even though `_score_side` already computes `conceded_on` (goals
    conceded specifically WHILE THIS PLAYER was on the pitch) for the
-   separate goals-conceded penalty. A player subbed at 60' whose team
-   concedes at 75' should keep credit under the official rule if the rule
-   is genuinely "no goal conceded while on the pitch," not "team finishes
-   with a clean sheet." Fix in progress.
-3. **Medium, acknowledged.** `BPS_SAVE`'s 2026/27 rule (2 base + 1 for a
-   "big chance" save) may ALSO retain a separate inside-the-box component
-   from the prior season's rule -- the exact current wording needs a fresh,
-   authoritative re-check (this specific rule has now been re-verified
-   twice with different results across review rounds). No shot-location
-   data exists in this codebase to implement it exactly regardless; the
-   residual will be documented more explicitly.
-4. **Medium, a documentation-honesty issue rather than a code bug.** The
-   `logo_cv` candidate grid was itself designed after looking at all 4
-   cached gameweeks, so holding out one gameweek per fold does not make
-   the grid's hypothesis space independent of the data -- it shows
-   stability WITHIN that grid, not absence of overfitting to it. The
-   result should be described as exploratory/grouped CV, not full
-   out-of-sample validation; genuinely fresh gameweeks, once available,
-   are the real prospective test.
+   separate goals-conceded penalty. Confirmed: the official rule is no
+   goal conceded WHILE ON THE PITCH, not the team's final result -- a
+   defender subbed at 60' keeps his clean sheet even if his side concedes
+   afterwards. Fixed in both the FPL points term (`_score_side`) and
+   `score_side_bps` (whose `clean_sheet` parameter changed shape from
+   per-side `(n_sims,)` to per-player `(n_players, n_sims)` accordingly):
+   clean sheet is now `conceded_on == 0`. `validate_bps.py` and the
+   frozen test now read FPL's own `clean_sheets` field (which already
+   implements the correct rule) instead of re-deriving it from the final
+   score.
+3. **Medium, documented more explicitly, not resolved.** `BPS_SAVE`'s
+   exact 2026/27 rule has now been re-checked twice across review rounds
+   with different results each time; its docstring now says so plainly
+   (genuinely uncertain, not asserted) rather than presenting either
+   fetch as settled. No shot-location or big-chance-faced data exists in
+   this codebase to implement it exactly regardless of which reading is
+   correct.
+4. **Medium, FIXED as a documentation-honesty correction.** The `logo_cv`
+   candidate grid was itself designed after looking at all 4 cached
+   gameweeks, so holding out one gameweek per fold does not make the
+   grid's hypothesis space independent of the data -- it shows stability
+   WITHIN that grid, not absence of overfitting to it. `logo_cv`'s
+   docstring and the `BPS_DC_ACTION` comment now call this exploratory/
+   grouped CV explicitly, not full out-of-sample validation; genuinely
+   fresh gameweeks, once available, are the real prospective test.
+
+Regenerated `tests/data/real_bps_sample.json` with the
+`defensive_contribution` and `clean_sheets` fields the fixes need. New
+regression tests (`score_side_bps`'s per-player clean sheet directly; a
+full `simulate_event` statistical check that a partial-minutes defender's
+clean-sheet rate exceeds the team's own full-match clean rate) verified to
+fail against pre-fix code via `git stash`. Live validation after all four
+fixes (`scripts/validate_bps.py`): 45.0% exact bonus-recipient match, 0.690
+mean Jaccard, 0.769 recall, 3.66 BPS MAE overall (GKP 6.26 / DEF 3.83 / MID
+3.43 / FWD 2.57 -- GKP's number is the newly-diagnosed, real, currently
+unfixable residual above, not a regression in the fix).
+
+Suite after this review: **748 passed, 1 warning**.
 
 ### Open residuals worth knowing
 
