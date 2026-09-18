@@ -118,15 +118,59 @@ def expected_thresholds_over_minutes(rate90: float, mins_row, per_point: int) ->
                      for p, m in minutes_branches(mins_row) if p > 0))
 
 
+def team_goal_scales(players: pd.DataFrame, rates: pd.DataFrame,
+                     minutes: pd.DataFrame, tfx: pd.DataFrame) -> dict:
+    """{(team_id, fixture_id): factor} capping player goals at the team total.
+
+    Each player's historical xG per 90 already reflects the attack he plays
+    in, and the fixture multiplier then scales it by his club's attack rating
+    again -- so an elite attack's players were counted twice and, summed,
+    could exceed the goals the strength model expects the side to score. The
+    same rule the simulation's allocation applies (`simulate._allocate`): when
+    the players' expected goals exceed the side's expected total -- the
+    OPPONENT's expected goals conceded -- every attacker is scaled to fit it.
+    When they fall short nothing changes; the remainder is goals by nobody in
+    the frame. The strength model's team number is the authority, and the
+    deterministic projection now agrees with the simulation exactly.
+    """
+    if "fixture_id" not in tfx.columns:
+        return {}
+    r = rates.set_index("player_id")
+    m = minutes.set_index("player_id")
+    lam = {}
+    for _, p in players.iterrows():
+        pid, team = int(p["player_id"]), int(p["team_id"])
+        if pid not in r.index or pid not in m.index:
+            continue
+        w = max(float(r.loc[pid, "xg90"]), 0.0) * max(float(m.loc[pid, "e_minutes"]), 0.0) / 90.0
+        lam[team] = lam.get(team, 0.0) + w
+    xgc_of = {(int(f["team_id"]), int(f["fixture_id"])): float(f["xgc"])
+              for _, f in tfx.iterrows()}
+    out = {}
+    for _, f in tfx.iterrows():
+        team, fixture = int(f["team_id"]), int(f["fixture_id"])
+        opp = int(f["opponent_id"]) if "opponent_id" in f and not pd.isna(f["opponent_id"]) else None
+        side_total = xgc_of.get((opp, fixture)) if opp is not None else None
+        players_total = lam.get(team, 0.0) * float(f["att_mult"])
+        if side_total is None or players_total <= 0:
+            out[(team, fixture)] = 1.0
+        else:
+            out[(team, fixture)] = min(1.0, side_total / players_total)
+    return out
+
+
 def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> float:
     e_min = float(mins_row["e_minutes"])
     if e_min <= 0:
         return 0.0
     share = e_min / 90.0
     p_play, p_60 = float(mins_row["p_play"]), float(mins_row["p_60"])
+    # The team-total cap from `team_goal_scales`, when the caller attached it.
+    goal_scale = float(fx_row["goal_scale"]) if "goal_scale" in fx_row else 1.0
 
     pts = p_play + p_60  # 1 pt for appearing, 2 for 60+
-    pts += float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * GOAL_PTS[position]
+    pts += (float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * goal_scale
+            * GOAL_PTS[position])
     pts += float(rate_row["xa90"]) * share * float(fx_row["att_mult"]) * ASSIST_PTS
     pts += float(fx_row["p_cs"]) * CS_PTS[position] * p_60
     pts += p_dc_threshold_mixture(float(rate_row["dc90"]), mins_row, position) * DC_PTS
@@ -152,6 +196,11 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
     m = minutes.set_index("player_id")
     horizon_events = list(range(from_event, from_event + cfg.horizon_gw))
     decay = float(getattr(cfg, "horizon_decay", 1.0))
+    scales = team_goal_scales(players, rates, minutes, tfx)
+    if scales:
+        tfx = tfx.copy()
+        tfx["goal_scale"] = [scales.get((int(t), int(f)), 1.0)
+                             for t, f in zip(tfx["team_id"], tfx["fixture_id"])]
 
     rows = []
     for _, p in players.iterrows():

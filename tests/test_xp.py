@@ -297,3 +297,40 @@ def test_a_frame_without_ownership_reads_as_zero_not_missing():
     """Older bootstraps and hand-built frames must still price."""
     df = build_xp(PLAYERS, RATES, MINUTES, TFX, CFG, from_event=1).set_index("player_id")
     assert df.loc[1, "ownership"] == 0.0
+
+
+# --- R7: player goals are capped at the team total the strength model gives ---
+
+def test_an_over_full_attack_is_scaled_to_the_teams_expected_goals():
+    """Individual xG per 90 already reflects the attack a player is in, and the
+    fixture multiplier scaled it by the club's attack rating again. Summed over
+    a strong side that exceeded the goals the strength model expected it to
+    score. The team number wins, exactly as the simulation's allocation does."""
+    import pandas as pd
+    from fpl.model.xp import team_goal_scales
+    players = pd.DataFrame({"player_id": [1, 2, 3], "team_id": [1, 1, 2],
+                            "position": ["FWD", "MID", "DEF"]})
+    rates = pd.DataFrame({"player_id": [1, 2, 3], "xg90": [0.9, 0.6, 0.05]})
+    minutes = pd.DataFrame({"player_id": [1, 2, 3], "e_minutes": [90.0, 90.0, 90.0]})
+    tfx = pd.DataFrame([
+        {"team_id": 1, "fixture_id": 7, "opponent_id": 2, "xgc": 0.8, "att_mult": 1.0},
+        {"team_id": 2, "fixture_id": 7, "opponent_id": 1, "xgc": 1.2, "att_mult": 1.0},
+    ])
+    scales = team_goal_scales(players, rates, minutes, tfx)
+    # Team 1's players sum to 1.5 xG; the strength model expects 1.2 (team 2's xgc).
+    assert scales[(1, 7)] == pytest.approx(1.2 / 1.5)
+    # Team 2's lone defender is far below the 0.8 the side is expected to score.
+    assert scales[(2, 7)] == 1.0
+
+
+def test_the_cap_reaches_the_projection():
+    import pandas as pd
+    from fpl.model.xp import xp_for_fixture
+    rate = pd.Series({"xg90": 1.0, "xa90": 0.0, "bonus90": 0.0, "dc90": 0.0,
+                      "saves90": 0.0, "cards90": 0.0})
+    mins = pd.Series({"e_minutes": 90.0, "p_play": 1.0, "p_60": 1.0,
+                      "p_start": 1.0, "m_start": 90.0})
+    base = {"att_mult": 1.0, "p_cs": 0.0, "xgc": 0.0}
+    full = xp_for_fixture(rate, mins, pd.Series(base), "FWD", 0.0)
+    halved = xp_for_fixture(rate, mins, pd.Series({**base, "goal_scale": 0.5}), "FWD", 0.0)
+    assert full - halved == pytest.approx(0.5 * 1.0 * 4)      # half a goal at 4 pts
