@@ -1,20 +1,36 @@
 # Handoff — FPL audit remediation, post-review
 
-**Status (2026-09-18, end of Claude session):** P0, P1 and P2 complete;
-P3 partially complete — R4 (starts), R5 (team-start slice), R6 (three of four
-parts), R7, R9 (window fix) and Brier scoring done; **R8 and R10 not started,
-designed below.** Five Codex reviews so far, all findings closed. Review 1 (RB1–RB11) fixed at
+**Status (2026-09-18):** Review 6's six findings (C6-1..C6-6) are being fixed;
+progress below. Reviews 1–5 are closed. Review 1 (RB1–RB11) fixed at
 `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`; review 3
-(three findings, below) fixed with the file's restoration; review 4 (four
-findings) and review 5 (two cleanups) fixed after.
+(three findings) fixed with the file's restoration; review 4 (four findings)
+and review 5 (two cleanups) fixed after. **R8 and R10 are still not started**
+and remain designed below.
+
+### Review 6 fix progress (2026-09-18)
+
+| ID | Status | Fix | Commit |
+|---|---|---|---|
+| C6-1 | **fixed** | `_with_armband` now copies `lineup.xi` back into the Decision, not only captain/vice, so `step()` scores the exact XI the armband was chosen from. Regression: `tests/test_replay.py::test_with_armband_copies_the_exact_xi_not_only_the_captain`, `::test_a_policy_using_with_armband_scores_the_exact_weekly_xi`. | (see git log: "replay scores the exact weekly XI") |
+| C6-2 | **fixed** | New `pipeline._with_weekly_xi()` substitutes the exact one-week XI (`best_xi`) into every candidate's `starting_ids` BEFORE `pick_best_squad`/`_p_gain_positive` run, in both `_choose_squad` and `_choose_transfers`. `_honour_rank_captain` recomputes `Lineup.xp` when it overrides the captain. Regression: `tests/test_pipeline.py::test_rank_scoring_and_captaincy_use_the_exact_weekly_xi_not_the_horizon_one` (an engineered horizon/weekly-XI swap — player benched on the horizon, dominant this week — reproduced the bug end to end: `mean_points` 32.0→130.0, `captain` 1→13 once fixed), `::test_honour_rank_captain_recomputes_lineup_xp_when_captain_changes`. | (see git log: "rank scoring uses the exact weekly XI") |
+| C6-3 | **fixed** | `weekly.py` now branches the "Against the field" selection sentence and the "No transfer recommended" hold message on `rank_stats["decided_by"]`, and renders a caveat when `captain_reported is False` instead of only recording it. Regression: `tests/test_report.py::test_the_field_section_says_expected_points_decided_when_they_did`, `::test_the_hold_message_names_expected_points_when_they_decided`, `::test_a_rejected_rank_captain_is_disclosed_not_hidden`. | (see git log: "rank scoring uses the exact weekly XI") |
+| C6-4 | next | plan: add `fixture_count` to `actuals_from_summaries` (rows per round, already computed via groupby, just not kept); restrict `probability_scores` to `fixture_count == 1`, treating a missing column as 1 for backward compatibility. Verified empirically first: blanks are ALREADY excluded by the existing inner merge in `score_gameweek` (no history row exists for a round with no fixture), so only doubles need the fix — confirmed live with a synthetic double-GW probe (`p_60=0.7` scored as a hit against GW-total minutes that could hide a 35+35 split reaching neither individual 60). | — |
+| C6-5 | next | Verified numerically: a single binary appearance event's marginal is Bernoulli(mean) for ANY generating mechanism with that mean — a per-scenario Beta draw provably cannot "widen" it, so that framing in the R4 commit was an overclaim. The REAL, confirmed bug is `p60_given_start = p_60/theta` using the RANDOM draw as denominator: since `theta * (p_60/theta) = p_60` exactly whenever unclipped, clipping at 1 (which fires whenever theta dips below p_60) strictly lowers `E[reached_60]` below the intended `p_60` — reproduced numerically (buggy: 0.402 vs intended 0.45; fixed by using the FIXED base p_start as the denominator: 0.448 vs 0.45). Plan: fix the p_60 denominator; remove the now-pointless Beta draw itself (it adds zero benefit at single-gameweek granularity and was the source of this bug) rather than keep dead-weight machinery that already caused one regression; keep `start_evidence` computed/exposed as a labelled, currently-unused confidence signal. Mark R4 honestly as NOT achieved for single-event marginals; a real fix needs a PERSISTENT theta reused across a multi-week decision, which is unbuilt (R8-adjacent scope). | — |
+| C6-6 | next | plan: replace the pool-wide, formation/position/club-blind `_xi_ceiling()` scalar with a per-XI `_cheapest_legal_bench()` that, for the SPECIFIC drawn XI, computes exactly how many of each position the bench needs (`SQUAD_SPLIT - in_xi`) and finds the cheapest distinct, club-cap-respecting complement; `_repair()`'s stopping condition uses this instead of the scalar. Precompute `by_pos` sorted by price once per `sample_rival_squads` call so repeated calls during repair stay cheap. | — |
+
+Suite at time of writing this checkpoint: **716 passed, 1 warning** (fixes for
+C6-1/2/3 landed; C6-4/5/6 below this line are not yet in the numbers above).
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **707 passed, 1 warning**.
-`python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
-the pinned-snapshot, calibrated, horizon-start path.
+**Verification:** `python -m pytest -q` → **707 passed, 1 warning**. Focused
+review probes reproduced the replay-XI mismatch, stale captain xP, blank-GW
+probability mis-scoring, and the Beta/p60 mean shift described in review 6.
+Claude's prior `python scripts/run_walkforward.py --through 3 --no-save` smoke
+run completed end to end with the pinned-snapshot, calibrated, horizon-start
+path; Codex did not repeat that network/cache-dependent run in review 6.
 
-**Last updated:** 2026-09-18 (Claude, after Codex re-review)
+**Last updated:** 2026-09-18 (Codex review 6)
 
 | Finding | Fix | Commit |
 |---|---|---|
@@ -51,17 +67,33 @@ the pinned-snapshot, calibrated, horizon-start path.
 | 2. Stale header counts | Corrected. |
 | 3. Claude misread the smoke run: 164/160 vs 101/100 were three- vs two-gameweek totals, not a config effect — GW1–3 have no archived config in this checkout | Acknowledged; no code change. |
 
+### Sixth review (2026-09-18) — open
+
+**Decision: request changes.** The implementation is well tested at unit level,
+but several cross-module contracts are inconsistent. Green tests do not cover
+the final XI that is actually scored or the event semantics of probability
+forecasts.
+
+| ID | Severity | Open finding | Required correction |
+|---|---|---|---|
+| C6-1 | **High — replay validity** | `replay._with_armband()` calls the exact weekly lineup builder but copies back only captain/vice. `step()` still scores `decision.starting_ids`, the old horizon XI. A focused probe produced a captain who was not in the XI being scored. | Copy `lineup.xi` into the decision as well as the armband. Add a caller-level replay test where the weekly and horizon XIs differ and assert both the scored XI and captain. |
+| C6-2 | **High — rank decision/report validity** | `pick_best_squad()`, `_p_gain_positive()` and the saved rank statistics score every candidate's horizon `starting_ids`; the pipeline re-picks the exact weekly XI only afterwards. Therefore default rank diagnostics describe a different XI, and opt-in `rank_squad`/`rank_transfers` can decide on a lineup that is not fielded. `_honour_rank_captain()` can reject the rank captain but leaves the old simulated statistics in place; when it accepts a different captain it also leaves `Lineup.xp` stale. | Derive the exact one-week XI for every candidate before all rank scoring and gain diagnostics. Recompute rank statistics and lineup xP from the same XI/captain ultimately reported. Add integration tests with a horizon/weekly XI swap. |
+| C6-3 | **Medium — user-facing correctness** | The weekly report ignores `rank_stats["decided_by"]`. It always says the squad was chosen by rank and, for a hold, says no plan beat the field—even under the new default where expected horizon points decided. | Branch both explanations on `decided_by`; state that rank is diagnostic when expected points decided. Render or remove `captain_reported` rather than storing an invisible caveat. |
+| C6-4 | **Medium — validation correctness** | Stored `p_play`/`p_60` are per-fixture probabilities, while `probability_scores()` compares them with gameweek-total minutes. A blank therefore scores a valid 0% event opportunity as a failed ~90% appearance forecast; doubles also need event aggregation, and summed minutes cannot establish whether a player reached 60 in either fixture. | Store event-level probability forecasts using fixture counts, or score only single-fixture player-gameweeks. Preserve per-fixture actual minutes if `p_60` is to be scored for doubles. Add blank and DGW tests. |
+| C6-5 | **Medium — R4 not achieved** | Drawing a fresh Beta `p_start` immediately before one Bernoulli appearance draw does not widen the one-event posterior-predictive appearance distribution: it collapses to Bernoulli at the same mean. Worse, `p_60 / drawn_p_start` with clipping lowers the 60-minute marginal (focused probe: modeled 0.400, simulated 0.320). Moment matching hides the points-mean movement but not the distorted event distribution. | Keep the conditional 60-minute probability fixed from the base model. Represent epistemic uncertainty at a persistent parameter/world level (especially across a multi-week decision), or describe R4 as still open; test appearance and 60-minute marginals directly, not only total-points mean/variance. |
+| C6-6 | **Medium — R2 only partial** | `_xi_ceiling()` subtracts the cheapest keeper plus any three cheapest outfielders, regardless of the XI formation, whether those players are already in the XI, the missing squad positions, or the club cap. Passing that ceiling does not prove the XI can be completed to a legal 15. Example: the generic ceiling was £84m while a 3-5-2 XI in the focused pool had a true £76m ceiling. | Construct a cheapest legal complementary bench for each sampled XI (positions, distinct players, club cap), or sample a legal 15 first and then choose its XI. Assert full-squad completion in tests. |
+
 Codex's re-review findings are kept below for the record.
 
 ## P2 progress (started 2026-09-18 after review 5)
 
 | Item | Status | Where |
 |---|---|---|
-| B8 exact one-week XI for the report | **done** — `lineup.best_xi()` enumerates legal formations; `build_lineup(exact=True)` is the default and the replay's armband goes through it | `fpl/optimize/lineup.py` |
+| B8 exact one-week XI for the report | **partial — C6-1/C6-2 open**. `lineup.best_xi()` enumerates legal formations and the live report uses it, but the replay discards its XI and rank scoring still uses candidate horizon XIs. | `fpl/optimize/lineup.py`, `fpl/backtest/replay.py`, `fpl/pipeline.py` |
 | B7a simulated means agree with calibrated xP | **done** — `simulate.moment_match()` scales each player's samples to `xp_next1` inside `pipeline._rank_context` | `fpl/model/simulate.py`, `fpl/pipeline.py` |
-| B7b report the captain the rank layer scored | **done** — `pipeline._honour_rank_captain()`; `rank_stats["captain_reported"]` says whether it applied | `fpl/pipeline.py` |
+| B7b report the captain the rank layer scored | **partial — C6-2/C6-3 open**. `_honour_rank_captain()` can copy the captain, but rank scored the pre-B8 XI, the caveat is not rendered, and lineup xP can remain stale. | `fpl/pipeline.py`, `fpl/report/weekly.py` |
 | R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Assists and bonus still independent (documented residual). `simulate_event_detailed` exposes goals/conceded per scenario. | `fpl/model/simulate.py` |
-| R2 rival field legality | **done (achievable part)** — `rank._repair()` makes every drawn XI ≤3 per club and priced under budget minus the cheapest legal bench (`_xi_ceiling`). Cohort-calibrated formation/captain shares still need pre-deadline public picks, which nothing in the repo fetches — that half stays open. | `fpl/optimize/rank.py` |
+| R2 rival field legality | **partial — C6-6 open**. `rank._repair()` enforces the XI club cap and a coarse price ceiling, but the ceiling does not prove that a distinct, position-correct, club-legal bench can complete the squad. Cohort calibration also remains open. | `fpl/optimize/rank.py` |
 | R1 Mode 1 objective | **done** — expected points decide the Mode 1 squad; rank reports (`rank_stats["decided_by"]`, `rank_would_choose`); `optimizer.rank_squad` opts back in. Ties on the bar are worth half. **Behaviour change for the live Mode 1 run.** |
 
 ## P3 progress
@@ -70,9 +102,9 @@ Codex's re-review findings are kept below for the record.
 |---|---|---|
 | R9 chip timing beyond the horizon | **window fix done** — holds/patience/FH blank search bounded by the current chip window (GW19 for the first set). Still structure-based past the xP horizon (no chip-value projection); that remainder is documented, not built. | `fpl/optimize/chips.py` |
 | R7 attack double-count | **done** — `xp.team_goal_scales()` caps each player's fixture goals at his share of the side's expected total (the opponent's `xgc`), the same rule as `simulate._allocate`; xP and simulation now agree. Assists are not capped (no team-assist total exists). | `fpl/model/xp.py` |
-| Proper probability scoring | **done (Brier)** — `ledger.brier()` / `probability_scores()`: Brier, climatology baseline, skill, reliability bins for `p_play` and `p_60`; printed in `scored_summary`. `p_60` added to the forecast contract. CRPS on points still needs stored per-player distributions. | `fpl/backtest/ledger.py` |
+| Proper probability scoring | **partial — C6-4 open**. The Brier implementation and reliability bins are present, but the stored probabilities are per fixture while outcomes are aggregated per gameweek, so blanks and doubles are invalidly scored. CRPS still needs stored distributions. | `fpl/backtest/ledger.py`, `fpl/model/xp.py` |
 | R6 cold starts / stale overrides | **done (three of four parts)** — exposure-weighted positional priors (`scoring.per90_rates`); form weight capped by minutes/90 (`scoring.form_weight`); stale overrides decay by half per freshness budget of extra age (`minutes.override_trust`). NOT done: a cross-league prior for newcomers (needs external data). | `fpl/model/scoring.py`, `fpl/model/minutes.py` |
-| R4 confidence into the distribution | **done (starts)** — `minutes.start_evidence` (games behind `p_start`); `simulate._on_pitch` draws `p_start` per scenario from Beta(p·n, (1−p)·n), mean preserved; `pipeline._p_gain_positive` reports P(net gain over holding > 0) for the chosen transfer (diagnostic only). NOT done: posterior draws for per-90 rates and team strengths. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
+| R4 confidence into the distribution | **open — C6-5 (and C6-2 for gain diagnostics)**. `start_evidence` is emitted, but one Beta draw followed by one Bernoulli does not create the claimed confidence-sensitive one-event spread, and the current conditional-hour calculation lowers the `p_60` marginal. Posterior draws for rates and team strengths also remain open. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | R5 event-specific team-coherent minutes | **slice done** — `minutes.reconcile_team_starts` scales a side's starts down to eleven (never up). Open: per-event minute distributions, depth chart, injury redistribution to named deputies, override event ranges. | `fpl/model/minutes.py` |
 | R8 multi-period MILP | **not started — design below** | `fpl/optimize/transfers.py` (new module `fpl/optimize/multiperiod.py` suggested) |
 | R10 BPS rebuild | **not started — design below** | `fpl/model/bps.py`, `fpl/model/simulate.py` |
@@ -80,9 +112,11 @@ Codex's re-review findings are kept below for the record.
 ### Behaviour changes in this session, for the next live run
 
 - **Mode 1 now decides on expected points** (R1). `optimizer.rank_squad: true`
-  restores rank-decided squads. The report says which objective decided.
-- **The reported XI is re-picked for the week** (B8); the solver's horizon XI
-  is no longer what you see. `build_lineup(exact=False)` gives the old one.
+  restores rank-decided squads. **C6-3:** the current report text still claims
+  rank decided even when `rank_stats["decided_by"]` says expected points.
+- **The live reported XI is re-picked for the week** (B8), but **C6-1/C6-2:**
+  replay scoring and rank diagnostics still use the solver's horizon XI.
+  `build_lineup(exact=False)` gives the old one explicitly.
 - **Player goals are capped at the team total** (R7): strong attacks project a
   little lower than before when their players' xG summed past the side's.
 - **A teammate's xP moves when you override one player's minutes** — intended
@@ -91,7 +125,9 @@ Codex's re-review findings are kept below for the record.
   the weight applied.
 - **Chip holds stop at GW19 in the first half** (R9).
 - The transfer section shows *"comes out ahead of holding N% of the time"*
-  from the scenarios (R4). It is a diagnostic; the expected gain still decides.
+  from the scenarios. Expected gain still decides, but **C6-2/C6-5:** the
+  diagnostic currently uses the horizon XI and does not yet carry the claimed
+  confidence-sensitive start uncertainty.
 
 ### R8 — rolling multi-period transfer MILP: design
 
