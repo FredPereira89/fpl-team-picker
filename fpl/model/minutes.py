@@ -236,19 +236,22 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             confidence = "low"
             note = str(p["news"]).strip()
             flags.append(f"Doubtful: {int(pct)}% chance of playing" + (f" — {note}" if note else ""))
-        p_start *= availability
-
+        # Team news blends into the FULLY-FIT start probability, and availability
+        # is applied once, afterwards. Blending it into the already-capped value
+        # let a confident "he starts" note lift a 25%-available player above
+        # 0.25 -- and then p_play was capped at availability, leaving the
+        # impossible state p_start > p_play, which the simulator resolved by
+        # starting him far more often than the doubt allowed.
         override = news.get(int(p["player_id"]))
-        if override and cfg.news_weight > 0 and p_start > 0:
+        if override and cfg.news_weight > 0 and availability > 0:
             w = float(cfg.news_weight)
             p_start = (1 - w) * p_start + w * float(override["p_start_override"])
             flags.append(f"Team news: {override['note']} (source: {override['source']})")
 
-        p_start = float(min(1.0, max(0.0, p_start)))
-        # The chance he would start if fully fit, recovered from the capped
-        # value so the cameo branch can be capped by the SAME availability --
-        # a 25% doubt takes a quarter of the cameo as well as of the start.
-        fit_start = min(1.0, p_start / availability) if availability > 0 else 0.0
+        fit_start = float(min(1.0, max(0.0, p_start)))
+        p_start = availability * fit_start
+        # The cameo branch is capped by the SAME availability: a 25% doubt takes
+        # a quarter of the cameo as well as of the start.
         p_play = availability * (fit_start + (1.0 - fit_start) * P_SUB_APPEAR)
 
         # Reaching 60 minutes needs a start AND the hour: a player who starts

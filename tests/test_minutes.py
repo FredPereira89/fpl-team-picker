@@ -431,3 +431,26 @@ def test_a_start_rate_does_not_depend_on_how_matches_are_packed_into_gameweeks()
                       current=history_current_frame(doubled, before_event=4))
     assert (a.set_index("player_id").loc[2, "p_start"]
             == pytest.approx(b.set_index("player_id").loc[2, "p_start"]))
+
+
+# --- RB7: an override must not bypass the availability cap ---
+
+def test_a_doubtful_player_with_a_strong_override_still_respects_availability():
+    """The override was blended into the already-capped p_start, so a 25%
+    doubt with a confident 'he starts' note came out above 0.25 -- and then
+    p_play was capped at availability, leaving p_start > p_play. The simulator
+    reads p_start first, so it played him far more often than the cap allows."""
+    news = {4: {"p_start_override": 0.95, "note": "starts", "source": "test"}}
+    m = minutes_model(PLAYERS, CFG, news=news).set_index("player_id").loc[4]
+    availability = 0.25
+    assert 0.0 <= m.p_start <= m.p_play <= availability + 1e-9
+    assert m.p_60 <= m.p_start + 1e-9
+
+
+def test_minutes_invariants_hold_for_every_player():
+    news = {1: {"p_start_override": 0.2, "note": "benched", "source": "test"},
+            4: {"p_start_override": 0.95, "note": "starts", "source": "test"}}
+    df = minutes_model(PLAYERS, CFG, news=news)
+    assert (df.p_start >= 0).all() and (df.p_play <= 1).all()
+    assert (df.p_start <= df.p_play + 1e-9).all()
+    assert (df.p_60 <= df.p_start + 1e-9).all()
