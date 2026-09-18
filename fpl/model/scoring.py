@@ -27,8 +27,17 @@ def per90_rates(players: pd.DataFrame, cfg) -> pd.DataFrame:
     for name, source in specs.items():
         raw = np.where(mins > 0, df[source].astype(float) / np.maximum(mins, 1) * 90.0, 0.0)
         tmp = df.assign(_raw=raw, _mins=mins)
-        pos_mean = tmp[tmp["_mins"] > 0].groupby("position")["_raw"].mean()
-        fallback = float(tmp.loc[tmp["_mins"] > 0, "_raw"].mean() or 0.0)
+        # EXPOSURE-weighted: the prior a small sample is shrunk toward is the
+        # positional rate per 90 across all minutes actually played, not the
+        # mean of per-player rates. An unweighted mean gave a one-minute cameo
+        # -- a 90-per-90 figure or a zero -- the same vote as a 3,000-minute
+        # season, and the priors it produced were noise from the fringe.
+        played = tmp[tmp["_mins"] > 0]
+        weighted = (played["_raw"] * played["_mins"]).groupby(played["position"]).sum()
+        exposure = played["_mins"].groupby(played["position"]).sum()
+        pos_mean = (weighted / exposure.replace(0.0, np.nan)).fillna(0.0)
+        fallback = (float((played["_raw"] * played["_mins"]).sum() / played["_mins"].sum())
+                    if played["_mins"].sum() > 0 else 0.0)
         means = tmp["position"].map(pos_mean).fillna(fallback).astype(float)
         out[name] = (mins * raw + k * means) / (mins + k)
     return pd.DataFrame(out).reset_index(drop=True)
@@ -45,7 +54,8 @@ def current_per90(current: pd.DataFrame) -> pd.DataFrame:
     df["_cards"] = df["yellow_cards"] + 3 * df["red_cards"]
     mins = df["minutes"].astype(float)
     out = {"player_id": df["player_id"].astype(int),
-           "gws_played": df["gws_played"].astype(int)}
+           "gws_played": df["gws_played"].astype(int),
+           "minutes": mins}
     for name, source in dict(RATE_SPECS, cards90="_cards").items():
         out[name] = np.where(mins > 0, df[source].astype(float) / np.maximum(mins, 1) * 90.0, 0.0)
     return pd.DataFrame(out).reset_index(drop=True)
@@ -75,7 +85,10 @@ def ew_per90(rounds: pd.DataFrame, cfg) -> pd.DataFrame:
     weighted_minutes = (w * df["minutes"].astype(float)).groupby(df["player_id"]).sum()
 
     out = {"player_id": weighted_minutes.index.astype(int),
-           "gws_played": df.groupby("player_id")["round"].nunique().astype(int)}
+           "gws_played": df.groupby("player_id")["round"].nunique().astype(int),
+           # Raw minutes, unweighted: the form BLEND is capped by how much
+           # football the rates rest on, which recency weighting must not shrink.
+           "minutes": df.groupby("player_id")["minutes"].sum().astype(float)}
     for name, source in dict(RATE_SPECS, cards90="_cards").items():
         totals = (w * df[source].astype(float)).groupby(df["player_id"]).sum()
         out[name] = np.where(weighted_minutes > 0,
@@ -162,9 +175,11 @@ def blended_rates(players: pd.DataFrame, current: pd.DataFrame | None, cfg,
         if pid not in cur.index:
             continue
         gws = int(cur.loc[pid, "gws_played"])
+        played = (float(cur.loc[pid, "minutes"]) if "minutes" in cur.columns else None)
         for col in RATE_COLUMNS:
             out.loc[out.index[i], col] = blend_form(
-                float(base.loc[base.index[i], col]), float(cur.loc[pid, col]), gws, cfg
+                float(base.loc[base.index[i], col]), float(cur.loc[pid, col]), gws, cfg,
+                minutes_played=played,
             )
     return apply_set_piece_roles(out, players, cfg)
 
@@ -179,12 +194,32 @@ def ew_mean(values: list[float], half_life: float) -> float:
     return float(np.dot(weights, np.asarray(values, dtype=float)) / weights.sum())
 
 
-def form_weight(gws_played: int, cfg) -> float:
+# A full match's worth of minutes. Form evidence is measured in matches
+# actually played, and a gameweek on record in which the player barely
+# featured is not a gameweek of evidence about his per-90 rates.
+FORM_MINUTES_PER_GW = 90.0
+
+
+def form_weight(gws_played: int, cfg, minutes_played: float | None = None) -> float:
+    """How much this season's rates count against last season's.
+
+    Ramps to `form_max_weight` over FORM_WINDOW_GWS gameweeks -- but counted
+    in EFFECTIVE gameweeks, the lesser of rounds on record and minutes played
+    over ninety. Counting rounds alone handed a player with six cameos of
+    fifteen minutes the same 60% weight on his current rates as an
+    ever-present, and a tiny sample then set his projection.
+    """
     if gws_played <= 0:
         return 0.0
-    return min(1.0, gws_played / FORM_WINDOW_GWS) * float(cfg.form_max_weight)
+    effective = float(gws_played)
+    if minutes_played is not None:
+        effective = min(effective, float(minutes_played) / FORM_MINUTES_PER_GW)
+    if effective <= 0:
+        return 0.0
+    return min(1.0, effective / FORM_WINDOW_GWS) * float(cfg.form_max_weight)
 
 
-def blend_form(baseline: float, form_value: float, gws_played: int, cfg) -> float:
-    w = form_weight(gws_played, cfg)
+def blend_form(baseline: float, form_value: float, gws_played: int, cfg,
+               minutes_played: float | None = None) -> float:
+    w = form_weight(gws_played, cfg, minutes_played)
     return (1 - w) * float(baseline) + w * float(form_value)

@@ -123,6 +123,32 @@ def start_profiles(rounds: pd.DataFrame | None) -> tuple[dict[int, dict], float,
     return profiles, league_p60, league_m
 
 
+# How fast a stale override fades. At its freshness limit an override is
+# applied in full; every further limit's worth of age halves its weight, so a
+# note checked a week ago against a 48-hour budget is worth about a tenth.
+STALE_HALF_LIFE_BUDGETS = 1.0
+
+
+def override_trust(override: dict, cfg) -> float:
+    """How much of a manual override's weight it still deserves, 0..1.
+
+    Stale overrides used to be applied at full configured weight forever,
+    with a warning nobody could act on from inside the model. A note that was
+    right on the day was quietly setting minutes a month later. It now decays
+    toward the model past its freshness budget rather than being dropped --
+    dropping it would be worse, the correction is usually still directionally
+    right -- and the flag says so.
+    """
+    if not override.get("stale"):
+        return 1.0
+    budget = float(getattr(cfg, "news_max_age_hours", 0) or 0)
+    age = override.get("age_hours")
+    if budget <= 0 or age is None:
+        return 0.5
+    over = max(0.0, float(age) - budget) / budget
+    return float(0.5 ** (over / STALE_HALF_LIFE_BUDGETS))
+
+
 def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = None,
                   current: pd.DataFrame | None = None,
                   rounds: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -244,9 +270,13 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
         # starting him far more often than the doubt allowed.
         override = news.get(int(p["player_id"]))
         if override and cfg.news_weight > 0 and availability > 0:
-            w = float(cfg.news_weight)
+            w = float(cfg.news_weight) * override_trust(override, cfg)
             p_start = (1 - w) * p_start + w * float(override["p_start_override"])
-            flags.append(f"Team news: {override['note']} (source: {override['source']})")
+            note = f"Team news: {override['note']} (source: {override['source']})"
+            if override.get("stale"):
+                note += (f" — STALE, last checked {override.get('checked_at') or 'never'}; "
+                         f"applied at {w:.2f} weight and fading")
+            flags.append(note)
 
         fit_start = float(min(1.0, max(0.0, p_start)))
         p_start = availability * fit_start

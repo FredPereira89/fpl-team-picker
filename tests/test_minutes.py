@@ -454,3 +454,28 @@ def test_minutes_invariants_hold_for_every_player():
     assert (df.p_start >= 0).all() and (df.p_play <= 1).all()
     assert (df.p_start <= df.p_play + 1e-9).all()
     assert (df.p_60 <= df.p_start + 1e-9).all()
+
+
+# --- R6: a stale override fades toward the model ---
+
+def test_a_stale_override_is_applied_at_reduced_weight():
+    from fpl.model.minutes import override_trust
+    cfg = Config(news_weight=0.5, news_max_age_hours=48)
+    fresh = {"p_start_override": 0.9, "stale": False, "age_hours": 10}
+    at_limit = {"p_start_override": 0.9, "stale": True, "age_hours": 48}
+    week_old = {"p_start_override": 0.9, "stale": True, "age_hours": 48 * 4}
+    assert override_trust(fresh, cfg) == 1.0
+    assert override_trust(at_limit, cfg) == pytest.approx(1.0)
+    assert override_trust(week_old, cfg) == pytest.approx(0.5 ** 3)
+
+
+def test_a_stale_override_moves_p_start_less_than_a_fresh_one():
+    fresh = {1: {"p_start_override": 0.2, "note": "benched", "source": "t",
+                 "stale": False, "age_hours": 5}}
+    stale = {1: {"p_start_override": 0.2, "note": "benched", "source": "t",
+                 "stale": True, "age_hours": 400, "checked_at": "2026-08-01"}}
+    cfg = Config(shrinkage_minutes=900, news_weight=0.5, news_max_age_hours=48)
+    base = minutes_model(PLAYERS, cfg).set_index("player_id").loc[1, "p_start"]
+    with_fresh = minutes_model(PLAYERS, cfg, news=fresh).set_index("player_id").loc[1, "p_start"]
+    with_stale = minutes_model(PLAYERS, cfg, news=stale).set_index("player_id").loc[1, "p_start"]
+    assert with_fresh < with_stale < base

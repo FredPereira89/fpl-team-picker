@@ -255,3 +255,37 @@ def test_weighted_rates_still_count_gameweeks_played():
     from fpl.model.scoring import ew_per90
     rounds = pd.DataFrame([_round_row(1, r, 1) for r in range(1, 4)])
     assert int(ew_per90(rounds, Config()).set_index("player_id").loc[1, "gws_played"]) == 3
+
+
+# --- R6: priors weighted by exposure; form weighted by minutes ---
+
+def test_the_positional_prior_is_weighted_by_minutes_played():
+    """An unweighted mean gave a one-minute cameo the same vote as a full
+    season, so the prior a small sample was shrunk toward came from the fringe."""
+    from fpl.model.scoring import per90_rates
+    players = pd.DataFrame({
+        "player_id": [1, 2, 3], "position": ["MID"] * 3,
+        "minutes": [3000, 1, 500], "goals_scored": [15, 1, 0],
+        "assists": [0, 0, 0], "bonus": [0, 0, 0], "saves": [0, 0, 0],
+        "yellow_cards": [0, 0, 0], "red_cards": [0, 0, 0],
+        "defensive_contribution": [0, 0, 0], "expected_goals": [15.0, 1.0, 0.0],
+        "expected_assists": [0.0, 0.0, 0.0], "clean_sheets": [0, 0, 0],
+        "goals_conceded": [0, 0, 0], "starts": [30, 0, 5], "total_points": [0, 0, 0],
+        "bps": [0, 0, 0], "own_goals": [0, 0, 0], "expected_goals_conceded": [0.0] * 3,
+    })
+    rates = per90_rates(players, Config(shrinkage_minutes=900)).set_index("player_id")
+    # Player 3 has no goals; his shrunk rate reflects the exposure-weighted
+    # prior (~0.41/90 from the 3501 minutes), not the unweighted mean of
+    # (0.45, 90.0, 0.0) which is ~30/90.
+    assert rates.loc[3, "xg90"] < 1.0
+
+
+def test_form_weight_is_capped_by_minutes_actually_played():
+    from fpl.model.scoring import form_weight, FORM_WINDOW_GWS
+    cfg = Config(form_max_weight=0.6)
+    full = form_weight(6, cfg, minutes_played=6 * 90.0)
+    cameos = form_weight(6, cfg, minutes_played=6 * 15.0)
+    assert full == pytest.approx(min(1.0, 6 / FORM_WINDOW_GWS) * 0.6)
+    assert cameos == pytest.approx(min(1.0, 1.0 / FORM_WINDOW_GWS) * 0.6)
+    assert cameos < full
+    assert form_weight(6, cfg) == full          # no minutes given: rounds count as before
