@@ -427,3 +427,66 @@ def test_reconfirming_a_free_hit_keeps_the_original_permanent_squad(tmp_path):
     assert written.base_squad == permanent
     assert written.base_bank == 1.2
     assert written.base_purchase_prices == {i: 5.0 for i in permanent}
+
+
+# --- RB9: confirmation refuses unknown or illegal chips ---
+
+def _confirm_harness(monkeypatch, squad, advised_chip=None, chip_events=()):
+    """Stub everything around run_gameweek.main so only the confirm path runs."""
+    import run_gameweek
+    from fpl.cli import LiveSquad
+    from fpl.optimize.chips import ChipAdvice
+    from fpl.report.weekly import Recommendation
+
+    class _Lineup:
+        xi, bench, formation, captain, vice, xp = [1], [2], "4-4-2", 1, 2, 10.0
+
+    rec = Recommendation(gw=8, deadline="2099-01-01T00:00:00Z", mode=2,
+                         lineup=_Lineup(), squad_ids=squad,
+                         chip=ChipAdvice(advised_chip, "why"))
+    live = LiveSquad(squad, 0.0, 1, [], {}, [], list(chip_events))
+    written = {}
+    monkeypatch.setattr(run_gameweek, "resolve_current_squad", lambda *a, **k: (live, []))
+    monkeypatch.setattr(run_gameweek, "run", lambda *a, **k: (rec, _fake_xp(squad)))
+    monkeypatch.setattr(run_gameweek, "render", lambda *a, **k: "")
+    monkeypatch.setattr(run_gameweek, "FplClient", lambda *a, **k: object())
+    monkeypatch.setattr(run_gameweek, "load_overrides", lambda *a, **k: {})
+    monkeypatch.setattr(run_gameweek, "mark_actioned", lambda *a, **k: None)
+
+    def fake_record(*a, **k):
+        written["called"] = True
+        from fpl.state import State
+        return State()
+    monkeypatch.setattr(run_gameweek, "record_transfers", fake_record)
+    return run_gameweek, written
+
+
+def test_an_unknown_chip_name_is_rejected_by_argparse(monkeypatch, capsys):
+    run_gameweek, _ = _confirm_harness(monkeypatch, list(range(1, 16)))
+    with pytest.raises(SystemExit):
+        run_gameweek.main(["--mode", "2", "--gw", "8", "--confirm", "--no-refresh",
+                           "--applied-chip", "wildcrad"])
+
+
+def test_a_second_same_window_chip_is_refused_at_confirmation(monkeypatch, capsys):
+    """The advisor and the replay both refuse this; confirmation used to persist
+    it, and every later run then reasoned from a chip history that never
+    happened."""
+    run_gameweek, written = _confirm_harness(
+        monkeypatch, list(range(1, 16)),
+        chip_events=[{"chip": "wildcard", "event": 4}])
+    code = run_gameweek.main(["--mode", "2", "--gw", "8", "--confirm", "--no-refresh",
+                              "--applied-chip", "wildcard"])
+    assert code == 1
+    assert "Refusing" in capsys.readouterr().out
+    assert "called" not in written
+
+
+def test_reconfirming_the_same_chip_in_the_same_gameweek_is_allowed(monkeypatch):
+    run_gameweek, written = _confirm_harness(
+        monkeypatch, list(range(1, 16)),
+        chip_events=[{"chip": "wildcard", "event": 8}])
+    code = run_gameweek.main(["--mode", "2", "--gw", "8", "--confirm", "--no-refresh",
+                              "--applied-chip", "wildcard"])
+    assert code == 0
+    assert written.get("called")

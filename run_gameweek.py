@@ -16,6 +16,7 @@ from fpl.optimize.transfers import bank_after
 from fpl.pipeline import run
 from fpl.report.weekly import render
 from fpl.backtest.manifest import mark_actioned
+from fpl.chips import CHIPS, chip_blocked_reason
 from fpl.state import canonical_chip, load_state
 
 ROOT = Path(__file__).parent
@@ -54,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
                          "they differ from the recommendation. Transfers and bank are "
                          "derived from this squad rather than assumed.")
     ap.add_argument("--applied-chip", default=None,
+                    choices=list(CHIPS) + ["none"],
                     help="with --confirm: the chip you actually played "
                          "(wildcard/freehit/benchboost/triplecaptain), or 'none' if "
                          "you played none. REQUIRED whenever the run advised a "
@@ -152,6 +154,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             chip = None if str(args.applied_chip).lower() == "none" else \
                 canonical_chip(args.applied_chip)
+        # The advisor and the replay both refuse an illegal chip; confirmation
+        # must too, or a typo or a second same-window chip lands in state and
+        # every later run reasons from a chip history that never happened.
+        # Only chips played in OTHER gameweeks count here: a same-gameweek
+        # re-confirmation of the same chip is idempotent, not a second use.
+        earlier = [e for e in chip_events if e.get("event") != args.gw]
+        blocked = chip_blocked_reason(chip, args.gw, earlier, first_event) if chip else None
+        if blocked:
+            print(f"\nRefusing to record {chip} for GW{args.gw}: {blocked}. "
+                  f"Nothing was written.")
+            return 1
         transfers_made = len(set(current_squad) - set(applied))
         now = dict(zip(xp["player_id"].astype(int), xp["price"].astype(float)))
         cash = (rec.bank if applied == list(rec.squad_ids)
