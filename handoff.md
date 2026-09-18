@@ -7,8 +7,10 @@ consistent gain probabilities/metadata — and fixed those as well. Reviews 1–
 are closed. Review 1 (RB1–RB11)
 fixed at `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`;
 review 3 (three findings) fixed with the file's restoration; review 4 (four
-findings) and review 5 (two cleanups) fixed after. **R8 and R10 are still not
-started** and remain designed below.
+findings) and review 5 (two cleanups) fixed after. **R10 (bonus from ranked
+simulated BPS) is now implemented** — see its design section below, now
+marked done. **R8 (rolling multi-period transfer MILP) is still not started**
+and remains designed below.
 
 ### Review 6 fix progress (2026-09-18)
 
@@ -194,25 +196,49 @@ Shape (mirrors open-fpl-solver; keep it to 4–6 gameweeks, never 38):
   first-week move; compare against the current policy in
   `run_walkforward.py` before making it the default.
 
-### R10 — projected BPS from simulated events: design
+### R10 — projected BPS from simulated events: **done (2026-09-18)**
 
 Why: bonus is carried as historical `bonus90`, fixture-scaled, and drawn
 independently per player. Only the top three BPS in a match score bonus, so
 bonus is a within-match ranking, not an independent rate.
 
-- In `simulate._score_side` the events already exist per scenario: goals,
-  assists, clean sheet, minutes, saves, cards. Add a BPS table (current
-  rules: 60+ mins 6 / <60 3, goal by position, assist, CS by position, saves
-  per 2, cards, etc.) and compute per-player BPS per scenario for BOTH sides
-  of the fixture (needs the two `_score_side` calls to share a scratch
-  array, or a `_bonus_for_match` pass after both).
-- Rank the match's participants per scenario; award 3/2/1 with FPL's tie
-  rules (ties share the higher award and the next is skipped accordingly).
-- Marginal means will move: calibrate a per-position multiplier so the
-  match-average bonus matches `bonus90`-implied totals, or accept the shift
-  and re-score. Add the GK save component to the same table.
-- Keep the old independent binomial as a `--legacy-bonus` challenger in the
-  replay for one comparison.
+Implemented in `fpl/model/bps.py` (`score_side_bps`, `award_match_bonus`) and
+wired into `fpl/model/simulate.py`'s match loop. `score_side_bps` builds an
+APPROXIMATE per-scenario BPS from the events the simulator already draws
+(appearance, goals by position, assists, clean sheet, saves, cards, DC) --
+not the official table's ~25 components; tackles, clearances/blocks/
+interceptions, recoveries, crosses, key passes, dribbles, shots, passing
+tiers, fouls and errors are not modelled and are not folded into the
+constants (documented residual, same spirit as the "Open residuals" section
+below). `award_match_bonus` ranks BOTH sides of the fixture together per
+scenario and awards 3/2/1 with FPL's exact tie rule (a tied tier's SIZE
+advances the next rank, not 1) via one vectorised "how many players are
+strictly ahead of me" count -- verified against all three of FPL's own
+documented tie examples.
+
+Two bugs found and fixed while building this, both about who is even
+ELIGIBLE for bonus: a non-appearing squad member (the simulator carries a
+club's whole roster, not just who played) scored a genuine 0 on every BPS
+component, which tied him with every other non-appearer for the match lead;
+and marking those non-appearers `-inf` alone was not enough, since in a
+match with fewer than three real scorers the tied `-inf` group could still
+inherit whatever rank was left over -- fixed by explicitly zeroing bonus
+wherever BPS is `-inf`, regardless of computed rank.
+
+Consequence, verified and expected, not a bug: total bonus per match now
+averages ~6 (the real ceiling, a little higher with ties), where the old
+independent draw had none. A diagnostic with a uniform `bonus90` across 36
+players showed the OLD analytic `bonus90`-rate summing to 16.8 across the
+match -- nearly 3x the true total -- so the new simulated mean now diverges
+from that analytic estimate; `tests/test_simulate.py`'s mean-agreement tests
+exclude bonus from the comparison (via a new `bonus` field on
+`simulate_event_detailed`) rather than have their tolerances loosened past
+the point of still catching a real regression in the other components.
+
+Not done, and left as the two options the design above already named:
+recalibrating the analytic `bonus90` rate itself against real per-position
+season totals (needs historical-data fitting, out of scope here), and a
+`--legacy-bonus` challenger flag in the replay for a one-off comparison run.
 
 ### Open residuals worth knowing
 
@@ -598,11 +624,13 @@ Still a handful of gameweeks; still not a verdict.
 
 P2 is complete (B6, B7, B8, R1, R2-achievable, R3), including
 appearance-aware vice-captain inheritance and legal autosubs in candidate rank
-scoring. Of P3, R5 (team-start slice), R6 (three parts), R7, R9 (window fix)
-and single-fixture Brier scoring are done -- see the P3 progress table.
-Remaining in full: **R8** and **R10**, designed above. Remaining in part: R2
-(cohort picks), R4 (persistent start/rate/team-strength posteriors), R5
-(event-specific minutes), R6 (newcomer prior), and CRPS/distribution storage.
+scoring. Of P3, R5 (team-start slice), R6 (three parts), R7, R9 (window fix),
+single-fixture Brier scoring, and R10 (bonus from ranked simulated BPS) are
+done -- see the P3 progress table. Remaining in full: **R8**, designed above.
+Remaining in part: R2 (cohort picks), R4 (persistent start/rate/team-strength
+posteriors), R5 (event-specific minutes), R6 (newcomer prior), R10 (analytic
+`bonus90` recalibration, `--legacy-bonus` comparison flag), and CRPS/
+distribution storage.
 
 ## Recommended implementation order (steps 1–5 done 2026-09-18)
 
@@ -616,9 +644,11 @@ Remaining in full: **R8** and **R10**, designed above. Remaining in part: R2
 6. ~~Close RR1–RR7.~~ Done at `880fbc9..dfd6f10`; third-review findings done after.
 7. ~~Close P2 — B8 → B7 → R3 — and make the rank scorer consistent with the
    final XI, bench and armband.~~
-8. **Next:** design and implement R8 before adding persistent multi-week
-   epistemic worlds; R10 remains the other standalone subsystem. Do not tune
-   the model from the current contaminated sequential replay numbers.
+8. ~~Implement R10 -- bonus awarded by ranking simulated BPS within a match,
+   with FPL's tie rule, instead of an independent per-player draw.~~
+9. **Next:** design and implement R8 before adding persistent multi-week
+   epistemic worlds. Do not tune the model from the current contaminated
+   sequential replay numbers.
 
 Two things to know before the next live run:
 
