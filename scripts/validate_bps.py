@@ -118,9 +118,13 @@ def _mae(hist, positions, dc_weights) -> float:
 
 
 # A handful of candidate per-position DC weight sets to grid-search over --
-# small and hand-picked (not a fine continuous search), since the point is
-# an honest OUT-OF-SAMPLE check, not squeezing out another decimal of
-# in-sample fit.
+# small and hand-picked (not a fine continuous search). This grid was
+# itself designed after looking at all 4 cached gameweeks, so `logo_cv`
+# below is EXPLORATORY/grouped cross-validation, not a genuinely
+# independent test: it shows whether the selection is stable across folds
+# GIVEN this hypothesis space, not that the space itself was chosen
+# without seeing the data. A real out-of-sample check needs gameweeks this
+# grid was never informed by.
 _DC_CANDIDATES = [
     {"GKP": 0.6, "DEF": 0.6, "MID": 0.6, "FWD": 0.6},
     {"GKP": 0.5, "DEF": 0.7, "MID": 0.8, "FWD": 0.5},
@@ -136,10 +140,12 @@ def logo_cv(hist, positions):
     selection, not independent validation).
 
     For each held-out round, the BEST candidate on the OTHER rounds is
-    picked and scored on the held-out one; this reports what that
-    selection procedure actually achieves out-of-sample, which is the
-    honest question -- not whether one fixed set fits all four weeks at
-    once (the in-sample number already reported by `main()`).
+    picked and scored on the held-out one; this reports whether that
+    selection is STABLE across folds and roughly matches its own in-
+    sample number, not whether the whole exercise is independent of the
+    data -- it is not, since `_DC_CANDIDATES` was designed after looking
+    at all 4 gameweeks (exploratory/grouped CV, see that grid's comment).
+    Genuinely fresh, untouched gameweeks are the real prospective test.
     """
     rounds = sorted(hist["round"].dropna().unique())
     print(f"\nleave-one-gameweek-out cross-validation ({len(rounds)} folds):")

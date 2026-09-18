@@ -89,6 +89,44 @@ def p_dc_threshold_mixture(dc90: float, mins_row, position: str) -> float:
                      for p, m in minutes_branches(mins_row) if p > 0))
 
 
+def p_clean_sheet_over_minutes(xgc: float, mins_row) -> float:
+    """P(clean sheet AND 60+ minutes).
+
+    The official rule is no goal conceded WHILE ON THE PITCH, not the
+    match's final score (R10's 4th review -- `model.simulate` corrects the
+    same gap on the simulation side). Modelling the side's conceded goals
+    as a homogeneous Poisson process over the 90 minutes, the count
+    conceded during ANY window of length `m` minutes is Poisson(xgc*m/90)
+    regardless of where in the match that window falls -- a subbed-off
+    starter's `[0, m]` and a substitute's `[90-m, 90]` have the same
+    LENGTH and so the same clean-sheet probability.
+
+    Deliberately does NOT route through `minutes_branches`: that helper's
+    two branches (start `m_start` minutes, or come on for `M_SUB`) treat
+    a start as ALWAYS reaching the full `m_start`, with no separate chance
+    of an early withdrawal -- fine for the OTHER threshold terms, which
+    integrate smoothly over minutes with no hard cutoff, but this term has
+    one at exactly 60, so that gap shows up directly: `p_60` can be
+    meaningfully below `p_start` (an early injury or a tactical change),
+    and a start that does not reach 60 is not CS-eligible regardless of
+    the scoreline. `p60_given_start = p_60/p_start` is the same
+    conditional the simulation uses for the same reason (`_on_pitch`).
+    A substitute's `M_SUB` is always well under 60 minutes in this model,
+    so that branch never qualifies and is correctly omitted.
+    """
+    xgc = float(xgc)
+    if "p_start" not in mins_row:
+        m = float(mins_row["e_minutes"])
+        return float(poisson.pmf(0, xgc * m / 90.0)) if m >= 60 else 0.0
+    p_start = float(mins_row["p_start"])
+    p_60 = float(mins_row["p_60"])
+    m_start = float(mins_row["m_start"]) if "m_start" in mins_row else M_START
+    if m_start < 60 or p_start <= 0 or p_60 <= 0:
+        return 0.0
+    p_reach_60 = min(p_60, p_start)   # p_60 should never exceed p_start; defensive
+    return p_reach_60 * float(poisson.pmf(0, xgc * m_start / 90.0))
+
+
 def expected_thresholds(lam: float, per_point: int) -> float:
     """E[floor(N / per_point)] for a Poisson count N.
 
@@ -172,7 +210,7 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
     pts += (float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * goal_scale
             * GOAL_PTS[position])
     pts += float(rate_row["xa90"]) * share * float(fx_row["att_mult"]) * ASSIST_PTS
-    pts += float(fx_row["p_cs"]) * CS_PTS[position] * p_60
+    pts += p_clean_sheet_over_minutes(float(fx_row["xgc"]), mins_row) * CS_PTS[position]
     pts += p_dc_threshold_mixture(float(rate_row["dc90"]), mins_row, position) * DC_PTS
     pts += bonus
     if position in CONCEDED_PENALTY_POSITIONS:

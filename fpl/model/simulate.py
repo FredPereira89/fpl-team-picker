@@ -58,19 +58,25 @@ def simulate_event_detailed(players, rates, minutes, tfx, event: int,
                             n_sims: int = DEFAULT_SIMS, seed: int = 0) -> dict:
     """The same draw with its parts exposed, for tests and diagnostics.
 
-    {"ids", "samples", "played", "goals", "conceded_team", "team_of", "bonus"} --
-    `played` records whether each player appeared in at least one fixture in the
-    gameweek.  Keeping appearance separate from points matters because a player
-    can appear and score zero: captaincy passes to the vice only on NO
-    appearance, and autosubs use the same rule.  `goals` is each player's goals
-    per scenario and `conceded_team` the goals his SIDE conceded in that
-    scenario, so the coherence property (no goal against a clean sheet in the
-    same match) can be asserted directly rather than inferred. `bonus` is each
-    player's own share of the match-wide 3/2/1 ranking (see `model.bps`),
-    exposed separately from `samples` so a caller can compare the OTHER
-    scoring components against the analytic projection without the bonus
-    mechanism's own mean (which is a ranked, scarce match resource, not an
-    independent per-player rate) obscuring the comparison.
+    {"ids", "samples", "played", "goals", "conceded_team", "conceded_on",
+    "team_of", "bonus"} -- `played` records whether each player appeared in
+    at least one fixture in the gameweek.  Keeping appearance separate from
+    points matters because a player can appear and score zero: captaincy
+    passes to the vice only on NO appearance, and autosubs use the same
+    rule.  `goals` is each player's goals per scenario and `conceded_team`
+    the goals his SIDE conceded in that scenario, so the coherence property
+    (no goal against a clean sheet in the same match) can be asserted
+    directly rather than inferred. `conceded_on` is goals conceded while
+    THIS PLAYER was on the pitch specifically (shared goal timing across
+    teammates -- see `_conceded_on` -- so two players with the same window
+    always agree), exposed so a caller can assert the clean-sheet EVENT
+    (`conceded_on == 0`) directly instead of reverse-engineering it out of
+    `samples`, which also carries goals/assists/DC/cards/bonus. `bonus` is
+    each player's own share of the match-wide 3/2/1 ranking (see
+    `model.bps`), exposed separately from `samples` so a caller can compare
+    the OTHER scoring components against the analytic projection without
+    the bonus mechanism's own mean (which is a ranked, scarce match
+    resource, not an independent per-player rate) obscuring the comparison.
     """
     ids, samples, detail = _simulate(players, rates, minutes, tfx, event, n_sims, seed)
     return {"ids": ids, "samples": samples, **detail}
@@ -84,6 +90,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     goals_all = np.zeros((len(ids), n_sims), dtype=float)
     conceded_all = np.zeros((len(ids), n_sims), dtype=float)
     bonus_all = np.zeros((len(ids), n_sims), dtype=float)
+    conceded_on_all = np.zeros((len(ids), n_sims), dtype=float)
 
     rate_cols = ["xg90", "xa90", "bonus90", "dc90", "saves90", "cards90"]
     mins_cols = ["p_start", "p_play", "p_60", "m_start", "e_minutes"]
@@ -132,14 +139,19 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             opp = next((o for o in sides if int(o["team_id"]) != team), None)
             conceded = scored[int(opp["team_id"])] if opp is not None \
                 else rng.poisson(float(fx["xgc"]), size=n_sims)
-            pts, goals, bps = _score_side(R[rows], M[rows], positions[rows], fx, pitch[team],
-                                          scored[team], conceded, lam_of[team], n_sims, rng)
+            pts, goals, bps, conceded_on = _score_side(
+                R[rows], M[rows], positions[rows], fx, pitch[team],
+                scored[team], conceded, lam_of[team], n_sims, rng)
             samples[rows] += pts
             # In a double gameweek one appearance is enough to keep the
             # captain's armband and prevent an autosub, so aggregate with OR.
             played_all[rows] |= pitch[team]["played"]
             goals_all[rows] += goals
             conceded_all[rows] += conceded[None, :]
+            # Sums across a double gameweek's fixtures, same reasoning as
+            # `conceded_all`: goals conceded while on the pitch, across
+            # however many fixtures this event actually has.
+            conceded_on_all[rows] += conceded_on
             match_rows.append(rows)
             match_bps.append(bps)
         if match_rows:
@@ -151,7 +163,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
                 offset += len(rows)
     return ids, samples, {"played": played_all, "goals": goals_all,
                           "conceded_team": conceded_all, "team_of": team_of,
-                          "bonus": bonus_all}
+                          "bonus": bonus_all, "conceded_on": conceded_on_all}
 
 
 def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
@@ -196,7 +208,8 @@ def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
     # same quantity model.xp integrates; here it is the weight his side's
     # goals are allocated by.
     w = np.maximum(R[rows, 0][:, None] * share * att, 0.0)
-    return {"played": started | subbed, "reached_60": reached_60, "share": share, "w": w}
+    return {"played": started | subbed, "started": started, "subbed": subbed,
+           "reached_60": reached_60, "share": share, "w": w}
 
 
 def _allocate(total: np.ndarray, w: np.ndarray, cap: float, rng) -> np.ndarray:
@@ -231,6 +244,48 @@ def _allocate(total: np.ndarray, w: np.ndarray, cap: float, rng) -> np.ndarray:
     return out
 
 
+# Cap on how many of a side's conceded goals get an individually-timed slot
+# per scenario. `conceded_team ~ Poisson(xgc)`, and xgc rarely exceeds 3-4
+# even for a rout, so this only matters for a scenario tail so thin it costs
+# nothing to over-provision for.
+MAX_TIMED_CONCEDED = 8
+
+
+def _conceded_on(conceded_team, started, subbed, share, n_sims, rng) -> np.ndarray:
+    """Goals conceded while EACH player was on the pitch, shape (n, n_sims).
+
+    Independently thinning each player's own count (`rng.binomial` per
+    player-scenario cell) treats "was this goal scored while I was on" as
+    an independent coin flip per player -- so two players with the IDENTICAL
+    playing window can disagree about the SAME goal. Confirmed: two
+    identical 60-minute players disagreed in 44.4% of scenarios (matching
+    2*p*(1-p) at p=60/90 exactly), which breaks the very teammate
+    correlation this simulator exists to capture.
+
+    Fixed by giving the match's conceded goals a SHARED simulated timing --
+    each drawn once per scenario as a fraction of the match elapsed,
+    common to every player on this side -- and testing membership in each
+    player's own interval: `[0, share]` if he started (on from kickoff
+    until subbed off, or full time), `[1-share, 1]` if he came on as a
+    substitute (on from when he entered until full time). Two players who
+    share an interval now agree on every timed goal, and the timing
+    assumption (uniform across the match) is a modelling simplification,
+    not a source of the correlation bug.
+    """
+    g = np.arange(MAX_TIMED_CONCEDED)[:, None, None]                  # (G,1,1)
+    goal_active = g < conceded_team[None, None, :]                    # (G,1,S)
+    goal_time = rng.random((MAX_TIMED_CONCEDED, 1, n_sims))           # (G,1,S), shared
+
+    lo = np.where(started, 0.0, np.where(subbed, 1.0 - share, 0.0))[None, :, :]
+    hi = np.where(started, share, np.where(subbed, 1.0, 0.0))[None, :, :]
+    in_interval = (goal_time >= lo) & (goal_time <= hi) & goal_active  # (G,n,S)
+    # A non-player has lo == hi == 0, which a continuous draw only matches
+    # with probability zero -- true in principle, but an explicit mask
+    # costs nothing and removes any doubt.
+    played = (started | subbed)[None, :, :]
+    return (in_interval & played).sum(axis=0)
+
+
 def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lambda,
                 n_sims, rng):
     """One side's points in one fixture, given the match's scoreline.
@@ -243,14 +298,14 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     # rate.
     xg90, xa90, _, dc90, saves90, cards90 = (R[:, i][:, None] for i in range(6))
     played, reached_60, share = pitch["played"], pitch["reached_60"], pitch["share"]
+    started, subbed = pitch["started"], pitch["subbed"]
     n = len(R)
 
     goals = _allocate(team_goals, pitch["w"], float(side_lambda), rng)
 
-    # Goals conceded while a given player was on the pitch: thinning the side's
-    # conceded count by time on pitch keeps his marginal tied to his teammates'.
-    conceded_on = rng.binomial(np.broadcast_to(conceded_team[None, :], (n, n_sims)).astype(int),
-                               np.clip(share, 0.0, 1.0))
+    # Goals conceded while a given player was on the pitch, with SHARED
+    # timing across every player on this side -- see `_conceded_on`.
+    conceded_on = _conceded_on(conceded_team, started, subbed, share, n_sims, rng)
     # A mean-1 team attacking multiplier for the parts still drawn per player.
     theta = rng.gamma(TEAM_FORM_SHAPE, 1.0 / TEAM_FORM_SHAPE, size=n_sims)[None, :]
     att = float(fx["att_mult"])
@@ -291,7 +346,7 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     # value of its own.
     bps = score_side_bps(positions, played, reached_60, goals, assists,
                          clean_sheet, saves, cards, dc, conceded_on)
-    return pts.astype(float), goals, bps
+    return pts.astype(float), goals, bps, conceded_on
 
 
 def moment_match(samples: np.ndarray, ids: list[int], xp: pd.DataFrame,

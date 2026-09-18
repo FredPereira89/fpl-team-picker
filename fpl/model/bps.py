@@ -95,27 +95,32 @@ BPS_GOAL = {"GKP": 12.0, "DEF": 12.0, "MID": 18.0, "FWD": 24.0}
 # left as a residual rather than guessed at without a goal-type signal.
 BPS_ASSIST = 9.0                       # official
 BPS_CLEAN_SHEET = {"GKP": 12.0, "DEF": 12.0}   # official, GKP/DEF, 60+ minutes only
-# 2026/27 rule: 2 BPS for ANY save, plus 1 more for a save judged a "big
-# chance" -- and possibly a further +1 for a save specifically from inside
-# the box (this codebase has re-checked the exact current save rule twice
-# across review rounds with different results each time; it is flagged
-# here as genuinely UNCERTAIN, not settled, rather than asserted). The
-# simulator has no shot-location or big-chance signal for a shot FACED
-# (only for a chance CREATED, itself an official-table entry not modelled
-# either), so BPS_SAVE is the guaranteed base only, a real underestimate.
-# How much: real GW1-4 validation (scripts/validate_bps.py) finds GKP's
-# approximate BPS undershoots the real value by ~6-9 points per appearance,
-# fairly flat regardless of save count -- too large and too save-count-
-# INDEPENDENT to be the missing save component alone. The likelier
-# dominant driver is the passing-accuracy tiers (70-89-90%+ completion on
-# 30+ attempts, worth 2-6 BPS): goalkeepers routinely attempt 30+ passes a
-# match via goal kicks and build-up distribution, and this codebase has no
-# pass-attempt or completion data at all to model it. Both residuals are
-# real; neither is fixable without a data source this codebase does not
-# have, so GKP's BPS approximation should be treated as directionally
-# useful (goals/assists/CS/cards/conceded/appearance are exact) but
-# systematically low, not a precise per-player number.
-BPS_SAVE = 2.0
+# 2026/27 rule (re-checked repeatedly across review rounds with
+# inconsistent web results; treat the exact official wording as uncertain,
+# NOT settled): roughly, 2 BPS for any save, +1 for a save from inside the
+# box, +1 for a save judged a "big chance". The simulator has no shot-
+# location or big-chance signal for a shot FACED (only for a chance
+# CREATED, itself an official-table entry not modelled either), so a flat
+# per-save value stands in for whatever mix of these actually applies.
+#
+# An earlier version of this constant (2.0, the bare base) was picked from
+# the rule text without checking whether the residual it left actually
+# scaled with saves -- it does NOT: Codex's re-review regressed GKP's
+# real-vs-approximate BPS residual against save count on the cached GW1-4
+# data (scripts/validate_bps.py) and found a real, save-count-dependent
+# slope (correlation 0.477, ~0.894 extra BPS per save, 95% CI
+# [0.52, 1.26]) that a flat base of 2.0 was leaving entirely on the table --
+# residual rises from ~3.86 at zero saves to ~8.50 at five. The save-
+# INDEPENDENT part of that residual (the ~3.6-3.86 intercept at zero
+# saves) is a SEPARATE, still-unexplained gap, most plausibly the passing-
+# accuracy tiers (70-89-90%+ completion on 30+ attempts, worth 2-6 BPS:
+# goalkeepers routinely clear 30+ attempts via goal-kick distribution, and
+# this codebase has no pass-attempt data to model it) -- that part is
+# fixable only with data this codebase does not have and remains a
+# residual. BPS_SAVE below folds in the DATA-FITTED per-save slope (2.0 +
+# ~0.9, rounded); re-run the validation script as more gameweeks
+# accumulate to refit both numbers.
+BPS_SAVE = 2.9
 # Official splits a card -3 (yellow) / -9 (red); the simulator draws one
 # undifferentiated `cards` count, so every card scores as a yellow here --
 # a real, and probably small, underestimate of the rare red-card cost.

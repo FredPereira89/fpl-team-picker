@@ -185,16 +185,59 @@ def test_clean_sheet_credit_survives_a_late_concession_after_full_minutes():
 
     detail = simulate_event_detailed(players, rates, minutes, tfx, event=1,
                                      n_sims=200000, seed=11)
-    ids, samples = detail["ids"], detail["samples"]
+    ids = detail["ids"]
     conceded_team = detail["conceded_team"][0]
     team_clean_rate = float((conceded_team == 0).mean())
 
-    # pts = 1 (played) + 1 (reached_60, both certain here) + clean_sheet*CS_PTS.
-    from fpl.model.xp import CS_PTS
+    # `conceded_on` asserts the clean-sheet EVENT directly (Codex's 5th
+    # review: an earlier version of this test inferred a "clean-sheet
+    # rate" from `samples - 2`, which still carried bonus and the
+    # goals-conceded penalty and did not actually isolate the event).
     i_def = list(ids).index(2)   # the partial-minutes defender, not the GKP
-    player_clean_rate = float((samples[i_def] - 2.0).mean()) / CS_PTS["DEF"]
+    player_clean_rate = float((detail["conceded_on"][i_def] == 0).mean())
 
     assert player_clean_rate > team_clean_rate + 0.02
+
+
+def test_identical_teammates_agree_on_the_same_conceded_goal():
+    """R10 5th review (Codex): thinning EACH player's `conceded_on`
+    independently (`rng.binomial` drawn per player-scenario cell) treats
+    "was this goal scored while I was on the pitch" as an independent coin
+    flip per player -- so two players with the IDENTICAL playing window
+    could disagree about the very same goal. Reproduced directly:
+    p=60/90, disagreement rate = 2*p*(1-p) = 44.4% under independent
+    thinning. Two IDENTICAL defenders (same team, same minutes) must now
+    agree on every scenario's `conceded_on`, since the fix gives the
+    match's conceded goals one SHARED simulated timing per scenario, not
+    one draw per player."""
+    import pandas as pd
+    from fpl.model.simulate import simulate_event_detailed
+
+    players = pd.DataFrame({"player_id": [1, 2], "web_name": ["D1", "D2"],
+                            "team": ["Alpha", "Alpha"], "team_id": [1, 1],
+                            "position": ["DEF", "DEF"], "price": [5.0, 5.0],
+                            "selected_by_percent": [5.0, 5.0]})
+    rates = pd.DataFrame({"player_id": [1, 2], "xg90": [0.0, 0.0], "xa90": [0.0, 0.0],
+                          "bonus90": [0.0, 0.0], "dc90": [0.0, 0.0],
+                          "saves90": [0.0, 0.0], "cards90": [0.0, 0.0]})
+    # Identical playing windows: both start, both off at exactly 60'.
+    minutes = pd.DataFrame({"player_id": [1, 2], "p_start": [1.0, 1.0],
+                            "p_play": [1.0, 1.0], "p_60": [1.0, 1.0],
+                            "m_start": [60.0, 60.0], "e_minutes": [60.0, 60.0]})
+    tfx = pd.DataFrame([
+        {"team_id": 1, "event": 1, "fixture_id": 1, "opponent_id": 2, "is_home": True,
+         "xgc": 2.0, "p_cs": 0.13, "att_mult": 1.0, "opp_threat": 1.0},
+        {"team_id": 2, "event": 1, "fixture_id": 1, "opponent_id": 1, "is_home": False,
+         "xgc": 0.5, "p_cs": 0.6, "att_mult": 1.0, "opp_threat": 1.0},
+    ])
+
+    detail = simulate_event_detailed(players, rates, minutes, tfx, event=1,
+                                     n_sims=100000, seed=9)
+    ids = detail["ids"]
+    conceded_on = detail["conceded_on"]
+    i1, i2 = list(ids).index(1), list(ids).index(2)
+    disagree_rate = float((conceded_on[i1] != conceded_on[i2]).mean())
+    assert disagree_rate < 0.005   # was ~0.444 under independent thinning
 
 
 def test_points_are_a_spread_not_a_point_estimate():
@@ -385,18 +428,18 @@ def test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60():
     i = list(ids).index(3)
     # Player 3 is Alpha (team_id=1), whose fixture att_mult is 1.25.
     analytic_bonus = expected_bonus_for(bonus90=0.30, e_minutes=62.9, att_mult=1.25)
-    # abs=0.12 is tight enough that the confirmed bug (a ~0.05-0.06 point
-    # shift in the clean-sheet term alone at this gap) would fail it, and
-    # wide enough for R10's 4th review: clean sheet is now computed PER
-    # PLAYER (goals conceded while ON THE PITCH, via `conceded_on == 0`,
-    # the official rule -- see model.bps.score_side_bps), not from the
-    # match's final score. `build_xp`'s closed-form `p_cs * CS_PTS * p_60`
-    # does not model "while on pitch" either, so the two sides now diverge
-    # by a genuine, small, expected amount (observed ~0.08 here) that is
-    # not a bug -- widening `xp_for_fixture` to match is a separate,
-    # undone follow-up.
+    # abs=0.03 is tight enough that the confirmed bug (a ~0.05-0.06 point
+    # shift in the clean-sheet term alone at this gap) would fail it. R10's
+    # 5th review: clean sheet is now PER PLAYER on both sides -- the
+    # simulation via `conceded_on == 0` (shared goal timing across
+    # teammates, see `model.simulate._conceded_on`) and the analytic
+    # xp_for_fixture via `p_clean_sheet_over_minutes` (a matching
+    # exp(-xgc*minutes/90) integrated over the SAME started/reached-60
+    # distribution) -- so the two sides agree again to within Monte Carlo
+    # noise, not the ~0.08 gap an earlier, incomplete version of this fix
+    # left between them.
     assert (samples[i] - bonus[i]).mean() == pytest.approx(
-        float(analytic.loc[3]) - analytic_bonus, abs=0.12)
+        float(analytic.loc[3]) - analytic_bonus, abs=0.03)
 
 
 def test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw():
