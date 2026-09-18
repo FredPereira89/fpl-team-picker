@@ -14,6 +14,7 @@ the points it is worth. `optimize.chips` still decides the timing and
 """
 from dataclasses import dataclass, field
 
+from .objective import event_columns
 from .transfers import TransferPlan, _budget_and_cost, _plan, _solve
 
 SQUAD_SIZE = 15
@@ -95,7 +96,19 @@ def freehit_action(xp_df, cfg, current_squad, bank: float,
     No bench floor: a Free Hit bench never plays, so spending XI budget to fill
     it would be spending it for nothing.
     """
-    solved, current = _rebuild(xp_df, cfg, current_squad, bank, selling,
+    # The shared objective values the armband in EVERY per-gameweek column it
+    # can see, so a one-week squad was being bought partly for how well its
+    # players captain after it has expired. Only the current event survives
+    # into the solve; the captain term then covers exactly the week the squad
+    # exists for.
+    cols = event_columns(xp_df)
+    if cols:
+        keep_first = cols[0][1]
+        one_week = xp_df.drop(columns=[c for _, c in cols[1:]])
+        one_week[ONE_WEEK_COL] = one_week[keep_first]
+    else:
+        one_week = xp_df
+    solved, current = _rebuild(one_week, cfg, current_squad, bank, selling,
                                ONE_WEEK_COL, bench_floor=0.0)
     if solved is None:
         return None

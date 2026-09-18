@@ -126,3 +126,21 @@ def test_a_certain_starter_makes_triple_captain_worth_exactly_his_xp():
                     formation="4-4-2", captain=3, vice=2, xp=40.0)
     assert triple_captain_value(lineup, pool) == pytest.approx(
         float(pool.set_index("player_id").loc[3, "xp_next1"]))
+
+
+def test_a_free_hit_does_not_buy_a_player_for_his_future_captaincy():
+    """add_captaincy values the armband in EVERY xp_gw column it can see, so a
+    one-week Free Hit was buying players partly because they captain well after
+    the temporary squad has expired. A player who is weak now but enormous next
+    week must not be selected for that reason."""
+    pool = _pool()
+    events = {f"xp_gw{e}": pool["xp_next1"] for e in (5, 6, 7)}
+    pool = pool.assign(**events)
+    # Player 10 (a DEF): nothing this week, a monstrous captain next week.
+    pool.loc[pool.player_id == 10, ["xp_next1", "xp_gw5"]] = 0.1
+    pool.loc[pool.player_id == 10, "xp_gw6"] = 40.0
+    cfg = _cfg()
+    current = _current(pool)
+    action = freehit_action(pool, cfg, current, bank=5.0,
+                            selling=_selling(pool, current))
+    assert 10 not in action.starting_ids
