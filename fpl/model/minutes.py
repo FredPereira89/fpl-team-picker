@@ -219,7 +219,12 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
                    / (now_games + PRIOR_WEIGHT_GAMES))
         # How many games of evidence sit behind that number. A price prior and
         # an ever-present's thirty starts can produce the same p_start; only
-        # this says which one it is, and the simulation draws the uncertainty.
+        # this says which one it is. Not currently consumed by the simulator
+        # -- a single gameweek's appearance event cannot be "widened" by a
+        # per-scenario posterior draw, only biased if done carelessly (see
+        # model.simulate's history) -- kept as a labelled confidence signal
+        # for a future extension that reuses the SAME draw across a
+        # multi-week decision, where the correlation would be real.
         start_evidence = now_games + PRIOR_WEIGHT_GAMES
         if not has_past and now_games <= 0:
             confidence = "low"

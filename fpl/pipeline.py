@@ -177,11 +177,17 @@ def _p_gain_positive(chosen, plans, ids, samples) -> float | None:
 
     A transfer is irreversible and a hit is a fixed cost, so the expected gain
     alone is the wrong summary: a +0.4 with a thin, uncertain edge and a +0.4
-    on a nailed regular are not the same bet. The scenarios already carry the
-    epistemic spread (Beta-drawn starts), so the comparison is cheap. This is
-    a diagnostic for the report, not a selection rule -- the audit's caution
-    about subtracting an "uncertainty penalty" from every low-confidence
-    player applies.
+    on a nailed regular are not the same bet. This is a diagnostic for the
+    report, not a selection rule -- the audit's caution about subtracting an
+    "uncertainty penalty" from every low-confidence player applies.
+
+    This does NOT yet carry the epistemic spread the difference between a
+    price-prior newcomer and a nailed regular deserves: the simulation draws
+    from the model's OWN point estimate of each player's rates and minutes,
+    with no uncertainty layered on top of a single gameweek's draw (see R4 --
+    a single-event marginal cannot be widened by construction; a real fix
+    needs uncertainty reused across a multi-week horizon, which is unbuilt).
+    A confidence-sensitive version of this number remains open work.
     """
     from .optimize.rank import squad_indicator, squad_scores as _scores
     hold = next((p for p in plans if p.n_transfers == 0), None)

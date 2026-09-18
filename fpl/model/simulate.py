@@ -82,10 +82,6 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
                  else [c for c in mins_cols if c != "m_start"])
     if not has_m_start:  # frames from outside model.minutes
         M = np.insert(M, 3, M[:, 2] * 0 + M_START, axis=1)
-    # Games of evidence behind p_start (model.minutes), or None for frames
-    # from outside it, which are then treated as certain -- the old behaviour.
-    evidence = (_aligned(minutes, ids, ["start_evidence"])[:, 0]
-                if "start_evidence" in minutes.columns else None)
     positions = players.set_index("player_id").reindex(ids)["position"].to_numpy()
     team_of = players.set_index("player_id").reindex(ids)["team_id"].astype(int).to_numpy()
 
@@ -101,7 +97,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
         sides = [fx for _, fx in match.iterrows()]
         # Who is on the pitch, drawn once per side, then the scoreline.
         pitch = {int(fx["team_id"]): _on_pitch(R, M, np.flatnonzero(team_of == int(fx["team_id"])),
-                                               fx, n_sims, rng, evidence) for fx in sides}
+                                               fx, n_sims, rng) for fx in sides}
         scored, lam_of = {}, {}
         for fx in sides:
             team = int(fx["team_id"])
@@ -130,33 +126,35 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
                           "team_of": team_of}
 
 
-def _on_pitch(R, M, rows, fx, n_sims, rng, evidence=None) -> dict:
+def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
     """Minutes on the pitch per player-scenario, and each one's goal weight.
 
-    `p_start` is not a known number. It is an estimate resting on however
-    many games of evidence the minutes model had, and a price prior and an
-    ever-present's thirty starts can land on the same 0.8. Treating both as
-    exact made the simulation equally confident about a new signing and a
-    fixture of the side, and a transfer to the newcomer looked as safe as one
-    to the regular. So each scenario draws its own p_start from the Beta
-    posterior the evidence implies: same mean, so no projection moves, but a
-    thin sample now widens the tails it should.
+    `p_start` is drawn ONCE per player as a plain Bernoulli, not per-scenario
+    from a posterior. An earlier version drew a fresh Beta `p_start` per
+    scenario, reasoning that a price prior and an ever-present's thirty
+    starts can land on the same 0.8 and should not be simulated with equal
+    confidence. That reasoning is correct, but the mechanism could not
+    deliver it: for a SINGLE binary event in a SINGLE gameweek, the marginal
+    distribution of "did he start" is Bernoulli(p_start) for ANY generating
+    process with that mean -- there is no way to "widen" a hard 0/1 outcome
+    beyond the variance its own mean already fixes (p*(1-p)), so drawing a
+    per-scenario theta changed nothing real. Worse, computing the conditional
+    60-minute probability as `p_60 / theta` (theta, not the fixed p_start) was
+    an active bug: since `theta * (p_60/theta) = p_60` exactly whenever
+    unclipped, but the ratio gets clipped to 1 whenever theta dips below
+    p_60, the clip fires disproportionately in exactly the low-theta
+    scenarios and pulls the true `P(reached 60)` below the intended `p_60` --
+    confirmed numerically (0.402 simulated against an intended 0.45 at
+    moderate evidence). Genuine epistemic uncertainty about a role would need
+    a THETA REUSED ACROSS A MULTI-WEEK DECISION -- the same player is more or
+    less nailed on in every week of a transfer's horizon, not independently
+    per gameweek -- which is a different, larger piece of work than this
+    single-event simulator does (see R4/R8 in the audit). `minutes.py` still
+    computes and exposes `start_evidence` as a labelled confidence signal for
+    that future extension; nothing in this module reads it.
     """
     p_start, p_play, p_60, m_start = (M[rows, i][:, None] for i in range(4))
     n = len(rows)
-    cameo = p_play - p_start
-    if evidence is not None:
-        ev = np.maximum(evidence[rows][:, None], 1e-6)
-        base = np.clip(p_start, 1e-6, 1 - 1e-6)
-        draws = rng.beta(base * ev, (1.0 - base) * ev, size=(n, n_sims))
-        # A zeroed p_start (unavailable) stays zero. Otherwise the draw is
-        # used as-is -- clipping it at p_play cut the upper tail off and moved
-        # the mean, which the whole construction exists not to do -- and the
-        # cameo gap rides on top, so p_start <= p_play in every scenario. A
-        # doubtful player's availability cap then holds in expectation rather
-        # than scenario by scenario, which is the price of a posterior draw.
-        p_start = np.where(p_start <= 0, 0.0, draws)
-        p_play = np.clip(p_start + cameo, 0.0, 1.0)
     u = rng.random((n, n_sims))
     started = u < p_start
     subbed = (u >= p_start) & (u < p_play)

@@ -217,24 +217,72 @@ def test_a_lone_team_row_without_an_opponent_still_simulates():
     assert samples[list(ids).index(2)].sum() > 0
 
 
-# --- R4: the evidence behind p_start widens the tails, not the mean ---
+# --- C6-5 (R4 revisited): a single event's marginal cannot be "widened" ---
+#
+# An earlier version drew a fresh Beta p_start per scenario, claiming this
+# widened the appearance spread for a thin-evidence player. That claim was an
+# overclaim: a single binary event's marginal is Bernoulli(mean) for ANY
+# generating mechanism with that mean, so nothing can widen it without moving
+# the mean. The mechanism's only real effect was a bug -- p60_given_start
+# computed from the random draw instead of the fixed p_start systematically
+# lowered the true P(reached 60). The tests below pin the CORRECTED, honest
+# properties: start_evidence changes nothing about a single gameweek's
+# simulated distribution, and p_60's marginal matches the input exactly.
 
-def test_a_thin_sample_widens_the_appearance_spread_without_moving_the_mean():
+def test_start_evidence_does_not_change_a_single_gameweeks_simulation():
+    """The whole point of removing the Beta draw: start_evidence carried on
+    the minutes frame must not perturb either the mean OR the shape of a
+    single gameweek's simulated points, because there is nothing at the
+    single-event level for it to legitimately change."""
     mins = MINUTES.copy()
-    mins["start_evidence"] = 200.0                 # everyone certain
+    mins["start_evidence"] = 200.0                 # a nailed regular's worth
     ids, certain = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=20000, seed=3)
     mins.loc[mins.player_id == 4, "start_evidence"] = 2.0   # a newcomer's worth
     _, thin = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=20000, seed=3)
     i = list(ids).index(4)
     assert thin[i].mean() == pytest.approx(certain[i].mean(), abs=0.15)
-    # Across scenarios the drawn start rate varies, so the share of blanks
-    # spreads: more scenario-level variance in whether he plays at all.
-    assert thin[i].var() >= certain[i].var() * 0.98
+    assert thin[i].var() == pytest.approx(certain[i].var(), rel=0.1)
 
 
-def test_an_unavailable_player_stays_out_under_beta_draws():
+def test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60():
+    """The regression this whole rewrite exists for: a minutes frame that
+    still carries `start_evidence` (an older caller, or a frame produced
+    before this fix) must not shift the simulated P(reached 60) away from
+    the model's own p_60 -- which is exactly what the removed Beta-draw
+    mechanism did whenever evidence was thin. Player id=3 (p_start=0.75,
+    p_60=0.66) has a real gap between the two, which is what the old bug
+    needed to bite."""
     mins = MINUTES.copy()
-    mins["start_evidence"] = 2.0
+    mins["start_evidence"] = 3.0     # thin -- exactly where the old bug bit hardest
+    ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1,
+                                  n_sims=300000, seed=5)
+    analytic = build_xp(PLAYERS, RATES, mins, TFX, CFG, from_event=1).set_index(
+        "player_id")["xp_next1"]
+    i = list(ids).index(3)
+    # abs=0.05 is tight enough that the confirmed bug (a ~0.05-0.06 point
+    # shift in the clean-sheet term alone at this gap) would fail it; the
+    # pre-existing whole-suite tolerance (abs=0.15) was too loose to catch it.
+    assert samples[i].mean() == pytest.approx(float(analytic.loc[3]), abs=0.05)
+
+
+def test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw():
+    """Direct, deterministic proof of the fix: with p_start fixed and no
+    per-scenario draw of it, p60_given_start = p_60 / p_start is a CONSTANT,
+    so P(reached_60 | started) converges to exactly p_60/p_start (and
+    P(reached_60) to exactly p_60) as n_sims grows -- reproducing Codex's own
+    numerical check (buggy: 0.402 vs intended ~0.45; fixed: matches)."""
+    n = 200000
+    rng = np.random.default_rng(0)
+    p_start, p_60 = 0.6, 0.45
+    u = rng.random(n)
+    started = u < p_start
+    p60_given_start = p_60 / p_start
+    reached_60 = started & (rng.random(n) < np.clip(p60_given_start, 0.0, 1.0))
+    assert reached_60.mean() == pytest.approx(p_60, abs=0.01)
+
+
+def test_an_unavailable_player_never_appears():
+    mins = MINUTES.copy()
     mins.loc[mins.player_id == 4, ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
     ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=500, seed=0)
     assert samples[list(ids).index(4)].sum() == 0
