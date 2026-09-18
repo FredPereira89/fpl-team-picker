@@ -293,6 +293,55 @@ above.
 
 Suite after this correction: **746 passed, 1 warning**.
 
+### R10 fourth review (2026-09-18, IN PROGRESS) — Codex found the CV itself used the wrong feature
+
+Checkpoint written mid-fix, per a request to update this file often given
+the session's remaining budget. Four findings, verification status below;
+code fixes not yet all landed at the time of this checkpoint.
+
+1. **High, CONFIRMED with exact numbers.** `scripts/validate_bps.py` computed
+   its `dc` feature as `clearances_blocks_interceptions + recoveries +
+   tackles`, but production `dc90` (`model.scoring.RATE_SPECS`) is sourced
+   from the `defensive_contribution` field directly -- a DIFFERENT, position-
+   dependent aggregate. Verified against the cached GW1-4 history: GKP's
+   `defensive_contribution` is always 0 (815 in the validator's sum, 0 in
+   production -- goalkeepers are not DC-threshold-eligible, `DC_THRESHOLD`
+   in `xp.py` sets their bar at 99, effectively unreachable); for DEF,
+   `defensive_contribution` = CBI + tackles ONLY, excluding recoveries
+   (2,584 vs the validator's 3,771 = CBI+recoveries+tackles); MID/FWD
+   happen to match exactly (2,994 and 340 respectively), because their
+   official DC definition does include recoveries. The leave-one-gameweek-
+   out cross-validation was therefore run against a feature the shipped
+   model never actually sees for GKP/DEF -- not a validation of the
+   production code path. Fix in progress: switch the validator to
+   `defensive_contribution` directly, re-run `logo_cv`, and ship whatever
+   weights that CORRECTED cross-validation selects (expected to be
+   materially different for GKP/DEF, since the feature itself changes).
+2. **High, likely correct, FPL rule being verified before fixing.** Clean
+   sheet credit (both the FPL points term and this session's BPS
+   approximation) uses `conceded_team == 0` -- the FULL match final score
+   -- even though `_score_side` already computes `conceded_on` (goals
+   conceded specifically WHILE THIS PLAYER was on the pitch) for the
+   separate goals-conceded penalty. A player subbed at 60' whose team
+   concedes at 75' should keep credit under the official rule if the rule
+   is genuinely "no goal conceded while on the pitch," not "team finishes
+   with a clean sheet." Fix in progress.
+3. **Medium, acknowledged.** `BPS_SAVE`'s 2026/27 rule (2 base + 1 for a
+   "big chance" save) may ALSO retain a separate inside-the-box component
+   from the prior season's rule -- the exact current wording needs a fresh,
+   authoritative re-check (this specific rule has now been re-verified
+   twice with different results across review rounds). No shot-location
+   data exists in this codebase to implement it exactly regardless; the
+   residual will be documented more explicitly.
+4. **Medium, a documentation-honesty issue rather than a code bug.** The
+   `logo_cv` candidate grid was itself designed after looking at all 4
+   cached gameweeks, so holding out one gameweek per fold does not make
+   the grid's hypothesis space independent of the data -- it shows
+   stability WITHIN that grid, not absence of overfitting to it. The
+   result should be described as exploratory/grouped CV, not full
+   out-of-sample validation; genuinely fresh gameweeks, once available,
+   are the real prospective test.
+
 ### Open residuals worth knowing
 
 - Assists are still drawn independently of goals in the simulation.
