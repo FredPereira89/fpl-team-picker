@@ -8,12 +8,14 @@ are closed. Review 1 (RB1–RB11)
 fixed at `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`;
 review 3 (three findings) fixed with the file's restoration; review 4 (four
 findings) and review 5 (two cleanups) fixed after. **R10 (bonus from ranked
-simulated BPS) is implemented and re-reviewed** — Codex's re-review found
-the calibration hadn't reached the primary `build_xp`/Mode 1 decision path
-and two coefficients were stale for the 2026/27 rules; both fixed, and the
-approximation is now validated against real GW1-4 fixtures (see its design
-section below). **R8 (rolling multi-period transfer MILP) is still not started**
-and remains designed below.
+simulated BPS) is implemented and three-times re-reviewed** — the
+simulation-side scorer and its 2026/27 BPS coefficients are validated
+against real GW1-4 fixtures with leave-one-gameweek-out cross-validation; a
+`build_xp`/Mode 1 calibration attempt was tried, checked against real data,
+found to cut true awarded bonus by more than half, and reverted (see its
+design section below — `xp_next1`'s bonus term is intentionally back to a
+plain `bonus90` projection). **R8 (rolling multi-period transfer MILP) is
+still not started** and remains designed below.
 
 ### Review 6 fix progress (2026-09-18)
 
@@ -143,7 +145,7 @@ Codex's re-review findings are kept below for the record.
 | R4 confidence into the distribution | **open for epistemic uncertainty; C6-5 and decision consistency fixed**. `start_evidence` is emitted but intentionally does not alter one-event Bernoulli draws. The biased random denominator was removed, restoring the modeled `p_60` marginal. Gain diagnostics now use the final XI, bench, captain and vice with appearance-aware scenario scoring. Persistent posterior worlds for starts, rates and team strengths remain open and are R8-adjacent. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | R5 event-specific team-coherent minutes | **slice done** — `minutes.reconcile_team_starts` scales a side's starts down to eleven (never up). Open: per-event minute distributions, depth chart, injury redistribution to named deputies, override event ranges. | `fpl/model/minutes.py` |
 | R8 multi-period MILP | **not started — design below** | `fpl/optimize/transfers.py` (new module `fpl/optimize/multiperiod.py` suggested) |
-| R10 BPS rebuild | **done, with documented residuals — see design section below** | `fpl/model/bps.py`, `fpl/model/simulate.py`, `fpl/model/xp.py` |
+| R10 BPS rebuild | **done for the simulation layer, cross-validated against real fixtures; the `build_xp`/Mode 1 calibration attempt was reverted as statistically wrong — see design section below** | `fpl/model/bps.py`, `fpl/model/simulate.py`, `fpl/model/xp.py` |
 
 ### Behaviour changes in this session, for the next live run
 
@@ -238,7 +240,7 @@ exclude bonus from the comparison (via a new `bonus` field on
 `simulate_event_detailed`) rather than have their tolerances loosened past
 the point of still catching a real regression in the other components.
 
-### R10 re-review (2026-09-18) — Codex found the fix hadn't reached the primary decision path, and three coefficients were stale; all now fixed
+### R10 re-review (2026-09-18) — Codex found the fix hadn't reached the primary decision path, and three coefficients were stale; **finding 1's fix was itself wrong and reverted, see the section below**
 
 The re-review's core point: R10 as first landed only touched
 `model.simulate` (the rank layer's diagnostic simulation). `build_xp`'s
@@ -254,16 +256,42 @@ the rank layer (once moment-matched) actually reflected the fix.
 | Medium — no predictive validation existed, only ranking-mechanics tests. | New `scripts/validate_bps.py` reads cached `element-summary` history (real per-fixture minutes/goals/assists/cards/saves/DC/conceded, and FPL's own real `bps`/`bonus`) and reports exact-recipient match rate, Jaccard, recall and BPS MAE, overall and by position. Against real GW1-4 fixtures (40 matches): **42.5% exact bonus-recipient match** (up from 37.5% before the per-position DC weights), **0.675 mean Jaccard**, **0.76 recall**, **3.28 BPS MAE** (GKP 2.41 / DEF 3.39 / MID 3.49 / FWD 2.60). The residual is structural, not a further tuning target: FPL's public `element-summary` API does not expose crosses, key passes, dribbles, shots, passing-accuracy tiers, fouls or errors at ALL (confirmed by inspecting its full field list), so several official BPS components cannot be reconstructed from this data source regardless of coefficient choice. A 6-fixture frozen sample (`tests/data/real_bps_sample.json`, since `data/cache` is gitignored) backs a permanent regression floor in `tests/test_bps.py`. |
 | Low — this file was internally contradictory: said bonus was still independent in one place (P3 table, R3 row) and "not started" in another (P3 table, R10 row) while the design section above said done. | Corrected both stale rows. |
 
-Not done, and left as documented follow-ups: a full `bonus90` recalibration
-against the production `blended_rates` pipeline's real historical output
-(the calibration above uses a large simulated league instead, since wiring
-into the historical rate pipeline for a one-off fit was judged a
-disproportionate amount of new integration for this pass); a
-`--legacy-bonus` challenger flag in the replay for a one-off comparison
-run; and closing the remaining structural BPS gap would need a different,
-richer data source than FPL's public API provides.
+Not done at the time of that section: a full `bonus90` recalibration
+against the production `blended_rates` pipeline's real historical output.
 
-Suite after the R10 re-review fixes: **746 passed, 1 warning**.
+### R10 third review (2026-09-18) — Codex checked finding 1's fix against real data and it was wrong; reverted. Findings 2 and 3 fixed properly
+
+**Finding 1's fix (the `BONUS_CALIBRATION` table above) was a genuine
+statistical error, confirmed and reverted, not merely refined.** `bonus90`
+is derived (`model.scoring.RATE_SPECS`, `"bonus90": "bonus"`) from the REAL
+`bonus` field FPL actually awarded each player -- i.e. it is ALREADY the
+outcome of real match-wide BPS competition, a historical per-90 average of
+points that survived it, not an independent-rate assumption needing a
+further "how much survives the match" discount. Projecting it forward
+linearly (`bonus90 * minutes-share * fixture-scale`) is an ordinary
+extrapolation of an already-calibrated statistic. The calibration factors
+had been derived from a synthetic diagnostic with an unrealistic UNIFORM
+`bonus90` across every simulated player (not how real `bonus90` is
+distributed across a real pool) and were never checked against real data
+before landing. Checked now: applied to the real 2026/27 GW1-4 bootstrap,
+those factors cut correctly-awarded bonus totalling ~6.4-6.5/match down to
+~3.0/match -- 46% of the true total survived.
+
+| Finding | Fix |
+|---|---|
+| High (Codex, 3rd pass) — `BONUS_CALIBRATION` double-corrected an already match-constrained statistic; see above. | Removed entirely: `BONUS_CALIBRATION`, `expected_bonus_for`'s/`expected_bonus`'s `position` parameter, and `build_xp`'s `position=pos` argument at its one call site are all gone. `xp_next1`'s bonus term is back to a plain linear projection of `bonus90`. A genuine correction, if one is ever warranted, needs fitting against the production `blended_rates` pipeline's real historical output with an out-of-sample check -- left open, undone. |
+| High (Codex, 3rd pass) — the reported validation never exercised `BONUS_CALIBRATION`/`expected_bonus_for`/`build_xp` at all (it validated the simulation's event-to-BPS approximation only), and the per-position DC weights were selected AND evaluated on the same 4 gameweeks -- in-sample model selection presented as validation. | Added `scripts/validate_bps.py::logo_cv()`: proper leave-one-gameweek-out cross-validation over a small candidate grid. The SAME weight set (`{"GKP": 0.5, "DEF": 0.75, "MID": 0.85, "FWD": 0.55}`) was selected on every one of the 4 training folds -- not fold-dependent, which would have signalled overfitting -- with mean held-out MAE 3.24, close to in-sample (3.26) and consistently below the uniform-0.6 baseline (3.49) on the SAME held-out folds. Production `BPS_DC_ACTION` now uses this cross-validated set. |
+| Medium (Codex, 3rd pass) — three validation-harness bugs: `python scripts/validate_bps.py` failed with `ModuleNotFoundError` (missing the `sys.path` bootstrap every other script here uses); the frozen regression test computed ONE clean-sheet flag for a whole match from the first player's side, so a losing side's defenders could be credited with a clean sheet whenever the first player in the group happened to be on the winning side; the yellow/red card split was conflated into one -3 weight even though real historical data has both counts separately. | Added the `sys.path` bootstrap. `tests/test_bps.py`'s frozen test now scores each side (grouped by `was_home`) separately, matching how `score_side_bps` is actually used in production. Both the script and the frozen test weight yellow (-3) and red (-9, new `BPS_RED_CARD`) separately. |
+
+With finding 1 reverted, the validated real-fixture numbers (updated after
+the cross-validated DC weights): **45.0% exact bonus-recipient match**,
+**0.692 mean Jaccard**, **0.777 recall**, **3.24 BPS MAE** (GKP 2.41 / DEF
+3.35 / MID 3.43 / FWD 2.57) -- all for `score_side_bps`/`award_match_bonus`,
+the SIMULATION's diagnostic layer. `build_xp`'s `xp_next1` (Mode 1's
+default decision) is intentionally uncalibrated bonus90, per the reversal
+above.
+
+Suite after this correction: **746 passed, 1 warning**.
 
 ### Open residuals worth knowing
 
