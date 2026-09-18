@@ -44,14 +44,11 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
     if prev_gw < 1:
         return None, [f"Mode 2 needs a completed previous gameweek (GW{gw} has none)."]
 
-    try:
-        picks = client.entry_picks(cfg.entry_id, prev_gw)
-    except Exception as e:
-        return None, [f"Could not fetch your GW{prev_gw} picks ({e})."]
-
-    current_squad = [int(p["element"]) for p in picks["picks"]]
-    bank = picks["entry_history"]["bank"] / 10.0
-
+    # State first. Both a hand-confirmed squad and a Free Hit restoration are
+    # answered entirely from local state, so neither should be lost to a picks
+    # request that fails -- and after a Free Hit the picks endpoint returns the
+    # temporary squad anyway, which is the one thing the restoration must not
+    # read. Only an ordinary gameweek actually needs the fetch.
     state_existed = Path(state_path).exists()
     state = load_state(state_path, cfg)
     warnings: list[str] = []
@@ -68,6 +65,16 @@ def resolve_current_squad(cfg, gw: int, state_path: Path, client):
     # taken back, on a bank the chip week was never allowed to keep.
     restored = (not confirmed and state.freehit_event is not None
                 and int(gw) > int(state.freehit_event) and bool(state.base_squad))
+
+    current_squad: list[int] = []
+    bank = 0.0
+    if not (confirmed or restored):
+        try:
+            picks = client.entry_picks(cfg.entry_id, prev_gw)
+        except Exception as e:
+            return None, [f"Could not fetch your GW{prev_gw} picks ({e})."]
+        current_squad = [int(p["element"]) for p in picks["picks"]]
+        bank = picks["entry_history"]["bank"] / 10.0
 
     if confirmed:
         current_squad = list(state.squad)

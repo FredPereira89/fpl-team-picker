@@ -490,3 +490,35 @@ def test_reconfirming_the_same_chip_in_the_same_gameweek_is_allowed(monkeypatch)
                               "--applied-chip", "wildcard"])
     assert code == 0
     assert written.get("called")
+
+
+# --- RB11: Free Hit restoration works without the picks endpoint ---
+
+def test_free_hit_restoration_does_not_need_the_picks_fetch(tmp_path):
+    """Everything needed to restore ownership and bank is in local state, and
+    the picks endpoint would only return the temporary squad anyway."""
+    path = tmp_path / "state.json"
+    cfg = Config(entry_id=7, free_transfers=1)
+    permanent = list(range(1, 16))
+    record_transfers(path, cfg, gw=8, transfers_made=9, chip="freehit",
+                     squad=list(range(101, 116)), bank=0.3,
+                     base_squad=permanent, base_bank=1.2,
+                     base_purchase_prices={i: 5.0 for i in permanent})
+    client = FakeClient(picks_error=RuntimeError("503"),
+                        history={"current": [], "chips": []})
+    live, errors = resolve_current_squad(cfg, 9, path, client)
+    assert errors == []
+    assert live.current_squad == permanent
+    assert live.bank == 1.2
+    assert live.restored_from_freehit is True
+
+
+def test_a_confirmed_squad_does_not_need_the_picks_fetch_either(tmp_path):
+    p = tmp_path / "state.json"
+    save_state(State(free_transfers=0, last_event=3, chips_used=[],
+                     squad=list(range(100, 115)), squad_event=4, bank=0.0), p)
+    live, errors = resolve_current_squad(
+        Config(entry_id=1), gw=4, state_path=p,
+        client=FakeClient(picks_error=RuntimeError("503"), history=HISTORY_NO_TRANSFERS))
+    assert errors == []
+    assert live.current_squad == list(range(100, 115))
