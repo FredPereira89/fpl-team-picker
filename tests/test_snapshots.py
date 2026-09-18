@@ -91,3 +91,14 @@ def test_the_note_honours_a_pinned_post_deadline_version(tmp_path):
     _cap(tmp_path, day=10)
     late = _cap(tmp_path, day=20)
     assert contamination_note(tmp_path, [5], versions_by_gw={5: late}) is not None
+
+
+def test_a_capture_keeps_the_overrides_and_config_the_run_used(tmp_path):
+    """Production minutes use the manual news overrides; a replay that recomputed
+    them without the overrides reconstructed a decision the live run never made."""
+    news = {42: {"p_start_override": 0.9, "note": "starts", "source": "presser"}}
+    capture(tmp_path, 5, bootstrap=BOOTSTRAP, fixtures=FIXTURES, deadline=DEADLINE,
+            captured_at=_when(10), news=news, config={"horizon_gw": 5})
+    got = load(tmp_path, 5)
+    assert got["news"] == news
+    assert got["config"]["horizon_gw"] == 5

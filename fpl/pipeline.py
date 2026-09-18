@@ -437,10 +437,12 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     # And record what this run could SEE, so a later replay of this gameweek
     # does not have to read today's prices, availability and club assignments.
     # Every capture is kept, and the forecast records which one it read.
+    from dataclasses import asdict, is_dataclass
     snapshot = snapshots.capture(
         root, from_event, bootstrap=bootstrap, fixtures=raw_fixtures,
         deadline=deadline, final_through=checked_through,
-        sources=client.source_summary() if hasattr(client, "source_summary") else {})
+        sources=client.source_summary() if hasattr(client, "source_summary") else {},
+        news=news or {}, config=asdict(cfg) if is_dataclass(cfg) else dict(cfg))
     save_predictions(xp, from_event, root, cfg=cfg,
                      sources=client.source_summary()
                      if hasattr(client, "source_summary") else {},

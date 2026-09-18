@@ -141,6 +141,8 @@ def main() -> int:
     if banner:
         print(banner)
         print()
+    print(snapshots.SUMMARIES_NOTE)
+    print()
 
     print(f"{'GW':>3}{'squad':>8}{'field':>7}{'edge':>7}  inputs          calibration")
     results = {}
@@ -159,7 +161,8 @@ def main() -> int:
         tfx = team_fixture_frame(fixtures, ratings, gw, cfg.horizon_gw,
                                  league_gc=league_goals_per_team_match(players))
         rates = blended_rates(players, seen["current"], cfg, rounds=seen["rounds"])
-        mins = minutes_model(players, cfg, current=seen["current"], rounds=seen["rounds"])
+        mins = minutes_model(players, cfg, news=inputs["news"],
+                             current=seen["current"], rounds=seen["rounds"])
         xp = build_xp(players, rates, mins, tfx, cfg, gw)
 
         # Calibrate on gameweeks strictly before this one, exactly as a live run

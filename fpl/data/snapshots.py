@@ -56,15 +56,30 @@ def _before(a, b) -> bool:
     return x is not None and y is not None and x < y
 
 
+# What a replay reconstructs rather than reads back, and why that is accepted.
+# Stated once here so the walk-forward script can print it verbatim.
+SUMMARIES_NOTE = (
+    "Element-summary history is reconstructed per round from the current cache, "
+    "not archived per run: rows for past rounds are stable apart from FPL's "
+    "post-match bonus and stat corrections, so this is a small, known residual "
+    "contamination even for gameweeks with a pre-deadline snapshot."
+)
+
+
 def capture(root, gw: int, *, bootstrap: dict, fixtures, deadline: str | None,
             sources: dict | None = None, final_through: int | None = None,
-            captured_at=None) -> str:
-    """Record the payloads this run read as a new version for `gw`.
+            captured_at=None, news: dict | None = None,
+            config: dict | None = None) -> str:
+    """Record the inputs this run read as a new version for `gw`.
 
     Returns the version id, which the caller should write into the forecast
-    manifest so the forecast and the data it read stay tied together. Element
-    summaries are deliberately NOT copied: they are already stored per round
-    and cut exactly, so only their source stamps are recorded.
+    manifest so the forecast and the data it read stay tied together.
+
+    `news` is the resolved manual team-news overrides and `config` the settings
+    the run used: both change the minutes model and the objective, and a replay
+    that recomputed minutes without the overrides was reconstructing a decision
+    the live run never made. Element summaries are NOT copied -- see
+    SUMMARIES_NOTE -- only their source stamps are recorded.
     """
     when = captured_at or datetime.now(timezone.utc)
     version = when.strftime(VERSION_FMT)
@@ -72,6 +87,11 @@ def capture(root, gw: int, *, bootstrap: dict, fixtures, deadline: str | None,
     out.mkdir(parents=True, exist_ok=True)
     (out / "bootstrap.json").write_text(json.dumps(bootstrap), encoding="utf-8")
     (out / "fixtures.json").write_text(json.dumps(fixtures), encoding="utf-8")
+    (out / "news.json").write_text(
+        json.dumps({str(k): v for k, v in (news or {}).items()}, default=str),
+        encoding="utf-8")
+    (out / "config.json").write_text(json.dumps(config or {}, default=str),
+                                     encoding="utf-8")
     (out / "meta.json").write_text(json.dumps({
         "gw": int(gw),
         "version": version,
@@ -129,9 +149,18 @@ def load(root, gw: int, deadline: str | None = None,
     if meta is None:
         return None
     d = _gw_dir(root, gw) / meta["version"]
+
+    def _optional(name):
+        f = d / name
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+    news = {int(k): v for k, v in _optional("news.json").items()
+            if str(k).lstrip("-").isdigit()}
     return {
         "bootstrap": json.loads((d / "bootstrap.json").read_text(encoding="utf-8")),
         "fixtures": json.loads((d / "fixtures.json").read_text(encoding="utf-8")),
+        "news": news,
+        "config": _optional("config.json"),
         "meta": meta,
     }
 

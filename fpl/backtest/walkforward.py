@@ -232,8 +232,12 @@ def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
     snap = snapshots.load(root, int(gw), deadline=deadline, version=snapshot_version)
     pit = snapshots.is_point_in_time(root, int(gw), deadline=deadline,
                                      version=snapshot_version)
+    news: dict = {}
     if snap is not None and pit:
         bootstrap, raw_fixtures, source = snap["bootstrap"], snap["fixtures"], "snapshot"
+        # The manual overrides the live run applied. Recomputing minutes
+        # without them reconstructs a decision the live run never made.
+        news = dict(snap.get("news") or {})
     else:
         bootstrap, raw_fixtures, source = current_bootstrap, current_fixtures, "current cache"
         pit = False
@@ -248,6 +252,7 @@ def gameweek_inputs(root, gw: int, current_bootstrap: dict, current_fixtures,
         "point_in_time": bool(pit),
         "source": source,
         "events": bootstrap.get("events", []),
+        "news": news,
     }
 
 

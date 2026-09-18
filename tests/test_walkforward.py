@@ -309,3 +309,15 @@ def test_replay_calibration_can_be_switched_off_independently(tmp_path):
     xp = pd.DataFrame({"player_id": [1], "position": ["MID"], "xp_next1": [4.0]})
     out, note = walkforward.replay_calibration(xp, tmp_path, {}, 5, Config(calibrate=False))
     assert note == "off" and out is xp
+
+
+def test_the_replay_gets_the_overrides_the_live_run_applied(tmp_path):
+    from datetime import datetime, timezone
+    from fpl.data import snapshots
+    from fpl.backtest.walkforward import gameweek_inputs
+    news = {1: {"p_start_override": 0.9, "note": "starts", "source": "presser"}}
+    snapshots.capture(tmp_path, 5, bootstrap=_bootstrap(55, "a", 1),
+                      fixtures=_fixtures(5), deadline="2026-09-11T17:30:00Z",
+                      captured_at=datetime(2026, 9, 10, tzinfo=timezone.utc), news=news)
+    got = gameweek_inputs(tmp_path, 5, _bootstrap(99, "i", 2), _fixtures(6), summaries={})
+    assert got["news"] == news
