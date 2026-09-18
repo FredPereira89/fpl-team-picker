@@ -1,11 +1,12 @@
 # Handoff — FPL audit remediation, post-review
 
-**Status (2026-09-18):** Review 6's six findings (C6-1..C6-6) are all fixed;
-see the table below. Reviews 1–6 are closed. Review 1 (RB1–RB11) fixed at
-`ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`; review 3
-(three findings) fixed with the file's restoration; review 4 (four findings)
-and review 5 (two cleanups) fixed after. **R8 and R10 are still not started**
-and remain designed below.
+**Status (2026-09-18):** Review 6's six findings (C6-1..C6-6) are fixed, and
+Codex's RE-REVIEW of that work found two more (see "Review 6 re-review"
+below) — both now also fixed. Reviews 1–6 are closed. Review 1 (RB1–RB11)
+fixed at `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`;
+review 3 (three findings) fixed with the file's restoration; review 4 (four
+findings) and review 5 (two cleanups) fixed after. **R8 and R10 are still not
+started** and remain designed below.
 
 ### Review 6 fix progress (2026-09-18)
 
@@ -20,6 +21,15 @@ and remain designed below.
 
 Suite at time of writing this checkpoint: **723 passed, 1 warning** — all six
 review-6 findings (C6-1..C6-6) are now fixed, tested, and committed.
+
+### Review 6 re-review (2026-09-18) — Codex checked the C6 fixes, found two more, both now fixed
+
+| Finding | Fix |
+|---|---|
+| High — C6-2 not fully closed: `score_candidate()` always re-optimises the armband per candidate, so when expected-points mode kept `build_lineup`'s own captain (or a rank captain got rejected for sitting outside the exact XI), `mean_points`/`p_beat_target`/`rank_percentile` still described RANK'S captain, not the one reported. Codex's own repro: rank captain 1 mean 29.0, reported captain 2 actually scores 28.0. A second path in the same finding: a Wildcard/Free Hit can replace the entire squad AFTER rank stats were computed for the ordinary plan, leaving stale numbers attached to a squad that no longer exists. | `score_candidate()` takes an optional fixed `captain` instead of always optimising one. `_choose_squad`/`_choose_transfers` stash the samples/rival_scores/bar/target/starting_ids/penalty each candidate was scored against as a private `_ctx` on `rank_stats`. `_honour_rank_captain()` re-scores all four stats for whichever captain ends up reported (honoured or not) using that context, then strips `_ctx`. A chip override now sets `rank_stats = None` instead of leaving it attached to a squad it never describes. Regression: `tests/test_pipeline.py::test_honour_rank_captain_rescores_stats_for_the_final_captain` (pins the audit's 29.0/28.0 exactly; verified fails pre-fix via `git stash`), `::test_honour_rank_captain_rescores_even_when_the_rank_captain_is_honoured`, `::test_a_wildcard_chip_clears_the_stale_rank_stats`. Commit: "rank stats describe the final captain; chip overrides clear stale stats". |
+| High — C6-6's bench check was still greedy: `_cheapest_legal_bench()` filled each position independently, cheapest-first, with no backtracking across positions — so taking the cheapest reserve keeper from a club already near the cap could use up the only room a later position's one remaining legal candidate needed, wrongly reporting a real bench as impossible. | Replaced the per-position greedy fill with an exact depth-first search over every still-needed bench SLOT (not per position), backtracking on a club-cap conflict. Two bugs found and fixed ALONGSIDE this while stress-testing: (1) `_repair`'s own swap-candidate pool never excluded the player being removed, so a "swap" could silently re-pick itself and never change anything; (2) the search's own pruning bound (cost-so-far vs. best full solution) gave no benefit once many candidates tied on price — a routine case, not a synthetic one — so a partial path never got pruned until full depth, measured at over a second per call on a ~180-player pool; fixed with a per-slot cheapest-remaining lower bound added to the running cost, restoring sub-millisecond calls. `_repair` also now detects when its fast heuristic is about to repeat a state (a genuine 2-cycle between two players with no other legal partner, reproduced directly: the picked XI never changed across 60 traced passes) and falls back to a randomly chosen `out` instead of the deterministic one. Regression: `tests/test_rank.py::test_cheapest_legal_bench_backtracks_past_a_blocking_first_choice`, `::test_cheapest_legal_bench_stays_fast_with_many_tied_prices`, `::test_repair_escapes_a_two_player_deadlock` — all three verified to fail against pre-fix code via `git stash`. Full suite (20,000 sampled rival XIs across 50 pools with a realistic 20-club spread): 0 illegal. Commit: same as above (both findings landed together). |
+
+Suite after the re-review fixes: **729 passed, 1 warning**.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
