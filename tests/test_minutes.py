@@ -489,3 +489,28 @@ def test_the_minutes_frame_says_how_much_evidence_backs_each_start_rate():
     df = minutes_model(PLAYERS, CFG, current=current).set_index("player_id")
     assert df.loc[1, "start_evidence"] == pytest.approx(6 + PRIOR_WEIGHT_GAMES)
     assert df.loc[2, "start_evidence"] == pytest.approx(PRIOR_WEIGHT_GAMES)
+
+
+# --- R5 (slice): a side cannot start more than eleven ---
+
+def test_a_team_promising_more_than_eleven_starters_is_scaled_down():
+    from fpl.model.minutes import reconcile_team_starts
+    players = pd.DataFrame({"player_id": range(1, 15), "team_id": [1] * 14})
+    minutes = pd.DataFrame({"player_id": range(1, 15), "p_start": [0.9] * 14,
+                            "p_play": [0.93] * 14, "p_60": [0.8] * 14,
+                            "e_minutes": [75.0] * 14, "flags": [[] for _ in range(14)]})
+    out = reconcile_team_starts(minutes, players)
+    assert out["p_start"].sum() == pytest.approx(11.0)
+    assert (out["p_start"] <= out["p_play"]).all()
+    assert all("summed past eleven" in f[0] for f in out["flags"])
+
+
+def test_a_team_short_of_eleven_is_left_alone():
+    from fpl.model.minutes import reconcile_team_starts
+    players = pd.DataFrame({"player_id": range(1, 15), "team_id": [1] * 14})
+    minutes = pd.DataFrame({"player_id": range(1, 15), "p_start": [0.5] * 14,
+                            "p_play": [0.6] * 14, "p_60": [0.4] * 14,
+                            "e_minutes": [45.0] * 14, "flags": [[] for _ in range(14)]})
+    out = reconcile_team_starts(minutes, players)
+    assert out["p_start"].sum() == pytest.approx(7.0)
+    assert all(f == [] for f in out["flags"])

@@ -322,4 +322,47 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             "confidence": confidence,
             "flags": flags,
         })
-    return pd.DataFrame(rows).reset_index(drop=True)
+    return reconcile_team_starts(pd.DataFrame(rows).reset_index(drop=True), players)
+
+
+# A side starts eleven. A team whose modelled start probabilities sum past
+# this is promising more starts than exist, and every one of its players is
+# over-projected together -- exactly the correlated error a stack then buys.
+STARTERS_PER_TEAM = 11.0
+
+
+def reconcile_team_starts(minutes: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
+    """Scale a team's start probabilities DOWN so they promise at most eleven.
+
+    Each player's p_start is estimated on his own, so a squad in which every
+    fringe player has a plausible case could sum to fourteen starters. The
+    simulation then fielded more than eleven and the projection paid for
+    them. Scaling the team's starts to eleven when they exceed it keeps every
+    ordering intact and removes the shared over-promise; p_play, p_60 and
+    e_minutes follow the start branch down.
+
+    Deliberately never scales UP: a team summing to nine is more often a
+    team with genuine uncertainty over two places than one whose regulars
+    are under-rated, and inflating everyone would hand starts to players
+    the evidence does not support. The team-level shortfall is a known
+    residual of R5 (event-specific, depth-chart minutes), not fixed here.
+    """
+    if len(minutes) == 0 or "team_id" not in players.columns:
+        return minutes
+    out = minutes.copy()
+    team_of = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
+    teams = out["player_id"].astype(int).map(team_of)
+    totals = out["p_start"].groupby(teams).sum()
+    factor = teams.map(lambda t: min(1.0, STARTERS_PER_TEAM / totals[t])
+                       if t in totals.index and totals[t] > 0 else 1.0).astype(float)
+    if (factor >= 1.0 - 1e-12).all():
+        return out
+    scaled = factor < 1.0
+    for col in ("p_start", "p_play", "p_60", "e_minutes"):
+        if col in out.columns:
+            out.loc[scaled, col] = out.loc[scaled, col] * factor[scaled]
+    for i in out.index[scaled]:
+        out.at[i, "flags"] = list(out.at[i, "flags"]) + [
+            f"Start rate scaled by {factor[i]:.2f}: his side's modelled starters "
+            f"summed past eleven"]
+    return out
