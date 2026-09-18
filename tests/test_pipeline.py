@@ -729,3 +729,35 @@ def test_an_ordinary_week_is_not_flagged_as_a_chip_squad(tmp_path):
                  current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
     assert rec.chip_squad is False
     assert rec.chip_temporary is False
+
+
+# --- B7: the report shows the captain the rank layer scored ---
+
+def test_the_reported_captain_is_the_rank_layers_when_rank_decided():
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+    xp = pd.DataFrame({"player_id": [1, 2, 3], "xp_next1": [5.0, 6.0, 4.0]})
+    lineup = Lineup(xi=[1, 2, 3], bench=[], formation="x", captain=2, vice=1, xp=15.0)
+    out, stats = _honour_rank_captain(lineup, {"captain": 1, "decided_by": "rank"}, xp)
+    assert out.captain == 1 and out.vice == 2
+    assert stats["captain_reported"] is True
+
+
+def test_the_lineups_captain_stands_when_rank_only_reported():
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+    xp = pd.DataFrame({"player_id": [1, 2, 3], "xp_next1": [5.0, 6.0, 4.0]})
+    lineup = Lineup(xi=[1, 2, 3], bench=[], formation="x", captain=2, vice=1, xp=15.0)
+    out, stats = _honour_rank_captain(
+        lineup, {"captain": 1, "decided_by": "expected points over the horizon"}, xp)
+    assert out.captain == 2
+    assert stats["captain_reported"] is False
+
+
+def test_a_rank_captain_outside_the_exact_xi_is_not_forced_in():
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+    xp = pd.DataFrame({"player_id": [1, 2, 3, 9], "xp_next1": [5.0, 6.0, 4.0, 1.0]})
+    lineup = Lineup(xi=[1, 2, 3], bench=[9], formation="x", captain=2, vice=1, xp=15.0)
+    out, stats = _honour_rank_captain(lineup, {"captain": 9, "decided_by": "rank"}, xp)
+    assert out.captain == 2 and stats["captain_reported"] is False

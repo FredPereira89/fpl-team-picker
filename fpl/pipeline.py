@@ -25,7 +25,7 @@ from .model.fixtures import team_fixture_frame, fixture_counts
 from .model.xp import build_xp
 from .backtest.ledger import save_predictions, load_scored_summary
 from .model.calibration import fit_calibration, apply_calibration, scored_history
-from .model.simulate import simulate_event
+from .model.simulate import simulate_event, moment_match
 from .optimize.squad import optimize_squad, enumerate_squads, Squad
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
                             field_bar, required_rivals, RIVALS)
@@ -158,6 +158,10 @@ def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
     """Simulated player points and the field to judge candidates against."""
     ids, samples = simulate_event(players, rates, minutes, tfx, from_event,
                                   n_sims=int(cfg.rank_sims))
+    # The MILP chose on CALIBRATED projections; the samples were drawn from raw
+    # rates. Matching the means is what makes the rank layer score the squad
+    # the solver actually proposed rather than an uncalibrated cousin of it.
+    samples = moment_match(samples, ids, xp)
     rng = np.random.default_rng(0)
     rivals = sample_rival_squads(xp, n_rivals=RIVALS, rng=rng)
     rival_scores = squad_scores(rivals, samples)
@@ -166,6 +170,37 @@ def _rank_context(xp, players, rates, minutes, tfx, cfg, from_event):
     bar = (field_bar(xp, samples, target, rng, n_rivals=n_needed)
            if n_needed > RIVALS else None)
     return ids, samples, rival_scores, target, n_needed, bar
+
+
+def _honour_rank_captain(lineup, rank_stats, xp):
+    """Report the armband the rank layer actually scored, when it decided.
+
+    `pick_best_squad` records its own optimal captain per candidate, and the
+    pipeline used to discard it and let `build_lineup` choose a mean-based one
+    -- so the displayed team was not the team whose P(beat target) selected
+    it. When the rank layer made the decision (a Mode 1 squad choice, or
+    transfers with `rank_transfers` on), its captain is reported, provided he
+    is in the exact one-week XI; otherwise the lineup's own choice stands and
+    `rank_stats["captain_reported"]` says so. When rank only reported, the
+    lineup's captain is the decision and nothing changes.
+    """
+    if not rank_stats:
+        return lineup, rank_stats
+    decided = rank_stats.get("decided_by", "rank") == "rank"
+    captain = rank_stats.get("captain")
+    stats = dict(rank_stats)
+    if not decided or captain is None or int(captain) not in set(lineup.xi):
+        stats["captain_reported"] = False
+        return lineup, stats
+    captain = int(captain)
+    if captain != lineup.captain:
+        from dataclasses import replace
+        frame = xp.set_index("player_id")
+        others = [i for i in lineup.xi if i != captain]
+        vice = max(others, key=lambda i: (float(frame.loc[i, "xp_next1"]), -i))
+        lineup = replace(lineup, captain=captain, vice=vice)
+    stats["captain_reported"] = True
+    return lineup, stats
 
 
 def _rank_stats(scored, index, n_candidates, target, n_rivals) -> dict:
@@ -482,6 +517,7 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         squad_ids, starting_ids = squad.player_ids, squad.starting_ids
 
     lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
+    lineup, rank_stats = _honour_rank_captain(lineup, rank_stats, xp)
 
     team_by_player = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
     # Chips already spent, DATED, from local state merged with FPL's own record.

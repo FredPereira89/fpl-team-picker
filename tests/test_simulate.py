@@ -143,3 +143,30 @@ def test_an_unavailable_player_scores_zero_in_every_scenario():
              ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
     ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=400)
     assert samples[ids.index(4)].max() == 0.0
+
+
+# --- B7: samples must describe the CALIBRATED projection ---
+
+def test_moment_matching_makes_sample_means_equal_the_calibrated_projection():
+    """The MILP chose on calibrated numbers while the rank layer scored
+    candidates on raw-rate samples, so the squad that beat the field most
+    often was judged on a distribution that did not describe it."""
+    from fpl.model.simulate import moment_match
+    ids, samples = _sim(n_sims=4000)
+    calibrated = pd.DataFrame({"player_id": ids,
+                               "xp_next1": [samples[i].mean() * 1.3 for i in range(len(ids))]})
+    matched = moment_match(samples, ids, calibrated)
+    for i, pid in enumerate(ids):
+        assert matched[i].mean() == pytest.approx(float(calibrated.set_index("player_id").loc[pid, "xp_next1"]), rel=1e-9)
+    # Shape preserved: zeros stay zeros and the ordering of scenarios holds.
+    assert ((samples == 0) == (matched == 0)).all()
+
+
+def test_moment_matching_leaves_a_zero_mean_player_alone():
+    from fpl.model.simulate import moment_match
+    mins = MINUTES.copy()
+    mins.loc[mins.player_id == 4, ["p_start", "p_play", "p_60", "e_minutes"]] = 0.0
+    ids, samples = simulate_event(PLAYERS, RATES, mins, TFX, event=1, n_sims=300, seed=0)
+    calibrated = pd.DataFrame({"player_id": ids, "xp_next1": [2.0] * len(ids)})
+    matched = moment_match(samples, ids, calibrated)
+    assert matched[list(ids).index(4)].sum() == 0

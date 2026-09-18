@@ -141,3 +141,24 @@ def _simulate_fixture(R, M, positions, fx, n_sims, rng) -> np.ndarray:
     pts += is_keeper * (saves // SAVES_PER_POINT)
     pts -= cards
     return pts.astype(float)
+
+
+def moment_match(samples: np.ndarray, ids: list[int], xp: pd.DataFrame,
+                 xp_col: str = "xp_next1") -> np.ndarray:
+    """Rescale each player's samples so their mean equals his projected `xp_col`.
+
+    The simulation draws from RAW rates and minutes. Once per-position
+    calibration has moved the projection, the MILP is choosing on calibrated
+    numbers while the rank layer scores candidates on samples whose means are
+    the old ones -- so the squad that "beats the field most often" is judged
+    on a distribution that does not describe it. Scaling each row by
+    calibrated / simulated mean keeps the shape (zeros stay zeros, the tail
+    stays a tail) and makes the two agree exactly on the mean. A player whose
+    simulated mean is zero has nothing to scale and is left alone.
+    """
+    target = xp.set_index("player_id").reindex(ids)[xp_col].astype(float).to_numpy()
+    means = samples.mean(axis=1)
+    factor = np.ones_like(means)
+    ok = (means > 1e-9) & np.isfinite(target)
+    factor[ok] = target[ok] / means[ok]
+    return samples * factor[:, None]
