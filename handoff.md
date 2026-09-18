@@ -1,13 +1,16 @@
 # Handoff — FPL audit remediation, post-review
 
-**Review status:** five Codex reviews so far. Review 1 (RB1–RB11) fixed at
+**Status (2026-09-18, end of Claude session):** P0, P1 and P2 complete;
+P3 partially complete — R4 (starts), R5 (team-start slice), R6 (three of four
+parts), R7, R9 (window fix) and Brier scoring done; **R8 and R10 not started,
+designed below.** Five Codex reviews so far, all findings closed. Review 1 (RB1–RB11) fixed at
 `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`; review 3
 (three findings, below) fixed with the file's restoration; review 4 (four
 findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **705 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **707 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -70,9 +73,86 @@ Codex's re-review findings are kept below for the record.
 | Proper probability scoring | **done (Brier)** — `ledger.brier()` / `probability_scores()`: Brier, climatology baseline, skill, reliability bins for `p_play` and `p_60`; printed in `scored_summary`. `p_60` added to the forecast contract. CRPS on points still needs stored per-player distributions. | `fpl/backtest/ledger.py` |
 | R6 cold starts / stale overrides | **done (three of four parts)** — exposure-weighted positional priors (`scoring.per90_rates`); form weight capped by minutes/90 (`scoring.form_weight`); stale overrides decay by half per freshness budget of extra age (`minutes.override_trust`). NOT done: a cross-league prior for newcomers (needs external data). | `fpl/model/scoring.py`, `fpl/model/minutes.py` |
 | R4 confidence into the distribution | **done (starts)** — `minutes.start_evidence` (games behind `p_start`); `simulate._on_pitch` draws `p_start` per scenario from Beta(p·n, (1−p)·n), mean preserved; `pipeline._p_gain_positive` reports P(net gain over holding > 0) for the chosen transfer (diagnostic only). NOT done: posterior draws for per-90 rates and team strengths. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
-| R5 event-specific team-coherent minutes | not started (large) | |
-| R8 multi-period MILP | not started (large) | |
-| R10 BPS rebuild | not started (large) | |
+| R5 event-specific team-coherent minutes | **slice done** — `minutes.reconcile_team_starts` scales a side's starts down to eleven (never up). Open: per-event minute distributions, depth chart, injury redistribution to named deputies, override event ranges. | `fpl/model/minutes.py` |
+| R8 multi-period MILP | **not started — design below** | `fpl/optimize/transfers.py` (new module `fpl/optimize/multiperiod.py` suggested) |
+| R10 BPS rebuild | **not started — design below** | `fpl/model/bps.py`, `fpl/model/simulate.py` |
+
+### Behaviour changes in this session, for the next live run
+
+- **Mode 1 now decides on expected points** (R1). `optimizer.rank_squad: true`
+  restores rank-decided squads. The report says which objective decided.
+- **The reported XI is re-picked for the week** (B8); the solver's horizon XI
+  is no longer what you see. `build_lineup(exact=False)` gives the old one.
+- **Player goals are capped at the team total** (R7): strong attacks project a
+  little lower than before when their players' xG summed past the side's.
+- **A teammate's xP moves when you override one player's minutes** — intended
+  (team-total cap). Other clubs do not move.
+- **Stale overrides fade** rather than applying at full weight; the flag says
+  the weight applied.
+- **Chip holds stop at GW19 in the first half** (R9).
+- The transfer section shows *"comes out ahead of holding N% of the time"*
+  from the scenarios (R4). It is a diagnostic; the expected gain still decides.
+
+### R8 — rolling multi-period transfer MILP: design
+
+Why: the weekly solver picks one move now and holds a fixed 15 for the
+horizon. Future free transfers, bank, selling values and future buys do not
+exist in it, so a small positive gain spends an FT that had option value, and
+a gain in GW+4 is credited now even if the move could wait.
+
+Shape (mirrors open-fpl-solver; keep it to 4–6 gameweeks, never 38):
+
+- Variables per player `p` and gameweek `g` in the horizon: `owned[p,g]`,
+  `start[p,g]`, `tin[p,g]`, `tout[p,g]`, captain/vice via
+  `objective.add_captaincy` per event (already per-event), bench slots per
+  event (`add_bench` needs an event index). Per gameweek: `bank[g] >= 0`,
+  `ft[g] in 0..5`, `hits[g] >= 0` integer.
+- Constraints: `owned[p,g] = owned[p,g-1] + tin[p,g] - tout[p,g]`; squad
+  composition 2/5/5/3 and club cap per `g`; `bank[g] = bank[g-1] + Σ sell·tout
+  - Σ price·tin` with selling value from `transfers.selling_price` against
+  recorded purchase prices for the initial squad and **purchase price =
+  price at buy** for players bought inside the horizon (price changes are not
+  modelled; note it); `Σ tin[.,g] <= ft[g] + hits[g]`; `ft[g] = min(5,
+  ft[g-1] - Σ tin[.,g-1] + hits[g-1] + 1)` linearised with a binary for the
+  cap; chips as optional binaries only if scope allows (start without).
+- Objective: `Σ_g decay^(g-g0) · (Σ start·xp_gw{g} + captain + bench terms
+  - hit_cost·hits[g]) + terminal value` where terminal value =
+  `ft_value · ft[G]` with `ft_value` a config knob to be estimated by replay,
+  not guessed (start at 1.5 xP).
+- Pool pruning: top ~150 players by `xp_horizon` plus everyone owned, or CBC
+  will not finish. Keep `enumerate_transfer_plans` as the candidate generator
+  and expose the multi-period plan as one more candidate first.
+- Replay integration: `expected_points_policy` swaps in the multi-period
+  first-week move; compare against the current policy in
+  `run_walkforward.py` before making it the default.
+
+### R10 — projected BPS from simulated events: design
+
+Why: bonus is carried as historical `bonus90`, fixture-scaled, and drawn
+independently per player. Only the top three BPS in a match score bonus, so
+bonus is a within-match ranking, not an independent rate.
+
+- In `simulate._score_side` the events already exist per scenario: goals,
+  assists, clean sheet, minutes, saves, cards. Add a BPS table (current
+  rules: 60+ mins 6 / <60 3, goal by position, assist, CS by position, saves
+  per 2, cards, etc.) and compute per-player BPS per scenario for BOTH sides
+  of the fixture (needs the two `_score_side` calls to share a scratch
+  array, or a `_bonus_for_match` pass after both).
+- Rank the match's participants per scenario; award 3/2/1 with FPL's tie
+  rules (ties share the higher award and the next is skipped accordingly).
+- Marginal means will move: calibrate a per-position multiplier so the
+  match-average bonus matches `bonus90`-implied totals, or accept the shift
+  and re-score. Add the GK save component to the same table.
+- Keep the old independent binomial as a `--legacy-bonus` challenger in the
+  replay for one comparison.
+
+### Open residuals worth knowing
+
+- Assists are still drawn independently of goals in the simulation.
+- The oracle in the replay is a one-week rebuild; the multi-period MILP (R8)
+  would give a fairer executable comparison.
+- No cross-league prior for newcomers (R6 part four); no cohort picks for the
+  rival field (R2 second half); no per-event minutes (R5 remainder).
 
 ## Re-review findings
 
@@ -448,22 +528,11 @@ Still a handful of gameweeks; still not a verdict.
 
 ## Still-open model work (after the blockers)
 
-The earlier P2 list remains valid:
-
-- **B8:** use per-event lineups or at least an exact one-week XI for the report.
-- **B7:** align calibrated xP with simulation means and report the captain the
-  selected objective actually scored.
-- **R3:** simulate both sides of a fixture coherently so a goal and opposing clean
-  sheet cannot coexist in the same scenario.
-- **R2:** calibrate rival squads from real rank-cohort ownership/picks when data
-  exists; meanwhile enforce generated-rival budget and club legality.
-- **R1:** decide explicitly whether Mode 1 should use discounted expected points
-  by default and leave threshold/rank utility as an opt-in chase mode.
-
-Unchanged P3 items: R4 confidence propagation, R5 team/event minutes scenarios,
-R6 cold starts and override staleness, R7 attack-strength double counting, R8
-multi-period transfer/FT option value, R9 chip opportunity value beyond the
-horizon, and R10 goalkeeper/bonus structure.
+P2 is complete (B6, B7, B8, R1, R2-achievable, R3). Of P3, R4 (starts), R5
+(team-start slice), R6 (three parts), R7, R9 (window fix) and Brier scoring
+are done -- see the P3 progress table. Remaining in full: **R8** and **R10**,
+designed above. Remaining in part: R2 (cohort picks), R4 (rate and strength
+posteriors), R5 (event-specific minutes), R6 (newcomer prior).
 
 ## Recommended implementation order (steps 1–5 done 2026-09-18)
 
