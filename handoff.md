@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **697 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **701 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -68,7 +68,7 @@ Codex's re-review findings are kept below for the record.
 | R9 chip timing beyond the horizon | **window fix done** — holds/patience/FH blank search bounded by the current chip window (GW19 for the first set). Still structure-based past the xP horizon (no chip-value projection); that remainder is documented, not built. | `fpl/optimize/chips.py` |
 | R7 attack double-count | **done** — `xp.team_goal_scales()` caps each player's fixture goals at his share of the side's expected total (the opponent's `xgc`), the same rule as `simulate._allocate`; xP and simulation now agree. Assists are not capped (no team-assist total exists). | `fpl/model/xp.py` |
 | Proper probability scoring | **done (Brier)** — `ledger.brier()` / `probability_scores()`: Brier, climatology baseline, skill, reliability bins for `p_play` and `p_60`; printed in `scored_summary`. `p_60` added to the forecast contract. CRPS on points still needs stored per-player distributions. | `fpl/backtest/ledger.py` |
-| R6 cold starts / stale overrides | planned — exposure-weighted positional priors; form blend by effective minutes; stale overrides decay toward the model | `fpl/model/scoring.py`, `fpl/model/minutes.py`, `fpl/data/overrides.py` |
+| R6 cold starts / stale overrides | **done (three of four parts)** — exposure-weighted positional priors (`scoring.per90_rates`); form weight capped by minutes/90 (`scoring.form_weight`); stale overrides decay by half per freshness budget of extra age (`minutes.override_trust`). NOT done: a cross-league prior for newcomers (needs external data). | `fpl/model/scoring.py`, `fpl/model/minutes.py` |
 | R4 confidence into the distribution | not started (posterior draws for p_start / rates) | |
 | R5 event-specific team-coherent minutes | not started (large) | |
 | R8 multi-period MILP | not started (large) | |
