@@ -323,7 +323,18 @@ def p_beat_target(my_scores: np.ndarray, rival_scores: np.ndarray,
     beat the field, which is precisely when a differential has to fire.
     """
     bar = np.quantile(np.asarray(rival_scores, dtype=float), float(target), axis=0)
-    return float(np.mean(np.asarray(my_scores, dtype=float) > bar))
+    return _clear_rate(np.asarray(my_scores, dtype=float), bar)
+
+
+def _clear_rate(mine: np.ndarray, bar: np.ndarray) -> float:
+    """P(clear the bar), with a tie worth half.
+
+    A strict `>` gave no credit for landing exactly on the bar, which in whole
+    FPL points happens often -- and most often to template-heavy squads, whose
+    scores cluster with the field's. Tied classic-league teams share a
+    position after the transfer tiebreak, so half credit is the honest value.
+    """
+    return float(np.mean(mine > bar) + 0.5 * np.mean(mine == bar))
 
 
 def best_captain_by_rank(xi: list[int], ids: list[int], samples: np.ndarray,
@@ -478,4 +489,4 @@ def field_bar(xp_df: pd.DataFrame, samples: np.ndarray, target: float,
 
 def p_beat_bar(my_scores: np.ndarray, bar: np.ndarray) -> float:
     """P(this squad clears a per-simulation bar), as returned by `field_bar`."""
-    return float(np.mean(np.asarray(my_scores, dtype=float) > np.asarray(bar, dtype=float)))
+    return _clear_rate(np.asarray(my_scores, dtype=float), np.asarray(bar, dtype=float))

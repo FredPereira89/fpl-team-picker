@@ -761,3 +761,19 @@ def test_a_rank_captain_outside_the_exact_xi_is_not_forced_in():
     lineup = Lineup(xi=[1, 2, 3], bench=[9], formation="x", captain=2, vice=1, xp=15.0)
     out, stats = _honour_rank_captain(lineup, {"captain": 9, "decided_by": "rank"}, xp)
     assert out.captain == 2 and stats["captain_reported"] is False
+
+
+# --- R1: Mode 1 decides on expected points, rank reports ---
+
+def test_mode_one_returns_the_xp_optimum_and_reports_rank(tmp_path):
+    rec, _ = run(Config(rank_sims=300, rank_candidates=3, budget=100.0),
+                 mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.rank is not None
+    assert rec.rank["decided_by"] == "expected points over the horizon"
+    assert "rank_would_choose" in rec.rank
+
+
+def test_mode_one_lets_rank_decide_only_when_asked(tmp_path):
+    rec, _ = run(Config(rank_sims=300, rank_candidates=3, budget=100.0, rank_squad=True),
+                 mode=1, from_event=1, root=tmp_path, client=FakeClient())
+    assert rec.rank["decided_by"] == "rank"

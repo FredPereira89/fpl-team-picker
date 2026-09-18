@@ -67,6 +67,12 @@ class Config:
     # gaining 8 over four weeks lost to a one-week move, and a hit with strong
     # payback was close to unselectable. The horizon decides instead.
     rank_transfers: bool = False
+    # The same switch for a Mode 1 squad build. Off by default: P(beat the
+    # median this week) is neither expected points nor expected rank, and a
+    # team can win that one-week threshold while carrying a lower mean and a
+    # worse expected finish. Discounted expected points decide; the rank
+    # layer reports. Turn on to chase a specific weekly threshold deliberately.
+    rank_squad: bool = False
     # Recalibrate xP per position against scored gameweeks (model.calibration).
     # Self-limiting: it refuses to fit below MIN_GAMEWEEKS, so early in a season
     # this is a no-op rather than a correction built from noise.
@@ -107,6 +113,7 @@ def load_config(path: Path) -> Config:
         rank_candidates=int(opt.get("rank_candidates", d.rank_candidates)),
         rank_diversity=int(opt.get("rank_diversity", d.rank_diversity)),
         rank_transfers=bool(opt.get("rank_transfers", d.rank_transfers)),
+        rank_squad=bool(opt.get("rank_squad", d.rank_squad)),
         calibrate=bool(model.get("calibrate", d.calibrate)),
         rank_target=float(opt.get("rank_target", d.rank_target)),
         free_transfers=int(raw.get("free_transfers", d.free_transfers)),

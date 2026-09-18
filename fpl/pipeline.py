@@ -346,10 +346,23 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     # percentile, and "top of FPL" lives far beyond it.
     ids, samples, rival_scores, target, n_needed, bar = _rank_context(
         xp, players, rates, minutes, tfx, cfg, from_event)
-    best, scored = pick_best_squad(candidates, ids, samples, rival_scores,
-                                   target=target, bar=bar)
-    return best, _rank_stats(scored, candidates.index(best), len(candidates),
-                             target, n_needed)
+    chosen, scored = pick_best_squad(candidates, ids, samples, rival_scores,
+                                     target=target, bar=bar)
+    if bool(getattr(cfg, "rank_squad", False)):
+        stats = _rank_stats(scored, candidates.index(chosen), len(candidates),
+                            target, n_needed)
+        stats["decided_by"] = "rank"
+        return chosen, stats
+    # Expected points decide -- candidates[0] is the solver's optimum -- and
+    # the rank layer only reports how that squad fares. A one-week
+    # median-beat probability is neither expected points nor expected rank,
+    # and letting it overrule the objective traded mean for the wrong kind of
+    # variance every week by default.
+    best = candidates[0]
+    stats = _rank_stats(scored, 0, len(candidates), target, n_needed)
+    stats["decided_by"] = "expected points over the horizon"
+    stats["rank_would_choose"] = candidates.index(chosen)
+    return best, stats
 
 
 def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,

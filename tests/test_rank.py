@@ -397,3 +397,13 @@ def test_a_pool_without_club_or_price_columns_still_samples():
                                                     if c in POOL.columns]),
                                  n_rivals=20, rng=np.random.default_rng(0))
     assert rivals.shape[0] == 20
+
+
+# --- R1: ties on the bar are worth half ---
+
+def test_landing_exactly_on_the_bar_is_worth_half():
+    from fpl.optimize.rank import p_beat_target, p_beat_bar
+    rivals = np.array([[10.0, 10.0, 10.0]] * 5)        # field median = 10 everywhere
+    mine = np.array([10.0, 11.0, 9.0])
+    assert p_beat_target(mine, rivals, 0.5) == pytest.approx((1 + 0.5 + 0) / 3)
+    assert p_beat_bar(mine, np.array([10.0, 10.0, 10.0])) == pytest.approx(0.5)

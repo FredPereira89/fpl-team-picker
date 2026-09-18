@@ -147,3 +147,13 @@ def test_the_rank_layer_does_not_decide_transfers_by_default(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text("optimizer:\n  rank_transfers: true\n")
     assert load_config(p).rank_transfers is True
+
+
+def test_the_rank_layer_does_not_decide_the_mode_one_squad_by_default(tmp_path):
+    """A one-week median-beat probability is neither expected points nor
+    expected rank; a squad can win that threshold with a lower mean and a
+    worse expected finish. It is now an explicit opt-in, like rank_transfers."""
+    assert Config().rank_squad is False
+    p = tmp_path / "config.yaml"
+    p.write_text("optimizer:\n  rank_squad: true\n")
+    assert load_config(p).rank_squad is True
