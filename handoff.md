@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **694 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **697 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -67,7 +67,7 @@ Codex's re-review findings are kept below for the record.
 |---|---|---|
 | R9 chip timing beyond the horizon | **window fix done** — holds/patience/FH blank search bounded by the current chip window (GW19 for the first set). Still structure-based past the xP horizon (no chip-value projection); that remainder is documented, not built. | `fpl/optimize/chips.py` |
 | R7 attack double-count | **done** — `xp.team_goal_scales()` caps each player's fixture goals at his share of the side's expected total (the opponent's `xgc`), the same rule as `simulate._allocate`; xP and simulation now agree. Assists are not capped (no team-assist total exists). | `fpl/model/xp.py` |
-| Proper probability scoring | planned — Brier + reliability bins for p_play (minutes>0) and p_60 (minutes≥60) in `ledger.score_gameweek`; CRPS for points needs per-player distributions the ledger does not store yet | `fpl/backtest/ledger.py` |
+| Proper probability scoring | **done (Brier)** — `ledger.brier()` / `probability_scores()`: Brier, climatology baseline, skill, reliability bins for `p_play` and `p_60`; printed in `scored_summary`. `p_60` added to the forecast contract. CRPS on points still needs stored per-player distributions. | `fpl/backtest/ledger.py` |
 | R6 cold starts / stale overrides | planned — exposure-weighted positional priors; form blend by effective minutes; stale overrides decay toward the model | `fpl/model/scoring.py`, `fpl/model/minutes.py`, `fpl/data/overrides.py` |
 | R4 confidence into the distribution | not started (posterior draws for p_start / rates) | |
 | R5 event-specific team-coherent minutes | not started (large) | |
