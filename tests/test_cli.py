@@ -583,3 +583,17 @@ def test_forecast_version_flag_pins_the_marked_version(monkeypatch, tmp_path):
                                   "--config", str(_REPO / "config.yaml")])
     assert code == 0
     assert manifest.select_version(root, 8)["version"] == "v0"
+
+
+def test_a_different_chip_in_the_same_gameweek_is_refused(monkeypatch, capsys):
+    """Re-confirming the same chip is idempotent; swapping a recorded Bench
+    Boost for a Wildcard in the same gameweek is a second active chip."""
+    run_gameweek, written = _confirm_harness(
+        monkeypatch, list(range(1, 16)),
+        chip_events=[{"chip": "benchboost", "event": 8}])
+    code = run_gameweek.main(["--mode", "2", "--gw", "8", "--confirm", "--no-refresh",
+                              "--applied-chip", "wildcard",
+                              "--config", str(_REPO / "config.yaml")])
+    assert code == 1
+    assert "Refusing" in capsys.readouterr().out
+    assert "called" not in written

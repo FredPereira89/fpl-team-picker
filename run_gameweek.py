@@ -170,9 +170,13 @@ def main(argv: list[str] | None = None) -> int:
         # The advisor and the replay both refuse an illegal chip; confirmation
         # must too, or a typo or a second same-window chip lands in state and
         # every later run reasons from a chip history that never happened.
-        # Only chips played in OTHER gameweeks count here: a same-gameweek
-        # re-confirmation of the same chip is idempotent, not a second use.
-        earlier = [e for e in chip_events if e.get("event") != args.gw]
+        # A same-gameweek re-confirmation of the SAME chip is idempotent, not a
+        # second use, so that one record is set aside. Only that one: dropping
+        # every same-gameweek record let a recorded Bench Boost be replaced by a
+        # Wildcard in the same week, which breaks one-active-chip.
+        earlier = [e for e in chip_events
+                   if not (e.get("event") == args.gw
+                           and canonical_chip(e.get("chip")) == chip)]
         blocked = chip_blocked_reason(chip, args.gw, earlier, first_event) if chip else None
         if blocked:
             print(f"\nRefusing to record {chip} for GW{args.gw}: {blocked}. "
