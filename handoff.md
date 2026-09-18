@@ -7,7 +7,7 @@ findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **678 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **681 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -57,7 +57,7 @@ Codex's re-review findings are kept below for the record.
 | B8 exact one-week XI for the report | **done** — `lineup.best_xi()` enumerates legal formations; `build_lineup(exact=True)` is the default and the replay's armband goes through it | `fpl/optimize/lineup.py` |
 | B7a simulated means agree with calibrated xP | **done** — `simulate.moment_match()` scales each player's samples to `xp_next1` inside `pipeline._rank_context` | `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | B7b report the captain the rank layer scored | **done** — `pipeline._honour_rank_captain()`; `rank_stats["captain_reported"]` says whether it applied | `fpl/pipeline.py` |
-| R3 coherent match scenarios | not started — plan: `simulate_event` loops per FIXTURE; team A's goals ~ Poisson(B's `xgc`), allocated to A's on-pitch players with per-sim shares `w_i / max(Σw, xgc)` so attacker marginals are preserved when the player total is within the team total and scaled to it otherwise; B's `conceded_team` is that same draw, so a goal against a clean sheet in the same match is impossible. Assists and bonus stay independent (documented residual; R10 is P3). A lone team row (no opponent in `tfx`) falls back to G ~ Poisson(Σw). | `fpl/model/simulate.py` |
+| R3 coherent match scenarios | **done** — `simulate_event` runs per fixture; a side's goals are Poisson at the opponent's `xgc` and that draw IS the opponent's conceded count; goals allocated to on-pitch players with shares `w_i / max(Σw, λ)` (means preserved, or scaled to the team total when the player sum exceeds it — the R7 remedy). Assists and bonus still independent (documented residual). `simulate_event_detailed` exposes goals/conceded per scenario. | `fpl/model/simulate.py` |
 | R2 rival field legality | not started — enforce budget/club cap in `rank.sample_rival_squads`; cohort picks need data the repo does not fetch | `fpl/optimize/rank.py` |
 | R1 Mode 1 objective | needs a decision from the user (see "Still-open model work") | — |
 
