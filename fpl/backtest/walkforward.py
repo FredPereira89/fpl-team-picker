@@ -324,8 +324,11 @@ def config_for_replay(cfg, archived: dict | None):
     """
     from dataclasses import fields, replace
     if not archived:
-        return cfg, []
+        # A COPY, never the caller's object: the script mutates the result
+        # (rank_sims, rank_transfers) per week, and doing that to the shared
+        # fallback config changed the baseline every later week started from.
+        return replace(cfg), []
     known = {f.name for f in fields(cfg)}
     updates = {k: v for k, v in archived.items() if k in known}
     changed = sorted(k for k, v in updates.items() if getattr(cfg, k) != v)
-    return (replace(cfg, **updates) if updates else cfg), changed
+    return replace(cfg, **updates), changed

@@ -386,9 +386,13 @@ def test_the_replay_returns_and_applies_the_archived_config(tmp_path):
     assert not hasattr(week_cfg, "not_a_real_field")
 
 
-def test_no_archived_config_means_todays_config_unchanged():
+def test_no_archived_config_returns_an_equal_copy_not_the_shared_object():
+    """The script mutates the result per week; mutating the shared fallback
+    changed the baseline every later week started from."""
     from fpl.config import Config
     from fpl.backtest.walkforward import config_for_replay
     cfg = Config(horizon_gw=5)
     out, changed = config_for_replay(cfg, {})
-    assert out is cfg and changed == []
+    assert out == cfg and out is not cfg and changed == []
+    out.rank_sims = 0
+    assert cfg.rank_sims != 0

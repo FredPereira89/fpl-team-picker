@@ -149,6 +149,7 @@ def main() -> int:
     results = {}
     xp_by_gw = {}
     cfg_by_gw = {}
+    archived_by_gw = {}
     config_notes = []
     for gw in played:
         # Prices, availability, news, clubs and fixtures AS OF THE DEADLINE when
@@ -168,15 +169,18 @@ def main() -> int:
         # archived config had opted back into rank-decided transfers, which
         # this replay does not implement. That week is then a current-policy
         # challenger, not a replay of what the tool did, and is labelled.
+        archived = bool(inputs["config"])
         if bool(getattr(week_cfg, "rank_transfers", False)):
-            config_notes.append(f"GW{gw}: archived config had rank_transfers=true; the "
-                                f"replay does not implement rank-decided transfers, so "
-                                f"this week is replayed as the expected-points policy "
-                                f"(current-policy challenger, not an exact replay)")
+            origin = "its archived config" if archived else "today's fallback config"
+            config_notes.append(f"GW{gw}: {origin} has rank_transfers=true; the replay "
+                                f"does not implement rank-decided transfers, so this "
+                                f"week runs the expected-points policy (current-policy "
+                                f"challenger, not an exact replay)")
         week_cfg.rank_sims = 0
         week_cfg.rank_transfers = False
         cfg_by_gw[gw] = week_cfg
-        if changed:
+        archived_by_gw[gw] = archived
+        if archived and changed:
             config_notes.append(f"GW{gw}: replayed under its archived config "
                                 f"({', '.join(changed)} differ from today's)")
         seen = forecast_inputs(summaries, before_event=gw)
@@ -262,7 +266,7 @@ def main() -> int:
         print()
         for line in config_notes:
             print(f"  {line}")
-    if any(gw not in cfg_by_gw or cfg_by_gw[gw] is cfg for gw in played):
+    if any(not archived_by_gw.get(gw) for gw in played):
         print("  Gameweeks without an archived config were replayed under today's "
               "settings: a current-configuration challenger, not an exact replay.")
     print()

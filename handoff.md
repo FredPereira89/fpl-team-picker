@@ -1,12 +1,13 @@
 # Handoff — FPL audit remediation, post-review
 
-**Review status:** three Codex reviews so far. Review 1 (RB1–RB11) fixed at
+**Review status:** five Codex reviews so far. Review 1 (RB1–RB11) fixed at
 `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`; review 3
-(three findings, below) fixed in the commit that also restored this file.
+(three findings, below) fixed with the file's restoration; review 4 (four
+findings) and review 5 (two cleanups) fixed after.
 
 **Branch:** `master` — see `git log` for HEAD; every fix commit names its finding.
 
-**Verification:** `python -m pytest -q` → **667 passed, 1 warning**.
+**Verification:** `python -m pytest -q` → **670 passed, 1 warning**.
 `python scripts/run_walkforward.py --through 3 --no-save` runs end to end with
 the pinned-snapshot, calibrated, horizon-start path.
 
@@ -38,6 +39,14 @@ the pinned-snapshot, calibrated, horizon-start path.
 | 2. `rank_sims = 0` silently overrode an archived `rank_transfers=true` | Not implemented in the replay; such a week is now explicitly labelled a current-policy challenger in the output. |
 | 3. Replay provenance hashed today's config | `save_predictions` receives `week_cfg`. |
 | 4. Stale B4 row and replay paragraph | Corrected. |
+
+### Fifth review (2026-09-18)
+
+| Finding | Fix |
+|---|---|
+| 1. `config_for_replay` returned the shared fallback object, which the script then mutated | Always returns a copy; the rank-transfer note distinguishes an archived config from today's fallback. |
+| 2. Stale header counts | Corrected. |
+| 3. Claude misread the smoke run: 164/160 vs 101/100 were three- vs two-gameweek totals, not a config effect — GW1–3 have no archived config in this checkout | Acknowledged; no code change. |
 
 Codex's re-review findings are kept below for the record.
 
