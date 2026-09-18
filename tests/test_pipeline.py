@@ -176,7 +176,11 @@ def test_news_override_reaches_the_minutes_model(tmp_path):
 
     assert p_start_of(cut, 5) < p_start_of(base, 5)
     assert xp_of(cut, 5) < xp_of(base, 5)
-    assert xp_of(cut, 6) == xp_of(base, 6), "other players must be untouched"
+    # A TEAMMATE may move: under the team-total cap (model.xp.team_goal_scales)
+    # a benched attacker's share of the side's goals passes to the others, and
+    # it should. A player at another club has no such link and must not move.
+    assert xp_of(cut, 6) >= xp_of(base, 6)          # same club as player 5
+    assert xp_of(cut, 25) == xp_of(base, 25), "other clubs must be untouched"
 
 
 def test_clean_sheet_value_tracks_the_baseline_league_goal_rate(tmp_path):
