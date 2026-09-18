@@ -163,7 +163,11 @@ def actuals_from_summaries(summaries: dict[int, dict], gw: int) -> pd.DataFrame:
     """Actual points and minutes for one gameweek, from element-summary history.
 
     A double gameweek gives a player two rows in the same round, and FPL scores
-    both, so rows are summed rather than deduplicated.
+    both, so rows are summed rather than deduplicated. `fixture_count` is how
+    many rows matched -- 1 for an ordinary week, 2+ for a double -- kept
+    alongside the sums because `probability_scores` needs it: `p_play`/`p_60`
+    are single-fixture forecasts, and a double's fixture count is what tells
+    the scorer it cannot honestly compare them against gameweek-total minutes.
     """
     rows = []
     for pid, summary in (summaries or {}).items():
@@ -174,9 +178,13 @@ def actuals_from_summaries(summaries: dict[int, dict], gw: int) -> pd.DataFrame:
                     "actual": float(h.get("total_points", 0)),
                     "minutes": float(h.get("minutes", 0)),
                 })
+    cols = ["player_id", "actual", "minutes", "fixture_count"]
     if not rows:
-        return pd.DataFrame(columns=["player_id", "actual", "minutes"])
-    return pd.DataFrame(rows).groupby("player_id", as_index=False).sum()
+        return pd.DataFrame(columns=cols)
+    grouped = pd.DataFrame(rows).groupby("player_id", as_index=False).agg(
+        actual=("actual", "sum"), minutes=("minutes", "sum"),
+        fixture_count=("actual", "size"))
+    return grouped[cols]
 
 
 CANDIDATE_POOL = 60
@@ -314,12 +322,30 @@ def probability_scores(df: pd.DataFrame) -> dict:
     `p_play` against minutes > 0, `p_60` against minutes >= 60. `p_start` has
     no counterpart in the actuals frame (it records minutes, not starts) and is
     deliberately not scored against a proxy.
+
+    `p_play`/`p_60` are SINGLE-FIXTURE probabilities -- FPL's appearance and
+    60-minute bonus are both awarded per match -- while `minutes` here is the
+    GAMEWEEK total. For a double that mismatch is not cosmetic: a single-match
+    p_play understates the true "played at all this gameweek" chance (two
+    independent tries beat one), and gameweek-total minutes crossing 60 cannot
+    tell "reached it in one match of two" from a 35+35 split that reached it
+    in neither. So only single-fixture player-gameweeks (`fixture_count == 1`)
+    are scored; a blank never reaches here at all (no actuals row exists for
+    a round with no fixture, so it is excluded by the caller's merge before
+    this function ever sees it). A missing `fixture_count` column -- an older
+    caller, or a frame already known to be single-fixture-only -- is treated
+    as "assume 1" so existing behaviour is unchanged.
     """
     out = {}
-    if "p_play" in df.columns and "minutes" in df.columns:
-        out["p_play"] = brier(df["p_play"], (df["minutes"].astype(float) > 0).astype(float))
-    if "p_60" in df.columns and "minutes" in df.columns:
-        out["p_60"] = brier(df["p_60"], (df["minutes"].astype(float) >= 60).astype(float))
+    single = (df["fixture_count"] == 1) if "fixture_count" in df.columns \
+        else pd.Series(True, index=df.index)
+    scored_df = df[single]
+    if "p_play" in scored_df.columns and "minutes" in scored_df.columns:
+        out["p_play"] = brier(scored_df["p_play"],
+                              (scored_df["minutes"].astype(float) > 0).astype(float))
+    if "p_60" in scored_df.columns and "minutes" in scored_df.columns:
+        out["p_60"] = brier(scored_df["p_60"],
+                            (scored_df["minutes"].astype(float) >= 60).astype(float))
     return out
 
 

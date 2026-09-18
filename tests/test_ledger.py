@@ -6,7 +6,7 @@ from fpl.backtest.ledger import (save_predictions, load_predictions,
                                  actuals_from_summaries, score_gameweek, scored_summary,
                                  save_scored_summary, load_scored_summary,
                                  common_pool, spearman_on, compare_rankers,
-                                 spearman_ci)
+                                 spearman_ci, probability_scores)
 
 PRED = pd.DataFrame({
     "player_id": [1, 2, 3, 4],
@@ -398,3 +398,56 @@ def test_a_scored_gameweek_carries_its_probability_scores():
     scored = score_gameweek(pred, actuals)
     assert "p_play" in scored["probability"]
     assert scored["probability"]["p_play"]["n"] == 4
+
+
+# --- C6-4: p_play/p_60 are single-fixture; a double must not be scored on them ---
+
+def test_actuals_from_summaries_reports_the_fixture_count():
+    """`fixture_count` is the number of history rows matched for the round --
+    already computed on the way to summing them, just discarded."""
+    summaries = {1: _summary(1, [(7, 6, 90), (7, 2, 90)]), 2: _summary(2, [(7, 5, 90)])}
+    actual = actuals_from_summaries(summaries, gw=7).set_index("player_id")
+    assert actual.loc[1, "fixture_count"] == 2
+    assert actual.loc[2, "fixture_count"] == 1
+
+
+def test_probability_scores_exclude_double_gameweek_rows():
+    """p_play/p_60 are single-fixture probabilities: FPL's appearance and
+    60-minute bonus are both PER MATCH. Comparing a single-match forecast
+    against gameweek-TOTAL minutes systematically understates a double's true
+    appearance chance, and cannot tell '60 in one match of two' from a
+    35+35 split that reached 60 in neither -- so a double must not be scored
+    on either probability, only on the points/error metrics that already sum
+    correctly across fixtures."""
+    df = pd.DataFrame({
+        "player_id": [1, 2],
+        "p_play": [0.85, 0.9], "p_60": [0.7, 0.8],
+        "minutes": [135.0, 90.0],        # player 1: a double, 90+45
+        "fixture_count": [2, 1],
+    })
+    out = probability_scores(df)
+    assert out["p_play"]["n"] == 1
+    assert out["p_60"]["n"] == 1
+
+
+def test_probability_scores_without_a_fixture_count_column_score_everyone():
+    """Backward compatible: callers that never learned about fixture_count
+    (or a genuinely single-fixture-only frame) keep scoring every row."""
+    df = pd.DataFrame({"player_id": [1, 2], "p_play": [0.85, 0.9],
+                       "p_60": [0.7, 0.8], "minutes": [90.0, 45.0]})
+    out = probability_scores(df)
+    assert out["p_play"]["n"] == 2
+
+
+def test_score_gameweek_carries_fixture_count_through_to_probability_scores():
+    """The merge in score_gameweek must actually deliver fixture_count into
+    probability_scores, not just have it available on actuals."""
+    pred = PRED.copy()
+    pred["p_play"] = [0.95, 0.9, 0.9, 0.9]
+    pred["p_60"] = [0.9, 0.8, 0.8, 0.8]
+    actuals = pd.DataFrame({
+        "player_id": [1, 2, 3, 4], "actual": [6.0, 2.0, 8.0, 1.0],
+        "minutes": [180.0, 90.0, 75.0, 0.0], "fixture_count": [2, 1, 1, 1],
+    })
+    scored = score_gameweek(pred, actuals)
+    assert scored["probability"]["p_play"]["n"] == 3   # player 1 (a double) excluded
