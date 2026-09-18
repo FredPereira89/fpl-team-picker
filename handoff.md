@@ -12,8 +12,8 @@ fixing them in Codex's recommended order.
 | RB5 Triple Captain formula / rule / prose; BB/TC values wired into advisor | **fixed** + tests replaced | triple captain passes to vice |
 | RB6 Free Hit solve bought future captaincy | **fixed** + regression test | free hit valued on one week |
 | RB7 override bypassed availability cap | **fixed** + invariant tests | team news blends before availability |
-| RB8 `--confirm` marks the wrong forecast | in progress | |
-| RB9 illegal/unknown chips accepted at confirm | not started | |
+| RB8 `--confirm` marks the wrong forecast | **fixed** — deadline-aware `mark_actioned`, `--forecast-version`, post-deadline refused | |
+| RB9 illegal/unknown chips accepted at confirm | **fixed** — argparse choices + `chip_blocked_reason` at confirm | |
 | RB1 snapshots not consumed by replay | not started | |
 | RB2 replay forces horizon_gw=1 | not started | |
 | RB3 replay does not carry captain/vice | not started | |
