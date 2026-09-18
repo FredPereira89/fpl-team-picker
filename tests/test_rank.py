@@ -468,6 +468,154 @@ def test_a_ceiling_passing_xi_that_cannot_be_completed_is_repaired():
     assert price[repaired].sum() + bench_cost <= 100.0 + 1e-9
 
 
+def _club_coupling_pool():
+    """Codex's re-review of C6-6: the XI already has two players from club
+    A; the cheapest reserve GKP is also club A; but the ONLY remaining DEF
+    in the whole pool is ALSO club A. Taking the cheap GKP from A first
+    (2 in XI + 1 GKP = 3, still legal on its own) leaves no room for the
+    mandatory DEF from A (would make 4, over MAX_PER_CLUB): a position-by-
+    position greedy fill, cheapest first with no backtracking, commits to
+    the GKP before it can see that DEF has nowhere else to go, and reports
+    the whole bench impossible even though choosing the pricier, non-A GKP
+    instead leaves it fully legal."""
+    rows = [
+        {"player_id": 1, "position": "GKP", "team": "C", "price": 5.0},   # XI
+        {"player_id": 2, "position": "GKP", "team": "A", "price": 4.0},   # cheapest bench GKP
+        {"player_id": 3, "position": "GKP", "team": "L", "price": 4.5},   # the legal alternative
+        {"player_id": 4, "position": "DEF", "team": "D", "price": 6.0},   # XI
+        {"player_id": 5, "position": "DEF", "team": "E", "price": 6.0},   # XI
+        {"player_id": 6, "position": "DEF", "team": "F", "price": 6.0},   # XI
+        {"player_id": 7, "position": "DEF", "team": "G", "price": 6.0},   # XI
+        {"player_id": 8, "position": "DEF", "team": "A", "price": 6.0},   # the ONLY bench DEF
+        {"player_id": 9, "position": "MID", "team": "A", "price": 7.0},   # XI, club A #1
+        {"player_id": 10, "position": "MID", "team": "A", "price": 7.0},  # XI, club A #2
+        {"player_id": 11, "position": "MID", "team": "H", "price": 7.0},  # XI
+        {"player_id": 12, "position": "MID", "team": "I", "price": 7.0},  # XI
+        {"player_id": 13, "position": "MID", "team": "J", "price": 7.0},  # XI
+        {"player_id": 14, "position": "FWD", "team": "K", "price": 8.0}, # XI
+        {"player_id": 15, "position": "FWD", "team": "M", "price": 3.0}, # bench
+        {"player_id": 16, "position": "FWD", "team": "N", "price": 3.5}, # bench
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_cheapest_legal_bench_backtracks_past_a_blocking_first_choice():
+    """A greedy, position-by-position fill (cheapest first, no
+    backtracking) takes the club-A goalkeeper before it can see that the
+    only available defender is ALSO club A, and wrongly reports the whole
+    bench as impossible (the two together, plus the XI's own two from
+    club A, would be four -- one over MAX_PER_CLUB). The legal, cheapest
+    bench exists by using the pricier, non-A goalkeeper instead: 4.5 (GKP)
+    + 6.0 (DEF) + 3.0 + 3.5 (FWD) = 17.0."""
+    from fpl.optimize.rank import _cheapest_legal_bench
+
+    pool = _club_coupling_pool()
+    price = pool["price"].to_numpy()
+    pos = pool["position"].to_numpy()
+    club = pool["team"].to_numpy()
+    by_pos_sorted = _by_pos_sorted(pool)
+
+    xi = [0, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13]     # rows: 1 GKP, 4 DEF, 5 MID, 1 FWD
+    bench_cost = _cheapest_legal_bench(xi, pos, club, price, by_pos_sorted)
+    assert bench_cost == pytest.approx(17.0)
+
+
+def test_cheapest_legal_bench_stays_fast_with_many_tied_prices():
+    """Pruning that only compares cost spent so far against the best full
+    solution provides no benefit once many candidates share a price: a
+    partial path's cost cannot reach the full-solution bound until the
+    LAST slot is filled, so every tied branch gets walked to full depth
+    before the tie finally prunes it -- measured at over a second for a
+    single call on a pool of this size before the fix (a tight lower bound
+    on the cost of the slots still unfilled is needed to prune earlier).
+    This pool mirrors the shape that reproduced it: ~180 players over 20
+    clubs, every price identical."""
+    import time
+    from fpl.optimize.rank import _cheapest_legal_bench
+
+    rows = []
+    pid = 0
+    for posn, n_per_club in (("GKP", 1), ("DEF", 3), ("MID", 3), ("FWD", 2)):
+        for c in range(20):
+            for _ in range(n_per_club):
+                rows.append({"player_id": pid, "position": posn, "team": f"T{c}",
+                            "price": 5.0})
+                pid += 1
+    pool = pd.DataFrame(rows)
+    price = pool["price"].to_numpy()
+    pos = pool["position"].to_numpy()
+    club = pool["team"].to_numpy()
+    by_pos_sorted = _by_pos_sorted(pool)
+
+    # An XI (one of each position's first few rows) with no club-cap issue
+    # of its own -- the tied prices, not a legality conflict, are what used
+    # to blow up the search.
+    xi = list(pool.index[pool.position == "GKP"][:1]) + \
+        list(pool.index[pool.position == "DEF"][:4]) + \
+        list(pool.index[pool.position == "MID"][:5]) + \
+        list(pool.index[pool.position == "FWD"][:1])
+
+    t0 = time.perf_counter()
+    bench_cost = _cheapest_legal_bench(xi, pos, club, price, by_pos_sorted)
+    dt = time.perf_counter() - t0
+
+    assert bench_cost == pytest.approx(20.0)     # 4 bench slots at 5.0 each
+    assert dt < 0.5, f"took {dt:.3f}s -- the tie-breaking bound has regressed"
+
+
+def _two_club_pool(rng, n_clubs=6):
+    """A club-concentrated pool, built the same way as the Codex re-review's
+    own stress case: prices, ownership and projection drawn independently of
+    each other and of club, with club skewed toward just two of `n_clubs` --
+    which is what let two players end up each other's only legal same-
+    position replacement below."""
+    rows = []
+    pid = 1
+    for posn, n in (("GKP", 6), ("DEF", 20), ("MID", 20), ("FWD", 12)):
+        for _ in range(n):
+            club_ = (f"T{rng.integers(0, 2)}" if rng.random() < 0.6
+                    else f"T{rng.integers(0, n_clubs)}")
+            rows.append({"player_id": pid, "position": posn, "team": club_,
+                        "price": round(rng.uniform(3.5, 14.0), 1),
+                        "ownership": round(rng.uniform(0.5, 60.0), 1),
+                        "xp_next1": round(rng.uniform(1.0, 9.0), 1), "p_play": 0.9})
+            pid += 1
+    return pd.DataFrame(rows)
+
+
+def test_repair_escapes_a_two_player_deadlock():
+    """Reproduced directly against the pre-fix `_repair`: this exact pool
+    and starting XI put players 19 and 6 as each other's only legal same-
+    position replacement (removing the pricier one always offers the other
+    right back), and the picked set never changed at all across 60 traced
+    passes -- a genuine 2-cycle, not merely a slow one, that no amount of
+    extra REPAIR_PASSES could ever escape on its own. `_repair` must reach
+    a fully legal state instead."""
+    from fpl.optimize.rank import _repair, _cheapest_legal_bench, MAX_PER_CLUB
+
+    pool = _two_club_pool(np.random.default_rng(0))
+    price = pool["price"].to_numpy()
+    pos = pool["position"].to_numpy()
+    club = pool["team"].to_numpy()
+    by_pos_sorted = _by_pos_sorted(pool)
+    by_pos = {p: np.flatnonzero(pos == p) for p in ("GKP", "DEF", "MID", "FWD")}
+    own = pool["ownership"].to_numpy()
+    xp = pool["xp_next1"].to_numpy()
+    start_pull = own * np.clip(xp, 0.0, None)
+
+    picked = np.array([1, 6, 12, 16, 20, 21, 26, 30, 38, 54, 56])
+    repaired = _repair(picked, pos, club, price, start_pull, by_pos, by_pos_sorted,
+                       100.0, np.random.default_rng(999))
+
+    counts: dict = {}
+    for i in repaired:
+        counts[club[i]] = counts.get(club[i], 0) + 1
+    bench_cost = _cheapest_legal_bench(repaired, pos, club, price, by_pos_sorted)
+    assert max(counts.values()) <= MAX_PER_CLUB
+    assert bench_cost is not None
+    assert price[repaired].sum() + bench_cost <= 100.0 + 1e-9
+
+
 def test_repair_keeps_eleven_starters_and_one_captain():
     from fpl.optimize.rank import sample_rival_squads
     pool = _crowded_pool()

@@ -159,42 +159,85 @@ def _cheapest_legal_bench(xi, pos, club, price, by_pos_sorted) -> float | None:
 
     A 3-5-2 XI needs 2 DEF + 0 MID + 1 FWD on the bench, not "any 3
     outfielders" -- and any cheap player already IN the XI can't also fill
-    a bench slot, nor can one whose club is already at MAX_PER_CLUB once the
-    XI and the bench chosen so far are counted together. This checks the
-    real thing: for each position, exactly
-    `SQUAD_SPLIT[position] - (already in xi)` more players, cheapest first,
-    skipping anyone already in `xi` or whose club is already at
-    MAX_PER_CLUB once the XI and the bench chosen so far are counted
-    together. `by_pos_sorted[position]` must already be sorted by price
-    ascending, so repeated calls during repair stay a linear scan, not a
-    re-sort.
+    a bench slot. The club cap is the reason this cannot be filled
+    position-by-position, cheapest-first, and stop there: the cap is shared
+    ACROSS positions, so taking the cheapest reserve keeper from a club
+    already near the cap can use up the only room a later position's one
+    remaining candidate needed. An earlier version did exactly that --
+    greedy per position, no backtracking -- and could both wrongly report a
+    bench as impossible (there was a pricier keeper that left room) and,
+    when it did find one, not find the cheapest one, since a cheaper
+    combination one slot back was never reconsidered.
+
+    This runs an exact search instead: every still-needed bench place across
+    every position becomes one SLOT (a 3-5-2 XI needing 2 more DEF is two
+    DEF slots, not one), and depth-first search tries each slot's candidates
+    cheapest-first, backtracking when a club-cap conflict blocks a later
+    slot. There are at most 4 bench slots in total, so this stays fast in
+    practice even though it is an exact search rather than a linear scan --
+    PROVIDED the bound that prunes a branch is tight. Comparing only the
+    cost spent SO FAR against the best full solution found is not tight
+    enough: real FPL prices repeat heavily (whole tiers of players share a
+    price point), so many candidates tie on cost, and a partial path's own
+    cost does not reach the full-solution bound until the LAST slot is
+    filled -- meaning every one of those tied branches gets walked to full
+    depth before the tie finally prunes it, which measured over a second
+    per call on a pool with several dozen same-priced candidates per
+    position. The bound instead adds the cheapest possible cost of every
+    SLOT STILL TO FILL (each slot's own cheapest candidate, ignoring club
+    conflicts -- an admissible underestimate, since the true cost can only
+    be that or higher) to the cost already spent, so a branch that can
+    provably not beat the incumbent is cut at whatever depth it stops being
+    competitive, not only at the end.
+    `by_pos_sorted[position]` must already be sorted by price ascending.
     """
     from .squad import SQUAD_SPLIT
     xi_set = {int(i) for i in xi}
-    club_count: dict = {}
+    base_club_count: dict = {}
     for i in xi_set:
-        club_count[club[i]] = club_count.get(club[i], 0) + 1
-    total = 0.0
+        base_club_count[club[i]] = base_club_count.get(club[i], 0) + 1
+
+    slots = []
     for position, need_total in SQUAD_SPLIT.items():
         in_xi = sum(1 for i in xi_set if pos[i] == position)
         need = need_total - in_xi
         if need <= 0:
             continue
-        found = 0
-        for i in by_pos_sorted.get(position, ()):
-            if found >= need:
-                break
-            if i in xi_set:
+        candidates = [i for i in by_pos_sorted.get(position, ()) if i not in xi_set]
+        slots.extend([candidates] * need)
+    if not slots:
+        return 0.0
+
+    # suffix_min[k] = cheapest possible sum of slots[k:], each slot's own
+    # cheapest candidate regardless of club -- an admissible lower bound on
+    # what filling the rest could cost from any state at that depth.
+    suffix_min = [0.0] * (len(slots) + 1)
+    for k in range(len(slots) - 1, -1, -1):
+        cheapest = price[slots[k][0]] if slots[k] else 0.0
+        suffix_min[k] = suffix_min[k + 1] + cheapest
+
+    best = [None]
+
+    def search(slot_idx: int, club_count: dict, cost: float, used: set) -> None:
+        if best[0] is not None and cost + suffix_min[slot_idx] >= best[0]:
+            return                                  # this branch cannot improve on best
+        if slot_idx == len(slots):
+            best[0] = cost
+            return
+        for i in slots[slot_idx]:
+            if i in used:
                 continue
             c = club[i]
             if club_count.get(c, 0) >= MAX_PER_CLUB:
                 continue
-            total += price[i]
+            used.add(i)
             club_count[c] = club_count.get(c, 0) + 1
-            found += 1
-        if found < need:
-            return None
-    return total
+            search(slot_idx + 1, club_count, cost + price[i], used)
+            club_count[c] -= 1
+            used.discard(i)
+
+    search(0, dict(base_club_count), 0.0, set())
+    return best[0]
 
 
 def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos,
@@ -207,11 +250,51 @@ def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos,
     pool-wide approximation. Each pass replaces one offender -- the
     cheapest-pull player of an over-represented club, else the dearest
     player -- with a same-position player drawn by the same start pull from
-    those who do not re-offend. Gives up after REPAIR_PASSES and returns the
-    best it reached, which keeps the sampler total rather than perfect on a
-    pathological pool.
+    those who do not re-offend.
+
+    That fast heuristic is deterministic about WHICH player it removes, and
+    narrows who it can replace him with -- cheap, and almost always enough,
+    but it can cycle: two players with no other legal partner swap for each
+    other forever, since removing the dearest player always names the SAME
+    player and his only legal replacement is always the SAME other player.
+    No number of further passes escapes a deterministic 2-cycle on its own.
+    Every visited state is tracked; the moment the heuristic's proposed move
+    would repeat one, the player removed is instead drawn UNIFORMLY AT
+    RANDOM from the whole XI rather than always the same offender -- cheap
+    (no extra legality search), and enough randomness that repeating the
+    exact same cycle again is very unlikely. If REPAIR_PASSES still runs out,
+    the loop gives up and returns the best it reached, which keeps the
+    sampler total rather than perfect on a pathological pool.
     """
     picked = list(int(i) for i in picked)
+
+    def propose(out, too_dear):
+        remaining = [i for i in picked if i != out]
+        # Excludes `out` itself, not only `remaining` -- `out` is not IN
+        # `remaining` by construction, so leaving it in `pool` let the
+        # "swap" re-pick the very player being removed: a no-op disguised
+        # as progress, since removing `out` from its own club's count
+        # trivially makes room for `out` again.
+        pool = [i for i in by_pos[pos[out]] if i not in remaining and i != out]
+        counts_now: dict = {}
+        for i in remaining:
+            counts_now[club[i]] = counts_now.get(club[i], 0) + 1
+        # Club first; among club-legal candidates prefer the cheaper half
+        # when cost was the problem. This is a HEURISTIC search step, not the
+        # proof -- the stopping condition above re-checks exactly on the next
+        # pass, so an imperfect pick here just costs another iteration.
+        club_ok = [i for i in pool if counts_now.get(club[i], 0) < MAX_PER_CLUB]
+        if not club_ok:
+            club_ok = pool
+        if too_dear and price is not None and len(club_ok) > 1:
+            club_ok = sorted(club_ok, key=lambda i: price[i])[:max(1, len(club_ok) // 2)]
+        if not club_ok:
+            return None
+        w = np.array([max(start_pull[i], 1e-12) for i in club_ok])
+        new = int(rng.choice(club_ok, p=w / w.sum()))
+        return remaining + [new]
+
+    seen: set = set()
     for _ in range(REPAIR_PASSES):
         counts: dict = {}
         for i in picked:
@@ -223,28 +306,18 @@ def _repair(picked: np.ndarray, pos, club, price, start_pull, by_pos,
             too_dear = bench_cost is None or sum(price[i] for i in picked) + bench_cost > budget
         if not over and not too_dear:
             break
+        seen.add(frozenset(picked))
         if over:
             candidates = [i for i in picked if club[i] == over[0]]
             out = min(candidates, key=lambda i: start_pull[i])
         else:
             out = max(picked, key=lambda i: price[i])
-        remaining = [i for i in picked if i != out]
-        pool = [i for i in by_pos[pos[out]] if i not in remaining]
-        counts_now: dict = {}
-        for i in remaining:
-            counts_now[club[i]] = counts_now.get(club[i], 0) + 1
-        # Club first; among club-legal candidates prefer the cheaper half
-        # when cost was the problem. This is a HEURISTIC search step, not the
-        # proof -- the stopping condition above re-checks exactly on the next
-        # pass, so an imperfect pick here just costs another iteration.
-        club_ok = [i for i in pool if counts_now.get(club[i], 0) < MAX_PER_CLUB]
-        if not club_ok:
-            club_ok = [i for i in pool if i != out] or pool
-        if too_dear and price is not None and len(club_ok) > 1:
-            club_ok = sorted(club_ok, key=lambda i: price[i])[:max(1, len(club_ok) // 2)]
-        w = np.array([max(start_pull[i], 1e-12) for i in club_ok])
-        new = int(rng.choice(club_ok, p=w / w.sum()))
-        picked = remaining + [new]
+        candidate = propose(out, too_dear)
+        if candidate is None or frozenset(candidate) in seen:
+            out = int(rng.choice(picked))
+            candidate = propose(out, too_dear)
+        if candidate is not None:
+            picked = candidate
     return np.array(picked, dtype=int)
 
 
@@ -415,19 +488,28 @@ def squad_indicator(starting_ids, captain, ids) -> np.ndarray:
 
 def score_candidate(squad, ids: list[int], samples: np.ndarray,
                     rival_scores: np.ndarray, target: float = 0.5,
-                    bar: np.ndarray | None = None, penalty: float = 0.0) -> dict:
+                    bar: np.ndarray | None = None, penalty: float = 0.0,
+                    captain: int | None = None) -> dict:
     """How one candidate squad actually fares against the simulated field.
 
-    The armband is re-chosen per candidate, because the best captain in a
-    squad is a property of that squad and not of the pool.
+    The armband is re-chosen per candidate by default, because the best
+    captain in a squad is a property of that squad and not of the pool. Pass
+    `captain` to score a SPECIFIC armband instead -- the caller already knows
+    it (e.g. the production captain a lineup builder chose on its own terms)
+    and wants these statistics to describe that captain rather than rank's
+    own preferred one. Reporting rank's captain's numbers next to a different
+    reported captain was C6-2's remaining gap: the XI matched, the armband
+    did not, so mean_points/p_beat_target/rank_percentile described a week
+    that was never actually fielded.
 
     `penalty` is subtracted from every simulated week. For a transfer plan it
     is the points hit: without it a plan costing -4 would be compared against
     the field on the same terms as one costing nothing, which quietly makes
     hits free.
     """
-    captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
-                                   rival_scores, target, bar=bar)
+    if captain is None:
+        captain = best_captain_by_rank(list(squad.starting_ids), ids, samples,
+                                       rival_scores, target, bar=bar)
     mine = squad_scores(squad_indicator(squad.starting_ids, captain, ids)[None, :],
                         samples)[0] - float(penalty)
     return {

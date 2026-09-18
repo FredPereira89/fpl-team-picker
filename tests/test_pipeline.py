@@ -1,4 +1,5 @@
 from pathlib import Path
+import numpy as np
 import pandas as pd
 import pytest
 from fpl.config import Config
@@ -853,3 +854,89 @@ def test_rank_scoring_and_captaincy_use_the_exact_weekly_xi_not_the_horizon_one(
     # A candidate scored on the horizon XI (without player 13 at all) tops out
     # in the 30s; only a genuinely fixed scoring path reaches this high.
     assert rank_stats["mean_points"] > 80
+
+
+# --- Codex's C6 re-review: rank stats must match the FINAL reported captain,
+# not rank's own preferred one, whenever the two diverge ---
+
+def test_honour_rank_captain_rescores_stats_for_the_final_captain():
+    """Codex's re-review of C6-2: `score_candidate` always optimises the
+    captain for rank, while expected-points mode deliberately keeps
+    `build_lineup`'s own captain -- and the stored mean_points/p_beat_target/
+    rank_percentile were never recalculated for that final captain. The
+    audit's own reproduction: rank statistics captain 1 mean 29.0, reported
+    lineup captain 2 actual scenario mean 28.0. This pins the exact same
+    numbers: captain 1 doubles a constant-10 scorer (2*10 + 9 = 29), captain 2
+    doubles a constant-9 scorer (10 + 2*9 = 28); the FINAL captain reported is
+    2, so the rescored mean_points must read 28.0, not rank's own 29.0."""
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+
+    ids = [1, 2]
+    samples = np.array([[10.0, 10.0, 10.0, 10.0],
+                        [9.0, 9.0, 9.0, 9.0]])
+    rival_scores = np.array([[15.0, 15.0, 15.0, 15.0]])
+    xp = pd.DataFrame({"player_id": ids, "xp_next1": [10.0, 9.0]})
+    # build_lineup would have chosen captain 2 on its own terms (irrelevant
+    # here); rank's own optimum for THIS XI is captain 1 (29 > 28).
+    lineup = Lineup(xi=[1, 2], bench=[], formation="x", captain=2, vice=1, xp=28.0)
+    rank_stats = {
+        "captain": 1, "decided_by": "expected points over the horizon",
+        "mean_points": 29.0, "sd_points": 0.0, "p_beat_target": 1.0,
+        "rank_percentile": 1.0, "n_candidates": 1, "target": 0.5, "n_rivals": 1,
+        "_ctx": {"ids": ids, "samples": samples, "rival_scores": rival_scores,
+                 "bar": None, "target": 0.5, "starting_ids": [1, 2], "penalty": 0.0},
+    }
+
+    out_lineup, stats = _honour_rank_captain(lineup, rank_stats, xp)
+
+    assert out_lineup.captain == 2, "expected-points mode keeps its own captain"
+    assert stats["captain_reported"] is False
+    assert stats["mean_points"] == pytest.approx(28.0), (
+        "must describe the reported captain (2), not rank's own captain (1)")
+    assert "_ctx" not in stats, "the private context must not leak into the report"
+
+
+def test_honour_rank_captain_rescores_even_when_the_rank_captain_is_honoured():
+    """When rank's captain IS the one reported, the rescore must be a no-op
+    -- same captain, same samples, so the numbers should not move."""
+    from fpl.optimize.lineup import Lineup
+    from fpl.pipeline import _honour_rank_captain
+
+    ids = [1, 2]
+    samples = np.array([[10.0, 10.0, 10.0, 10.0],
+                        [9.0, 9.0, 9.0, 9.0]])
+    rival_scores = np.array([[15.0, 15.0, 15.0, 15.0]])
+    xp = pd.DataFrame({"player_id": ids, "xp_next1": [10.0, 9.0]})
+    lineup = Lineup(xi=[1, 2], bench=[], formation="x", captain=2, vice=1, xp=28.0)
+    rank_stats = {
+        "captain": 1, "decided_by": "rank",
+        "mean_points": 29.0, "sd_points": 0.0, "p_beat_target": 1.0,
+        "rank_percentile": 1.0, "n_candidates": 1, "target": 0.5, "n_rivals": 1,
+        "_ctx": {"ids": ids, "samples": samples, "rival_scores": rival_scores,
+                 "bar": None, "target": 0.5, "starting_ids": [1, 2], "penalty": 0.0},
+    }
+
+    out_lineup, stats = _honour_rank_captain(lineup, rank_stats, xp)
+
+    assert out_lineup.captain == 1
+    assert stats["captain_reported"] is True
+    assert stats["mean_points"] == pytest.approx(29.0)
+
+
+def test_a_wildcard_chip_clears_the_stale_rank_stats(tmp_path, monkeypatch):
+    """Codex's re-review, second path: a Wildcard/Free Hit can replace the
+    entire squad AFTER rank statistics were computed for the ordinary
+    transfer plan, but those old statistics used to stay attached to the
+    recommendation -- describing a squad that is no longer the one reported
+    at all, not merely a different captain. They must be cleared instead."""
+    from fpl.pipeline import run
+    from fpl.optimize.chips import ChipAdvice
+
+    monkeypatch.setattr("fpl.pipeline.advise_chips",
+                        lambda *a, **k: ChipAdvice("wildcard", "test"))
+    rec, _ = run(Config(rank_sims=300, rank_candidates=3, max_paid_hits=2),
+                mode=2, from_event=1, root=tmp_path, client=FakeClient(),
+                current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
+    assert rec.chip_squad is True
+    assert rec.rank is None

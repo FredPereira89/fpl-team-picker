@@ -28,7 +28,7 @@ from .model.calibration import fit_calibration, apply_calibration, scored_histor
 from .model.simulate import simulate_event, moment_match
 from .optimize.squad import optimize_squad, enumerate_squads, Squad
 from .optimize.rank import (sample_rival_squads, squad_scores, pick_best_squad,
-                            field_bar, required_rivals, RIVALS)
+                            field_bar, required_rivals, RIVALS, score_candidate)
 from .optimize.lineup import build_lineup, best_xi
 from .optimize.chips import advise_chips, ChipAdvice
 from .optimize.actions import wildcard_action, freehit_action
@@ -203,7 +203,9 @@ def _p_gain_positive(chosen, plans, ids, samples) -> float | None:
 
 
 def _honour_rank_captain(lineup, rank_stats, xp):
-    """Report the armband the rank layer actually scored, when it decided.
+    """Report the armband the rank layer actually scored, when it decided --
+    and re-score mean_points/sd_points/p_beat_target/rank_percentile for
+    whichever captain ends up reported.
 
     `pick_best_squad` records its own optimal captain per candidate, and the
     pipeline used to discard it and let `build_lineup` choose a mean-based one
@@ -213,29 +215,54 @@ def _honour_rank_captain(lineup, rank_stats, xp):
     is in the exact one-week XI; otherwise the lineup's own choice stands and
     `rank_stats["captain_reported"]` says so. When rank only reported, the
     lineup's captain is the decision and nothing changes.
+
+    Either way, the four scored statistics were computed under RANK'S OWN
+    preferred captain (`score_candidate` re-optimises the armband per
+    candidate). When that captain is not the one ending up reported --
+    expected-points mode keeping its own captain, or a rank captain rejected
+    for sitting outside the exact XI -- the stored numbers described a week
+    that was never fielded (C6-2 fixed the XI; the armband could still
+    diverge). `rank_stats` carries a private `_ctx` (the samples/rival field/
+    bar this candidate was scored against) exactly so this function can
+    re-score the FINAL captain here rather than leave rank's captain's
+    numbers attached to someone else's armband. `_ctx` is stripped from the
+    returned stats before they reach the report or get serialised.
     """
     if not rank_stats:
         return lineup, rank_stats
     decided = rank_stats.get("decided_by", "rank") == "rank"
     captain = rank_stats.get("captain")
     stats = dict(rank_stats)
-    if not decided or captain is None or int(captain) not in set(lineup.xi):
+    ctx = stats.pop("_ctx", None)
+    honoured = decided and captain is not None and int(captain) in set(lineup.xi)
+    if not honoured:
         stats["captain_reported"] = False
-        return lineup, stats
-    captain = int(captain)
-    if captain != lineup.captain:
-        from dataclasses import replace
-        frame = xp.set_index("player_id")
-        others = [i for i in lineup.xi if i != captain]
-        vice = max(others, key=lambda i: (float(frame.loc[i, "xp_next1"]), -i))
-        # Lineup.xp = sum(XI xp) + the captain's own xp again (the armband
-        # double). Overriding the captain without recomputing this left the
-        # report's headline total describing the OLD captain: the number
-        # shown and the armband shown belonged to two different decisions.
-        xi_total = sum(float(frame.loc[i, "xp_next1"]) for i in lineup.xi)
-        new_xp = round(xi_total + float(frame.loc[captain, "xp_next1"]), 3)
-        lineup = replace(lineup, captain=captain, vice=vice, xp=new_xp)
-    stats["captain_reported"] = True
+    else:
+        captain = int(captain)
+        if captain != lineup.captain:
+            from dataclasses import replace
+            frame = xp.set_index("player_id")
+            others = [i for i in lineup.xi if i != captain]
+            vice = max(others, key=lambda i: (float(frame.loc[i, "xp_next1"]), -i))
+            # Lineup.xp = sum(XI xp) + the captain's own xp again (the armband
+            # double). Overriding the captain without recomputing this left
+            # the report's headline total describing the OLD captain: the
+            # number shown and the armband shown belonged to two different
+            # decisions.
+            xi_total = sum(float(frame.loc[i, "xp_next1"]) for i in lineup.xi)
+            new_xp = round(xi_total + float(frame.loc[captain, "xp_next1"]), 3)
+            lineup = replace(lineup, captain=captain, vice=vice, xp=new_xp)
+        stats["captain_reported"] = True
+    if ctx is not None and lineup.captain in set(ctx["starting_ids"]):
+        from types import SimpleNamespace
+        rescored = score_candidate(
+            SimpleNamespace(starting_ids=ctx["starting_ids"]), ctx["ids"], ctx["samples"],
+            ctx["rival_scores"], target=ctx["target"], bar=ctx["bar"],
+            penalty=ctx["penalty"], captain=lineup.captain)
+        stats["mean_points"] = rescored["mean_points"]
+        stats["sd_points"] = rescored["sd_points"]
+        stats["p_beat_target"] = rescored["p_beat_target"]
+        stats["rank_percentile"] = rescored["rank_percentile"]
     return lineup, stats
 
 
@@ -244,6 +271,21 @@ def _rank_stats(scored, index, n_candidates, target, n_rivals) -> dict:
     stats["n_candidates"] = int(n_candidates)
     stats["target"] = float(target)
     stats["n_rivals"] = int(n_rivals)
+    return stats
+
+
+def _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
+                        starting_ids, penalty=0.0) -> dict:
+    """Attach what `_honour_rank_captain` needs to re-score the FINAL
+    captain later, once `build_lineup` (and any chip override) have settled
+    what is actually reported. Private to this module -- `_honour_rank_captain`
+    pops `_ctx` back off before the stats reach the report or get serialised.
+    """
+    stats["_ctx"] = {
+        "ids": ids, "samples": samples, "rival_scores": rival_scores,
+        "bar": bar, "target": float(target), "starting_ids": list(starting_ids),
+        "penalty": float(penalty),
+    }
     return stats
 
 
@@ -366,6 +408,8 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
         stats = _rank_stats(scored, index, len(plans), target, n_needed)
         stats["hit_cost"] = int(chosen.hit_cost)
         stats["decided_by"] = "rank"
+        _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
+                           chosen.starting_ids, penalty=chosen.hit_cost)
         return chosen, None, stats
 
     if plans:
@@ -384,6 +428,8 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
             stats["hit_cost"] = int(best.hit_cost)
             stats["decided_by"] = "expected points over the horizon"
             stats["p_gain_positive"] = _p_gain_positive(best, plans, ids, samples)
+            _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
+                               best.starting_ids, penalty=best.hit_cost)
         return best, plans, stats
 
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
@@ -422,6 +468,8 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
         stats = _rank_stats(scored, candidates.index(chosen), len(candidates),
                             target, n_needed)
         stats["decided_by"] = "rank"
+        _stash_rank_context(stats, ids, samples, rival_scores, bar, target,
+                           chosen.starting_ids)
         return chosen, stats
     # Expected points decide -- candidates[0] is the solver's optimum -- and
     # the rank layer only reports how that squad fares. A one-week
@@ -432,6 +480,7 @@ def _choose_squad(xp, players, rates, minutes, tfx, cfg, from_event):
     stats = _rank_stats(scored, 0, len(candidates), target, n_needed)
     stats["decided_by"] = "expected points over the horizon"
     stats["rank_would_choose"] = candidates.index(chosen)
+    _stash_rank_context(stats, ids, samples, rival_scores, bar, target, best.starting_ids)
     return best, stats
 
 
@@ -630,6 +679,15 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
             transfers = action.transfers
             lineup = build_lineup(Squad(squad_ids, starting_ids, 0.0, 0.0), xp)
             chip_squad, chip_temporary = True, action.temporary
+            # rank_stats above described the ORDINARY transfer plan's squad --
+            # a wildcard/free hit here replaces it with an entirely different
+            # fifteen, not merely a different captain, so those numbers no
+            # longer describe anything about the team now being reported.
+            # Recomputing them would mean a second full rank simulation for a
+            # squad the ordinary candidate pool never considered; clearing
+            # them is the honest alternative to leaving stale figures attached
+            # to a squad they were never scored against.
+            rank_stats = None
 
     value = round(sum(prices[i] for i in squad_ids), 1)
 
