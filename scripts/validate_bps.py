@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 
 from fpl.model.bps import BPS_GOAL, BPS_ASSIST, BPS_SAVE, BPS_CARD, BPS_RED_CARD, \
     BPS_CONCEDED, BPS_APPEARANCE_SHORT, BPS_APPEARANCE_LONG, BPS_DC_ACTION, \
@@ -61,10 +62,11 @@ def _load_history():
     return pd.DataFrame(rows)
 
 
-def _approx_bps(row, position, dc_weights=None) -> float:
+def _approx_bps(row, position, dc_weights=None, save_value=None) -> float:
     """`dc_weights` defaults to the SHIPPED production `BPS_DC_ACTION`;
     `logo_cv` passes candidate weight sets during cross-validation instead."""
     dc_weights = BPS_DC_ACTION if dc_weights is None else dc_weights
+    save_value = BPS_SAVE if save_value is None else float(save_value)
     minutes = float(row["minutes"])
     played = minutes > 0
     reached_60 = minutes >= 60
@@ -99,7 +101,7 @@ def _approx_bps(row, position, dc_weights=None) -> float:
     bps += goals * BPS_GOAL.get(position, 0.0) + assists * BPS_ASSIST
     if position in ("GKP", "DEF") and reached_60 and clean_sheet:
         bps += 12.0
-    bps += saves * BPS_SAVE
+    bps += saves * save_value
     bps += yellow_cards * BPS_CARD + red_cards * BPS_RED_CARD
     bps += dc * dc_weights.get(position, 0.6)
     if position in CONCEDED_BPS_POSITIONS:
@@ -107,14 +109,67 @@ def _approx_bps(row, position, dc_weights=None) -> float:
     return bps
 
 
-def _mae(hist, positions, dc_weights) -> float:
+def _mae(hist, positions, dc_weights, save_value=None) -> float:
     errs = []
     for _, r in hist.iterrows():
         if float(r["minutes"]) <= 0:
             continue
         p = positions.get(int(r["player_id"]), "MID")
-        errs.append(abs(_approx_bps(r, p, dc_weights) - float(r["bps"])))
+        errs.append(abs(_approx_bps(r, p, dc_weights, save_value) - float(r["bps"])))
     return float(np.mean(errs)) if errs else float("nan")
+
+
+def fit_gkp_save_value(hist, positions, dc_weights=None, base_save=2.0) -> dict:
+    """Fit the extra per-save BPS term on played goalkeeper rows.
+
+    The response is ``real BPS - approximate BPS at base_save`` and the
+    regression includes an intercept, so the slope estimates the part of the
+    missing BPS that scales with saves without forcing the separate zero-save
+    residual (passing accuracy and other unavailable events) into the save
+    coefficient. The 95% interval uses HC3 heteroscedasticity-robust standard
+    errors. This remains exploratory observational calibration, not a causal
+    decomposition; fresh gameweeks are the prospective validation set.
+    """
+    dc_weights = BPS_DC_ACTION if dc_weights is None else dc_weights
+    played = hist[hist["minutes"].astype(float) > 0]
+    gkp = played[played["player_id"].map(positions).fillna("MID") == "GKP"]
+    if len(gkp) < 3:
+        raise ValueError("at least three played goalkeeper rows are required")
+
+    saves = gkp["saves"].astype(float).to_numpy()
+    if np.ptp(saves) <= 0:
+        raise ValueError("goalkeeper save counts must vary to fit a slope")
+    target = np.array([
+        float(r["bps"]) - _approx_bps(r, "GKP", dc_weights, base_save)
+        for _, r in gkp.iterrows()
+    ])
+    design = np.column_stack([np.ones(len(saves)), saves])
+    xtx_inv = np.linalg.inv(design.T @ design)
+    beta = xtx_inv @ design.T @ target
+    residual = target - design @ beta
+
+    # HC3 sandwich covariance: robust to the clear increase in residual
+    # spread across save counts without adding statsmodels as a dependency.
+    leverage = np.sum((design @ xtx_inv) * design, axis=1)
+    adjusted = residual / np.maximum(1.0 - leverage, 1e-12)
+    meat = design.T @ (design * adjusted[:, None] ** 2)
+    covariance = xtx_inv @ meat @ xtx_inv
+    slope_se = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    dof = len(saves) - design.shape[1]
+    critical = float(student_t.ppf(0.975, dof))
+    slope = float(beta[1])
+    corr = float(np.corrcoef(saves, target)[0, 1])
+    return {
+        "n": int(len(saves)),
+        "base_save": float(base_save),
+        "intercept": float(beta[0]),
+        "extra_per_save": slope,
+        "fitted_save": float(base_save) + slope,
+        "slope_se_hc3": slope_se,
+        "ci_low": slope - critical * slope_se,
+        "ci_high": slope + critical * slope_se,
+        "correlation": corr,
+    }
 
 
 # A handful of candidate per-position DC weight sets to grid-search over --
@@ -134,7 +189,12 @@ _DC_CANDIDATES = [
 
 
 def logo_cv(hist, positions):
-    """Leave-one-gameweek-out cross-validation for the DC weight choice
+    """Leave-one-gameweek-out CV for the DC weights and save calibration.
+
+    The save effect is re-fitted on each training partition before either
+    the candidate DC weights or the held-out rows are scored. This prevents
+    the held-out gameweek from leaking into a global BPS_SAVE estimate.
+
     (Codex's re-review, finding 2: the weights shipped in BPS_DC_ACTION
     were selected AND evaluated on the same 4 gameweeks -- in-sample model
     selection, not independent validation).
@@ -150,24 +210,34 @@ def logo_cv(hist, positions):
     rounds = sorted(hist["round"].dropna().unique())
     print(f"\nleave-one-gameweek-out cross-validation ({len(rounds)} folds):")
     held_out_maes = []
+    uniform_maes = []
+    folds = []
+    uniform = {"GKP": 0.6, "DEF": 0.6, "MID": 0.6, "FWD": 0.6}
     for held_out in rounds:
         train = hist[hist["round"] != held_out]
         test = hist[hist["round"] == held_out]
+        save_fit = fit_gkp_save_value(train, positions)
+        fold_save_value = save_fit["fitted_save"]
         best_weights, best_train_mae = None, float("inf")
         for cand in _DC_CANDIDATES:
-            train_mae = _mae(train, positions, cand)
+            train_mae = _mae(train, positions, cand, fold_save_value)
             if train_mae < best_train_mae:
                 best_train_mae, best_weights = train_mae, cand
-        held_out_mae = _mae(test, positions, best_weights)
+        held_out_mae = _mae(test, positions, best_weights, fold_save_value)
+        uniform_mae = _mae(test, positions, uniform, fold_save_value)
         held_out_maes.append(held_out_mae)
+        uniform_maes.append(uniform_mae)
+        folds.append({"held_out": int(held_out), "save_value": fold_save_value,
+                      "weights": best_weights, "train_mae": best_train_mae,
+                      "held_out_mae": held_out_mae, "uniform_mae": uniform_mae})
         print(f"  held out GW{int(held_out)}: selected {best_weights} "
-             f"(train MAE {best_train_mae:.2f}) -> held-out MAE {held_out_mae:.2f}")
+              f"and save={fold_save_value:.2f} from training only "
+              f"(train MAE {best_train_mae:.2f}) -> held-out MAE {held_out_mae:.2f}")
     print(f"  mean held-out MAE across folds: {np.mean(held_out_maes):.2f}")
-    uniform_mae = np.mean([_mae(hist[hist["round"] == r], positions,
-                                {"GKP": 0.6, "DEF": 0.6, "MID": 0.6, "FWD": 0.6})
-                          for r in rounds])
     print(f"  for comparison, uniform 0.6 (no per-position fit) scored "
-         f"{uniform_mae:.2f} on the same folds")
+          f"{np.mean(uniform_maes):.2f} on the same folds")
+    return {"folds": folds, "mean_held_out_mae": float(np.mean(held_out_maes)),
+            "mean_uniform_mae": float(np.mean(uniform_maes))}
 
 
 def main():
@@ -221,6 +291,15 @@ def main():
     for pos, errs in err_by_pos.items():
         if errs:
             print(f"  {pos}: n={len(errs)} MAE={np.mean(errs):.2f} median={np.median(errs):.2f}")
+
+    save_fit = fit_gkp_save_value(hist, positions)
+    print()
+    print("exploratory goalkeeper save calibration (full available sample):")
+    print(f"  n={save_fit['n']}, residual/save r={save_fit['correlation']:.3f}")
+    print(f"  extra BPS per save={save_fit['extra_per_save']:.3f} "
+          f"(HC3 95% CI {save_fit['ci_low']:.3f} to {save_fit['ci_high']:.3f})")
+    print(f"  fitted total save value={save_fit['fitted_save']:.3f}; "
+          f"shipped BPS_SAVE={BPS_SAVE:.3f}")
 
     logo_cv(hist, positions)
 

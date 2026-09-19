@@ -236,8 +236,25 @@ def test_identical_teammates_agree_on_the_same_conceded_goal():
     ids = detail["ids"]
     conceded_on = detail["conceded_on"]
     i1, i2 = list(ids).index(1), list(ids).index(2)
-    disagree_rate = float((conceded_on[i1] != conceded_on[i2]).mean())
-    assert disagree_rate < 0.005   # was ~0.444 under independent thinning
+    assert np.array_equal(conceded_on[i1], conceded_on[i2])
+
+
+def test_shared_goal_timing_does_not_truncate_extreme_scorelines():
+    """Every simulated goal must be timed. A fixed eight-goal allocation
+    axis previously made a full-match player concede only eight when the
+    already-drawn match score said ten, understating both FPL and BPS
+    goals-conceded penalties in the tail."""
+    from fpl.model.simulate import _conceded_on
+
+    conceded = _conceded_on(
+        conceded_team=np.array([10]),
+        started=np.array([[True]]),
+        subbed=np.array([[False]]),
+        share=np.array([[1.0]]),
+        n_sims=1,
+        rng=np.random.default_rng(17),
+    )
+    assert conceded[0, 0] == 10
 
 
 def test_points_are_a_spread_not_a_point_estimate():

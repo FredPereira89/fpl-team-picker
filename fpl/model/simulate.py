@@ -244,13 +244,6 @@ def _allocate(total: np.ndarray, w: np.ndarray, cap: float, rng) -> np.ndarray:
     return out
 
 
-# Cap on how many of a side's conceded goals get an individually-timed slot
-# per scenario. `conceded_team ~ Poisson(xgc)`, and xgc rarely exceeds 3-4
-# even for a rout, so this only matters for a scenario tail so thin it costs
-# nothing to over-provision for.
-MAX_TIMED_CONCEDED = 8
-
-
 def _conceded_on(conceded_team, started, subbed, share, n_sims, rng) -> np.ndarray:
     """Goals conceded while EACH player was on the pitch, shape (n, n_sims).
 
@@ -272,9 +265,18 @@ def _conceded_on(conceded_team, started, subbed, share, n_sims, rng) -> np.ndarr
     assumption (uniform across the match) is a modelling simplification,
     not a source of the correlation bug.
     """
-    g = np.arange(MAX_TIMED_CONCEDED)[:, None, None]                  # (G,1,1)
+    # Time every goal that was actually drawn. A previous fixed cap of eight
+    # silently changed a 10-goal scoreline into eight goals for the on-pitch
+    # points/BPS calculations. The realised maximum is small for ordinary
+    # Poisson football scores, so sizing this axis dynamically is both exact
+    # and effectively the same cost in normal scenarios.
+    max_goals = int(np.max(conceded_team)) if np.size(conceded_team) else 0
+    if max_goals <= 0:
+        return np.zeros(started.shape, dtype=int)
+
+    g = np.arange(max_goals)[:, None, None]                           # (G,1,1)
     goal_active = g < conceded_team[None, None, :]                    # (G,1,S)
-    goal_time = rng.random((MAX_TIMED_CONCEDED, 1, n_sims))           # (G,1,S), shared
+    goal_time = rng.random((max_goals, 1, n_sims))                    # (G,1,S), shared
 
     lo = np.where(started, 0.0, np.where(subbed, 1.0 - share, 0.0))[None, :, :]
     hi = np.where(started, share, np.where(subbed, 1.0, 0.0))[None, :, :]

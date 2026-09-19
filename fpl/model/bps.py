@@ -95,10 +95,8 @@ BPS_GOAL = {"GKP": 12.0, "DEF": 12.0, "MID": 18.0, "FWD": 24.0}
 # left as a residual rather than guessed at without a goal-type signal.
 BPS_ASSIST = 9.0                       # official
 BPS_CLEAN_SHEET = {"GKP": 12.0, "DEF": 12.0}   # official, GKP/DEF, 60+ minutes only
-# 2026/27 rule (re-checked repeatedly across review rounds with
-# inconsistent web results; treat the exact official wording as uncertain,
-# NOT settled): roughly, 2 BPS for any save, +1 for a save from inside the
-# box, +1 for a save judged a "big chance". The simulator has no shot-
+# 2026/27 official rule: 2 BPS for any save, +1 for a save from inside the
+# box, and +1 for a save judged a "big chance". The simulator has no shot-
 # location or big-chance signal for a shot FACED (only for a chance
 # CREATED, itself an official-table entry not modelled either), so a flat
 # per-save value stands in for whatever mix of these actually applies.
@@ -108,8 +106,8 @@ BPS_CLEAN_SHEET = {"GKP": 12.0, "DEF": 12.0}   # official, GKP/DEF, 60+ minutes 
 # scaled with saves -- it does NOT: Codex's re-review regressed GKP's
 # real-vs-approximate BPS residual against save count on the cached GW1-4
 # data (scripts/validate_bps.py) and found a real, save-count-dependent
-# slope (correlation 0.477, ~0.894 extra BPS per save, 95% CI
-# [0.52, 1.26]) that a flat base of 2.0 was leaving entirely on the table --
+# slope (correlation 0.477, ~0.894 extra BPS per save, HC3 95% CI
+# [0.50, 1.29]) that a flat base of 2.0 was leaving entirely on the table --
 # residual rises from ~3.86 at zero saves to ~8.50 at five. The save-
 # INDEPENDENT part of that residual (the ~3.6-3.86 intercept at zero
 # saves) is a SEPARATE, still-unexplained gap, most plausibly the passing-
@@ -117,9 +115,10 @@ BPS_CLEAN_SHEET = {"GKP": 12.0, "DEF": 12.0}   # official, GKP/DEF, 60+ minutes 
 # goalkeepers routinely clear 30+ attempts via goal-kick distribution, and
 # this codebase has no pass-attempt data to model it) -- that part is
 # fixable only with data this codebase does not have and remains a
-# residual. BPS_SAVE below folds in the DATA-FITTED per-save slope (2.0 +
-# ~0.9, rounded); re-run the validation script as more gameweeks
-# accumulate to refit both numbers.
+# residual. BPS_SAVE below folds in the exploratory GW1-4 DATA-FITTED
+# per-save slope (2.0 + ~0.9, rounded). `scripts/validate_bps.py` now
+# reproduces that fit, reports its uncertainty, and refits it inside every
+# grouped-CV training fold; re-run it as fresh gameweeks accumulate.
 BPS_SAVE = 2.9
 # Official splits a card -3 (yellow) / -9 (red); the simulator draws one
 # undifferentiated `cards` count, so every card scores as a yellow here --

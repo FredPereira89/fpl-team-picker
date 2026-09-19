@@ -381,3 +381,58 @@ def test_bps_approximation_beats_a_reasonable_floor_on_real_fixtures():
     assert exact_match / n_fixtures >= 0.1
     assert np.mean(jaccards) >= 0.5
     assert np.mean(abs_errs) <= 5.0
+
+
+def test_save_calibration_recovers_a_known_synthetic_slope():
+    """The validation script must reproduce the coefficient it tells users
+    to refit, rather than relying on an undocumented one-off calculation."""
+    from scripts.validate_bps import fit_gkp_save_value
+
+    rows = []
+    for i, saves in enumerate([0, 1, 2, 3, 4, 5], start=1):
+        # Approximate BPS at the official base is appearance 6 + 2*saves.
+        # Add a separate intercept residual of 4 and a known extra save
+        # effect of 0.9; fitting with an intercept must recover only 0.9.
+        rows.append({
+            "player_id": i, "fixture": i, "round": (i - 1) % 3 + 1,
+            "minutes": 90, "goals_scored": 0, "assists": 0,
+            "saves": saves, "yellow_cards": 0, "red_cards": 0,
+            "defensive_contribution": 0, "goals_conceded": 0,
+            "clean_sheets": 0, "bps": 10.0 + 2.9 * saves,
+        })
+    hist = pd.DataFrame(rows)
+    positions = {i: "GKP" for i in range(1, 7)}
+
+    fit = fit_gkp_save_value(hist, positions, base_save=2.0)
+    assert fit["intercept"] == pytest.approx(4.0)
+    assert fit["extra_per_save"] == pytest.approx(0.9)
+    assert fit["fitted_save"] == pytest.approx(2.9)
+
+
+def test_grouped_cv_refits_save_value_without_the_held_out_week():
+    """Every fold must derive its save coefficient from that fold's training
+    rows, rather than reuse the full-sample value that has seen the holdout."""
+    from scripts.validate_bps import fit_gkp_save_value, logo_cv
+
+    rows = []
+    positions = {}
+    pid = 1
+    for rnd, extra_save in [(1, 0.4), (2, 0.9), (3, 1.4)]:
+        for saves in [0, 1, 2]:
+            rows.append({
+                "player_id": pid, "fixture": pid, "round": rnd,
+                "minutes": 90, "goals_scored": 0, "assists": 0,
+                "saves": saves, "yellow_cards": 0, "red_cards": 0,
+                "defensive_contribution": 0, "goals_conceded": 0,
+                "clean_sheets": 0,
+                "bps": 10.0 + (2.0 + extra_save) * saves,
+            })
+            positions[pid] = "GKP"
+            pid += 1
+    hist = pd.DataFrame(rows)
+
+    result = logo_cv(hist, positions)
+    for fold in result["folds"]:
+        train = hist[hist["round"] != fold["held_out"]]
+        expected = fit_gkp_save_value(train, positions)["fitted_save"]
+        assert fold["save_value"] == pytest.approx(expected)
