@@ -18,39 +18,59 @@ plain `bonus90` projection). **R8 (rolling multi-period transfer MILP) is now
 implemented as an opt-in live policy and a default walk-forward challenger**;
 its terminal FT value still needs point-in-time replay evidence before the
 new policy should become the live default. R8's Codex-found ownership-tilt
-finding (below) is fixed and regression-tested. The rest of R8 was committed
-alongside the fix at `b800803`. Keep the live switch off pending replay
-evidence for the terminal FT value.
+findings (below, two rounds) are fixed and regression-tested. The rest of R8
+was committed alongside the first-round fix at `b800803`. Keep the live
+switch off pending replay evidence for the terminal FT value.
 
-### R8 Codex review (2026-09-18) - fixed 2026-09-19
+### R8 Codex review (2026-09-18/19) - two rounds, both fixed
 
-| Severity | Status | Finding / next action |
-|---|---|---|
-| Medium | **fixed** | `multiperiod._solve_path()` maximises ownership-tilted event projections, then reconstructs `objective_xp` in raw forecast units. `optimize_multi_period()` calculated raw gain against the forced-wait path but returned the tilted winner even when that raw gain was negative, and `pipeline._choose_transfers()` unconditionally selects the rolling plan when the feature is enabled. Direct reproduction with the supported `risk_profile="differential"`, `ownership_weight=1.0` configuration replaced a 10.0-xP bench player with an 8.0-xP one and returned a negative raw gain that would have been reported as a suggested net gain. |
+| Round | Severity | Status | Finding / next action |
+|---|---|---|---|
+| 1 | Medium | **fixed** | `multiperiod._solve_path()` maximises ownership-tilted event projections, then reconstructs `objective_xp` in raw forecast units. `optimize_multi_period()` calculated raw gain against the forced-wait path but returned the tilted winner even when that raw gain was negative, and `pipeline._choose_transfers()` unconditionally selects the rolling plan when the feature is enabled. Direct reproduction with the supported `risk_profile="differential"`, `ownership_weight=1.0` configuration replaced a 10.0-xP bench player with an 8.0-xP one and returned a negative raw gain that would have been reported as a suggested net gain. |
+| 2 | Medium | **fixed** | Round 1's guard compared `chosen` against a `wait` baseline solved with the SAME tilted `cfg` — so `wait`'s own post-hold weeks could also make a tilt-driven, raw-negative swap, silently lowering the bar `chosen` had to clear. Reviewer reproduced a deterministic case where round 1's fix still reported `gain=+3.203` while the true disadvantage against a genuinely raw-optimal wait path was `-2.543` (returned plan 412.497 raw xP vs. best raw-xP wait 415.040). |
 
-Why the one-period solver never has this bug: its wait/hold plan is just
-another candidate in the pool `_choose_transfers` maximises on raw `net_xp`
-(`fpl/optimize/transfers.py`'s `_attribute_gain`), so a tilt-favoured pick
-that turns out raw-negative can never win — the hold plan simply scores
-higher and is chosen instead. The rolling solver solves `chosen` and `wait`
-as two independent MILP solves with no shared pool, so that guarantee had to
-be made explicit: `optimize_multi_period()` now falls back to the `wait`
-baseline whenever `chosen.gain < 0`, mirroring the one-period solver's
-behaviour instead of unconditionally returning the tilted winner.
+Why the one-period solver never has this bug at all: its wait/hold plan is
+just another candidate in the pool `_choose_transfers` maximises on raw
+`net_xp` (`fpl/optimize/transfers.py`'s `_attribute_gain`), so a
+tilt-favoured pick that turns out raw-negative can never win — the hold plan
+simply scores higher and is chosen instead. The rolling solver solves
+`chosen` and `wait` as two independent MILP solves with no shared pool, so
+that guarantee had to be made explicit in two steps:
 
-Regression: `test_ownership_tilt_never_recommends_a_raw_negative_transfer`
-in `tests/test_multiperiod.py`, verified to fail pre-fix (recommends the
-negative-gain transfer) and pass post-fix via a manual revert/retest (the
-file was new and uncommitted, so `git stash` could not isolate it).
+- **Round 1**: `optimize_multi_period()` falls back to the `wait` baseline
+  whenever `chosen.gain < 0`, instead of unconditionally returning the
+  tilted winner.
+- **Round 2**: the `wait` baseline itself is now solved with
+  `dataclasses.replace(cfg, ownership_weight=0.0)` rather than `cfg`
+  unchanged. With tilt off, `tilted_frame` is the identity (its early exit
+  when every factor is 1.0), so that solve directly maximises the same
+  quantity reported as raw xp — the true ceiling of what holding this week
+  can reach, which always dominates (never trails) a same-cfg tilted wait
+  solve. `chosen.gain` is now judged against that true ceiling, closing the
+  gap the reviewer found.
 
-Review verification before the fix: targeted changed-area tests **177
-passed**; full suite **764 passed, 1 existing warning**; `compileall` and
-`git diff --check` passed. Post-fix full suite: **765 passed, 1 existing
-warning**. Committed at `b800803`, alongside the rest of R8 (this was the
-only uncommitted R8 file group touched — `fpl/model/bps.py`,
-`fpl/model/simulate.py`, `scripts/validate_bps.py` and their tests were left
-uncommitted and unreviewed here; they are unrelated to R8 and need their own
-look before landing).
+Once `wait` is raw-optimal, `pipeline._choose_transfers()`'s unconditional
+selection of the rolling plan (`fpl/pipeline.py` around line 490) is no
+longer a separate concern: the plan it selects is raw-gain-safe by
+construction, so no additional pipeline-level guard was needed.
+
+Regressions in `tests/test_multiperiod.py`, each verified to fail against
+the code they target and pass after their fix (`git stash` could not isolate
+the new, still-uncommitted-at-the-time file, so both were checked via a
+manual copy/revert/retest instead):
+- `test_ownership_tilt_never_recommends_a_raw_negative_transfer` (round 1).
+- `test_wait_baseline_is_judged_on_a_raw_optimal_hold_not_a_tilted_one`
+  (round 2) — also asserts the same-cfg tilted wait solve for this fixture
+  really does make the bad swap (`tilted_wait.weeks[1].out_ids == [victim]`),
+  so the test documents the mechanism, not just the outcome.
+
+Verification: round 1 pre-fix baseline **764 passed**; post-round-1 **765
+passed**; post-round-2 **766 passed**, 1 pre-existing warning throughout.
+`compileall` and `git diff --check` passed on both reviews. Round 1 committed
+at `b800803` (with the rest of R8); round 2's fix is committed separately
+below. `fpl/model/bps.py`, `fpl/model/simulate.py`, `scripts/validate_bps.py`
+and their tests remain uncommitted and unreviewed here — unrelated to R8,
+need their own look before landing.
 
 ### Review 6 fix progress (2026-09-18)
 
@@ -239,12 +259,14 @@ Implemented shape (mirrors open-fpl-solver; 4–6 gameweeks, never 38):
   gameweek or in-sample fit.
 - Regression tests pin delayed moves, the FT cap, paid hits, selling-value
   affordability, weekly squad/XI legality, report semantics, replay execution,
-  the opt-in live route, and (fixed 2026-09-19) that a `differential`/
-  `template` ownership tilt never reports a raw-xP-negative transfer as the
-  recommendation — `optimize_multi_period()` falls back to the wait baseline
-  whenever the tilt-chosen path's raw gain is negative, the same guarantee
-  the one-period solver gets implicitly from sharing one pool with its hold
-  plan. See the R8 Codex review section above for the finding and repro.
+  the opt-in live route, and (fixed 2026-09-19, two rounds) that a
+  `differential`/`template` ownership tilt never reports a raw-xP-negative
+  transfer as the recommendation — `optimize_multi_period()` falls back to a
+  `wait` baseline solved with the tilt zeroed (`ownership_weight=0.0`)
+  whenever the tilt-chosen path's raw gain against that raw-optimal baseline
+  is negative. See the R8 Codex review section above for both findings and
+  why the baseline itself had to be re-solved without the tilt, not just
+  compared after the fact.
 
 Deliberate limits: no chips inside the rolling MILP and no forecast price
 changes. The terminal FT value (default 1.5 xP) is explicitly provisional and

@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from fpl.config import Config
-from fpl.optimize.multiperiod import optimize_multi_period
+from fpl.optimize.multiperiod import optimize_multi_period, _solve_path
 
 
 POSITIONS = ["GKP"] * 2 + ["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3
@@ -147,6 +147,48 @@ def test_ownership_tilt_never_recommends_a_raw_negative_transfer():
     assert plan.weeks[0].in_ids == []
     assert plan.gain == 0.0
     assert plan.objective_xp == plan.baseline_objective_xp
+
+
+def test_wait_baseline_is_judged_on_a_raw_optimal_hold_not_a_tilted_one():
+    """The comparator `chosen` is judged against must itself be raw-optimal.
+
+    Solving the forced-hold baseline with cfg's own tilt still lets an
+    ownership-tilted swap happen in the weeks AFTER the forced hold, which
+    silently lowers what counts as "the best you could reach by waiting" --
+    so a `chosen` path only has to beat that weakened figure, not the true
+    best raw-xP path. optimize_multi_period must zero the tilt for the
+    baseline solve instead of reusing cfg, so the baseline it reports is at
+    least as good as the same forced-hold solve done under cfg's own tilt.
+    """
+    pool = _pool()
+    victim, target = 8, 23  # same position (MID)
+    pool["ownership"] = 1.0
+    pool["xp_gw3"] = 1.0
+    # Every currently-owned player projects strongly and identically (raw
+    # 10/gw for three weeks) so only ownership -- not raw skill -- explains
+    # any tilt-driven swap; the victim's high ownership singles it out.
+    pool.loc[pool.player_id <= 15,
+             ["xp_gw1", "xp_gw2", "xp_gw3", "xp_horizon", "xp_next1", "xp_next5"]] = [
+                 10.0, 10.0, 10.0, 30.0, 10.0, 30.0]
+    pool.loc[pool.player_id == victim, "ownership"] = 100.0
+    pool.loc[pool.player_id == target,
+             ["xp_gw1", "xp_gw2", "xp_gw3", "xp_horizon", "xp_next1", "xp_next5",
+              "ownership"]] = [8.0, 8.0, 8.0, 24.0, 8.0, 24.0, 0.0]
+
+    cfg = _cfg(horizon_gw=3, max_paid_hits=1, multi_period_ft_value=0.0,
+               risk_profile="differential", ownership_weight=1.0)
+    plan = optimize_multi_period(pool, list(range(1, 16)), 0.0, 1, cfg)
+
+    # A forced-hold solve under cfg's own tilt still swaps victim for target
+    # in a later week (profitable under tilt), landing on a lower raw total
+    # than the true raw-optimal hold path -- confirming the weaker baseline
+    # this guards against is real, not hypothetical, for this fixture.
+    tilted_wait = _solve_path(pool, list(range(1, 16)), 0.0, 1, cfg, None,
+                              force_first_hold=True)
+    assert tilted_wait.weeks[1].out_ids == [victim]
+    assert plan.baseline_objective_xp > tilted_wait.objective_xp
+    assert plan.gain == 0.0
+    assert plan.weeks[0].out_ids == []
 
 
 def test_report_adapter_keeps_future_moves_explicitly_contingent():

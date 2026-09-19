@@ -12,7 +12,7 @@ replay exposes it as a challenger policy in the meantime.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 import pulp
@@ -376,17 +376,28 @@ def optimize_multi_period(
     solver keeps in `optimize.transfers._solve`. There, the wait/hold plan is
     just another candidate in the pool `_choose_transfers` maximises on raw
     `net_xp`, so a tilt-driven pick that turns out raw-negative can never
-    win. The rolling solver has no such shared pool -- `chosen` and `wait` are
-    two separate solves -- so that guard has to be explicit here: a `chosen`
-    path whose raw gain against holding is negative must not be reported as
-    the recommendation, no matter how much the tilt favoured it internally.
+    win. The rolling solver has no such shared pool, so that guard has to be
+    explicit here: a `chosen` path whose raw gain against holding is negative
+    must not be reported as the recommendation, no matter how much the tilt
+    favoured it internally.
+
+    The comparator this is judged against must itself be raw-optimal, not
+    just tilt-optimal-and-forced-to-hold-week-one: solving `wait` with `cfg`
+    unchanged reuses the same tilt for every week after the forced hold, so
+    its "raw" total is only the best a TILTED path can reach, not the best a
+    raw one can. With tilt off, `tilted_frame` is the identity (see its
+    early-exit when every factor is 1.0), so a solve with `ownership_weight`
+    zeroed maximises exactly the quantity reported as raw xp -- that is the
+    true ceiling `chosen` must clear, and always at least matches (never
+    trails) the tilted wait's raw total.
     """
     chosen = _solve_path(
         xp_df, current_squad_ids, bank, free_transfers, cfg, selling_prices)
     if chosen is None:
         raise ValueError("multi-period transfer optimisation is infeasible")
+    raw_cfg = replace(cfg, ownership_weight=0.0)
     wait = _solve_path(
-        xp_df, current_squad_ids, bank, free_transfers, cfg, selling_prices,
+        xp_df, current_squad_ids, bank, free_transfers, raw_cfg, selling_prices,
         force_first_hold=True)
     if wait is None:
         raise ValueError("multi-period wait-one-week baseline is infeasible")
