@@ -8,14 +8,49 @@ are closed. Review 1 (RB1–RB11)
 fixed at `ad025d1..ed0092c`; review 2 (RR1–RR7) fixed at `880fbc9..dfd6f10`;
 review 3 (three findings) fixed with the file's restoration; review 4 (four
 findings) and review 5 (two cleanups) fixed after. **R10 (bonus from ranked
-simulated BPS) is implemented and three-times re-reviewed** — the
+simulated BPS) is implemented and has completed six review passes** — the
 simulation-side scorer and its 2026/27 BPS coefficients are validated
 against real GW1-4 fixtures with leave-one-gameweek-out cross-validation; a
 `build_xp`/Mode 1 calibration attempt was tried, checked against real data,
 found to cut true awarded bonus by more than half, and reverted (see its
 design section below — `xp_next1`'s bonus term is intentionally back to a
-plain `bonus90` projection). **R8 (rolling multi-period transfer MILP) is
-still not started** and remains designed below.
+plain `bonus90` projection). **R8 (rolling multi-period transfer MILP) is now
+implemented as an opt-in live policy and a default walk-forward challenger**;
+its terminal FT value still needs point-in-time replay evidence before the
+new policy should become the live default. R8's Codex-found ownership-tilt
+finding (below) is fixed and regression-tested. The rest of R8 was committed
+alongside the fix at `b800803`. Keep the live switch off pending replay
+evidence for the terminal FT value.
+
+### R8 Codex review (2026-09-18) - fixed 2026-09-19
+
+| Severity | Status | Finding / next action |
+|---|---|---|
+| Medium | **fixed** | `multiperiod._solve_path()` maximises ownership-tilted event projections, then reconstructs `objective_xp` in raw forecast units. `optimize_multi_period()` calculated raw gain against the forced-wait path but returned the tilted winner even when that raw gain was negative, and `pipeline._choose_transfers()` unconditionally selects the rolling plan when the feature is enabled. Direct reproduction with the supported `risk_profile="differential"`, `ownership_weight=1.0` configuration replaced a 10.0-xP bench player with an 8.0-xP one and returned a negative raw gain that would have been reported as a suggested net gain. |
+
+Why the one-period solver never has this bug: its wait/hold plan is just
+another candidate in the pool `_choose_transfers` maximises on raw `net_xp`
+(`fpl/optimize/transfers.py`'s `_attribute_gain`), so a tilt-favoured pick
+that turns out raw-negative can never win — the hold plan simply scores
+higher and is chosen instead. The rolling solver solves `chosen` and `wait`
+as two independent MILP solves with no shared pool, so that guarantee had to
+be made explicit: `optimize_multi_period()` now falls back to the `wait`
+baseline whenever `chosen.gain < 0`, mirroring the one-period solver's
+behaviour instead of unconditionally returning the tilted winner.
+
+Regression: `test_ownership_tilt_never_recommends_a_raw_negative_transfer`
+in `tests/test_multiperiod.py`, verified to fail pre-fix (recommends the
+negative-gain transfer) and pass post-fix via a manual revert/retest (the
+file was new and uncommitted, so `git stash` could not isolate it).
+
+Review verification before the fix: targeted changed-area tests **177
+passed**; full suite **764 passed, 1 existing warning**; `compileall` and
+`git diff --check` passed. Post-fix full suite: **765 passed, 1 existing
+warning**. Committed at `b800803`, alongside the rest of R8 (this was the
+only uncommitted R8 file group touched — `fpl/model/bps.py`,
+`fpl/model/simulate.py`, `scripts/validate_bps.py` and their tests were left
+uncommitted and unreviewed here; they are unrelated to R8 and need their own
+look before landing).
 
 ### Review 6 fix progress (2026-09-18)
 
@@ -25,7 +60,7 @@ still not started** and remains designed below.
 | C6-2 | **fixed** | New `pipeline._with_weekly_xi()` substitutes the exact one-week XI (`best_xi`) into every candidate's `starting_ids` BEFORE `pick_best_squad`/`_p_gain_positive` run, in both `_choose_squad` and `_choose_transfers`. `_honour_rank_captain` recomputes `Lineup.xp` when it overrides the captain. Regression: `tests/test_pipeline.py::test_rank_scoring_and_captaincy_use_the_exact_weekly_xi_not_the_horizon_one` (an engineered horizon/weekly-XI swap — player benched on the horizon, dominant this week — reproduced the bug end to end: `mean_points` 32.0→130.0, `captain` 1→13 once fixed), `::test_honour_rank_captain_recomputes_lineup_xp_when_captain_changes`. | (see git log: "rank scoring uses the exact weekly XI") |
 | C6-3 | **fixed** | `weekly.py` now branches the "Against the field" selection sentence and the "No transfer recommended" hold message on `rank_stats["decided_by"]`, and renders a caveat when `captain_reported is False` instead of only recording it. Regression: `tests/test_report.py::test_the_field_section_says_expected_points_decided_when_they_did`, `::test_the_hold_message_names_expected_points_when_they_decided`, `::test_a_rejected_rank_captain_is_disclosed_not_hidden`. | (see git log: "rank scoring uses the exact weekly XI") |
 | C6-4 | **fixed** | `actuals_from_summaries` now returns `fixture_count` (rows per round, from the existing groupby); `probability_scores` restricts scoring to `fixture_count == 1`, treating a missing column as 1 for backward compatibility. Verified empirically that blanks were already excluded by `score_gameweek`'s inner merge (no history row exists for a round with no fixture) — only the double-gameweek half of the finding reproduced; the commit documents that distinction rather than implementing the blanks fix Codex suggested for a bug that wasn't there. Regression: `tests/test_ledger.py::test_actuals_from_summaries_reports_the_fixture_count`, `::test_probability_scores_exclude_double_gameweek_rows`, `::test_probability_scores_without_a_fixture_count_column_score_everyone`, `::test_score_gameweek_carries_fixture_count_through_to_probability_scores`. | (see git log: "probability scoring excludes double gameweeks it cannot honestly settle") |
-| C6-5 | **fixed** | Verified numerically that a single binary appearance event's marginal is Bernoulli(mean) for ANY generating mechanism with that mean — a per-scenario Beta draw provably cannot "widen" it, so that framing in the earlier R4 commit was an overclaim of my own. The REAL, confirmed bug was `p60_given_start = p_60/theta` using the RANDOM draw as denominator, which strictly lowers `E[reached_60]` below the intended `p_60` once clipping fires (reproduced numerically: buggy 0.402 vs intended 0.45). Fix: removed the Beta draw entirely rather than patch around ineffective machinery that had already caused a regression — `p_start`/`p_60` now stay at their fixed model values throughout `_on_pitch()`, so `p60_given_start` uses the fixed denominator. `start_evidence` stays computed/exposed as a labelled, currently-unused confidence signal; R4 (epistemic spread) is honestly still open and needs a PERSISTENT theta reused across a multi-week decision (R8-adjacent, unbuilt). Regression: `tests/test_simulate.py::test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60` (verified fails pre-fix — 3.598 vs 3.766 expected — via `git stash` on the source files alone, passes post-fix), `::test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw`, `::test_an_unavailable_player_never_appears`, `::test_start_evidence_does_not_change_a_single_gameweeks_simulation`. | (see git log: "remove the per-scenario Beta draw that biased the 60-minute marginal") |
+| C6-5 | **fixed** | Verified numerically that a single binary appearance event's marginal is Bernoulli(mean) for ANY generating mechanism with that mean — a per-scenario Beta draw provably cannot "widen" it, so that framing in the earlier R4 commit was an overclaim of my own. The REAL, confirmed bug was `p60_given_start = p_60/theta` using the RANDOM draw as denominator, which strictly lowers `E[reached_60]` below the intended `p_60` once clipping fires (reproduced numerically: buggy 0.402 vs intended 0.45). Fix: removed the Beta draw entirely rather than patch around ineffective machinery that had already caused a regression — `p_start`/`p_60` now stay at their fixed model values throughout `_on_pitch()`, so `p60_given_start` uses the fixed denominator. `start_evidence` stays computed/exposed as a labelled, currently-unused confidence signal; R4 (epistemic spread) is honestly still open and needs a PERSISTENT theta reused across a multi-week decision. R8 now supplies the rolling decision structure, but those posterior worlds are not yet built into it. Regression: `tests/test_simulate.py::test_a_thin_evidence_flag_on_the_minutes_frame_does_not_move_p_60` (verified fails pre-fix — 3.598 vs 3.766 expected — via `git stash` on the source files alone, passes post-fix), `::test_p60_given_start_uses_the_fixed_p_start_not_a_random_draw`, `::test_an_unavailable_player_never_appears`, `::test_start_evidence_does_not_change_a_single_gameweeks_simulation`. | (see git log: "remove the per-scenario Beta draw that biased the 60-minute marginal") |
 | C6-6 | **fixed** | Reproduced numerically first: a pool where the pool-wide `_xi_ceiling()` scalar (cheapest keeper + 3 cheapest outfielders anywhere in the pool) passes a 3-5-2 XI costing 78.8, but that XI starts all 5 MIDs including the pool's 3 cheapest outfielders, so its TRUE cheapest legal bench (DEF/FWD, since MID has 0 bench slots left) costs 25.3 — a real total of 104.1 against a 100.0 budget, genuinely infeasible despite passing the old check. Fix: new `_cheapest_legal_bench()` computes, per position, exactly `SQUAD_SPLIT - in_xi` more players needed, cheapest first, skipping anyone already in the XI or whose club is already at `MAX_PER_CLUB`; `_repair()`'s stopping condition uses this exact check instead of the scalar (the swap heuristic inside a pass stays a cheap approximation, since the exact check re-verifies on every pass). `by_pos_sorted` is precomputed once per `sample_rival_squads` call, sorted by price ascending, since the check can run up to `REPAIR_PASSES` times per rival. `_xi_ceiling()` is removed — no callers remained. Regression: `tests/test_rank.py::test_a_ceiling_passing_xi_that_cannot_be_completed_is_repaired` (pins the exact numeric scenario above), `::test_no_rival_xi_costs_more_than_a_legal_fifteen_allows` (rewritten to assert genuine completability via `_cheapest_legal_bench` on every sampled rival XI, using a club-diverse pool rather than the pre-existing `_crowded_pool` fixture, which puts every GKP on one club and can make some XIs genuinely uncompletable regardless of price — a club-cap pathology `_repair` already documents it may not resolve, not a price-ceiling bug). Verified both new tests fail (ImportError) against pre-fix code via `git stash` on `fpl/optimize/rank.py` alone. | (see git log: "rival XI completability is checked exactly, not by a pool-wide scalar") |
 
 Suite at time of writing this checkpoint: **723 passed, 1 warning** — all six
@@ -70,7 +105,7 @@ did not repeat that network/cache-dependent run in review 6.
 The warning is the existing SciPy `ConstantInputWarning` in
 `tests/test_backtest_aggregate.py`; it is unrelated to these changes.
 
-**Last updated:** 2026-09-18 (Codex review-7 implementation)
+**Last updated:** 2026-09-18 (Codex R8 review; one finding open)
 
 | Finding | Fix | Commit |
 |---|---|---|
@@ -144,7 +179,7 @@ Codex's re-review findings are kept below for the record.
 | R6 cold starts / stale overrides | **done (three of four parts)** — exposure-weighted positional priors (`scoring.per90_rates`); form weight capped by minutes/90 (`scoring.form_weight`); stale overrides decay by half per freshness budget of extra age (`minutes.override_trust`). NOT done: a cross-league prior for newcomers (needs external data). | `fpl/model/scoring.py`, `fpl/model/minutes.py` |
 | R4 confidence into the distribution | **open for epistemic uncertainty; C6-5 and decision consistency fixed**. `start_evidence` is emitted but intentionally does not alter one-event Bernoulli draws. The biased random denominator was removed, restoring the modeled `p_60` marginal. Gain diagnostics now use the final XI, bench, captain and vice with appearance-aware scenario scoring. Persistent posterior worlds for starts, rates and team strengths remain open and are R8-adjacent. | `fpl/model/minutes.py`, `fpl/model/simulate.py`, `fpl/pipeline.py` |
 | R5 event-specific team-coherent minutes | **slice done** — `minutes.reconcile_team_starts` scales a side's starts down to eleven (never up). Open: per-event minute distributions, depth chart, injury redistribution to named deputies, override event ranges. | `fpl/model/minutes.py` |
-| R8 multi-period MILP | **not started — design below** | `fpl/optimize/transfers.py` (new module `fpl/optimize/multiperiod.py` suggested) |
+| R8 multi-period MILP | **implemented as a challenger** — exact ownership, weekly XI/captain/bench, bank, original selling values, FT rollover and hits across the xP horizon. Live use is opt-in; walk-forward compares it by default. | `fpl/optimize/multiperiod.py`, `fpl/pipeline.py`, `fpl/backtest/replay.py` |
 | R10 BPS rebuild | **done for the simulation layer, cross-validated against real fixtures; the `build_xp`/Mode 1 calibration attempt was reverted as statistically wrong — see design section below** | `fpl/model/bps.py`, `fpl/model/simulate.py`, `fpl/model/xp.py` |
 
 ### Behaviour changes in this session, for the next live run
@@ -168,38 +203,59 @@ Codex's re-review findings are kept below for the record.
   exact final lineups and appearance-aware armband/autosub rules; persistent
   epistemic start uncertainty remains open under R4.
 
-### R8 — rolling multi-period transfer MILP: design
+### R8 — rolling multi-period transfer MILP: implemented (2026-09-18)
 
 Why: the weekly solver picks one move now and holds a fixed 15 for the
 horizon. Future free transfers, bank, selling values and future buys do not
 exist in it, so a small positive gain spends an FT that had option value, and
 a gain in GW+4 is credited now even if the move could wait.
 
-Shape (mirrors open-fpl-solver; keep it to 4–6 gameweeks, never 38):
+Implemented shape (mirrors open-fpl-solver; 4–6 gameweeks, never 38):
 
-- Variables per player `p` and gameweek `g` in the horizon: `owned[p,g]`,
-  `start[p,g]`, `tin[p,g]`, `tout[p,g]`, captain/vice via
-  `objective.add_captaincy` per event (already per-event), bench slots per
-  event (`add_bench` needs an event index). Per gameweek: `bank[g] >= 0`,
-  `ft[g] in 0..5`, `hits[g] >= 0` integer.
+- Variables per player `p` and gameweek `g`: `owned[p,g]`, `start[p,g]`,
+  `tin[p,g]`, `tout[p,g]`, captain and ordered bench slots. Per gameweek:
+  `bank[g] >= 0` plus a one-hot `(FT before, moves)` state.
 - Constraints: `owned[p,g] = owned[p,g-1] + tin[p,g] - tout[p,g]`; squad
   composition 2/5/5/3 and club cap per `g`; `bank[g] = bank[g-1] + Σ sell·tout
   - Σ price·tin` with selling value from `transfers.selling_price` against
   recorded purchase prices for the initial squad and **purchase price =
   price at buy** for players bought inside the horizon (price changes are not
-  modelled; note it); `Σ tin[.,g] <= ft[g] + hits[g]`; `ft[g] = min(5,
-  ft[g-1] - Σ tin[.,g-1] + hits[g-1] + 1)` linearised with a binary for the
-  cap; chips as optional binaries only if scope allows (start without).
+  modelled); exact FT transitions use an enumerated state table, so the MILP
+  cannot exploit a loose min/max relaxation to invent FTs or avoid hits.
+  An inherited club overage may be held, but any transfer restores the cap.
 - Objective: `Σ_g decay^(g-g0) · (Σ start·xp_gw{g} + captain + bench terms
   - hit_cost·hits[g]) + terminal value` where terminal value =
   `ft_value · ft[G]` with `ft_value` a config knob to be estimated by replay,
   not guessed (start at 1.5 xP).
-- Pool pruning: top ~150 players by `xp_horizon` plus everyone owned, or CBC
-  will not finish. Keep `enumerate_transfer_plans` as the candidate generator
-  and expose the multi-period plan as one more candidate first.
-- Replay integration: `expected_points_policy` swaps in the multi-period
-  first-week move; compare against the current policy in
-  `run_walkforward.py` before making it the default.
+- Pool pruning keeps the top configurable 150 by `xp_horizon`, every owned
+  player, and a positional safety set. Exact-score ties prefer fewer moves.
+- The first move is exposed through `TransferPlan`; future moves are labelled
+  contingent and re-solved next week. Its gain baseline is a fresh rolling
+  solve forced to wait one week, not an unrealistic never-transfer path.
+- `optimizer.multi_period_transfers: true` opts the live pipeline in. The
+  default stays false until validation. `run_walkforward.py` now includes a
+  separate executable `multiperiod` policy by default beside `expected`, so
+  promotion can be based on sequential point-in-time regret rather than one
+  gameweek or in-sample fit.
+- Regression tests pin delayed moves, the FT cap, paid hits, selling-value
+  affordability, weekly squad/XI legality, report semantics, replay execution,
+  the opt-in live route, and (fixed 2026-09-19) that a `differential`/
+  `template` ownership tilt never reports a raw-xP-negative transfer as the
+  recommendation — `optimize_multi_period()` falls back to the wait baseline
+  whenever the tilt-chosen path's raw gain is negative, the same guarantee
+  the one-period solver gets implicitly from sharing one pool with its hold
+  plan. See the R8 Codex review section above for the finding and repro.
+
+Deliberate limits: no chips inside the rolling MILP and no forecast price
+changes. The terminal FT value (default 1.5 xP) is explicitly provisional and
+must be estimated from uncontaminated replay before live promotion. While the
+rolling policy is enabled, the old fixed-squad Wildcard-quality surplus is
+suppressed rather than subtracting unlike objectives; the independent chip
+timing heuristics still run. A cached production-sized smoke solve (659-player
+GW6 frame, five events, pool pruned internally) completed in 5.9 seconds and
+returned a legal no-hit path. This is a performance/legality check, not an
+outcome validation. Full repository verification after R8: **765 passed, 1
+existing warning**.
 
 ### R10 — projected BPS from simulated events: **done (2026-09-18)**
 
@@ -426,11 +482,44 @@ leave-one-gameweek-out fold, mean held-out MAE 3.45 vs uniform-0.6's 3.82).
 
 Suite after this review: **749 passed, 1 warning**.
 
+### R10 sixth review (2026-09-18) — scoreline tail and save-calibration leakage fixed
+
+1. **Medium, FIXED.** `_conceded_on()` allocated only eight shared goal-time
+   slots. A simulated ten-goal scoreline therefore became eight goals for a
+   full-match player's conceded-points and BPS calculations. The timing axis
+   is now sized from the realised maximum in `conceded_team`, so every drawn
+   goal is timed without changing ordinary-case cost. A direct regression
+   test pins ten conceded goals to ten for a 90-minute player.
+2. **Medium, FIXED.** `BPS_SAVE=2.9` had been estimated from all GW1-4 rows,
+   then reused while each of those weeks was described as held out. The
+   validation script now contains the actual reproducible estimator:
+   goalkeeper `real BPS - approximate BPS at the official 2.0 base` is
+   regressed on saves with an intercept, and an HC3-robust 95% interval is
+   reported. Full-sample exploratory fit: n=80, residual/save correlation
+   0.477, extra BPS/save 0.894 (HC3 95% CI 0.500-1.287), total fitted save
+   value 2.894 versus the shipped rounded 2.9. Inside `logo_cv`, that save
+   value is now re-fitted from each TRAINING partition before DC selection
+   or holdout scoring (fold values 2.91 / 2.72 / 2.89 / 3.07). Mean held-out
+   MAE remains 3.45 versus 3.82 for uniform DC weights. This is still
+   exploratory because the model family was designed after inspecting the
+   same four weeks; fresh gameweeks remain the prospective test.
+3. **Low, FIXED.** Identical playing windows now assert exact equality with
+   `np.array_equal`; the test no longer permits a nominal 0.5% rate of an
+   event that should be impossible.
+4. **Low, FIXED.** `model.bps` now states the current official save rule
+   directly (2 for any save, +1 inside the box, +1 for a big-chance save)
+   rather than retaining the previous contradictory “uncertain” wording.
+
+Live full-sample validation is unchanged: 42.5% exact bonus-recipient match,
+0.684 mean Jaccard, 0.769 recall and 3.45 BPS MAE. Suite after this review:
+**752 passed, 1 warning**.
+
 ### Open residuals worth knowing
 
 - Assists are still drawn independently of goals in the simulation.
-- The oracle in the replay is a one-week rebuild; the multi-period MILP (R8)
-  would give a fairer executable comparison.
+- The oracle remains a deliberately impossible one-week rebuild. The new
+  `multiperiod` row is the fair executable rolling-policy comparison; it is a
+  challenger until enough uncontaminated gameweeks exist.
 - No cross-league prior for newcomers (R6 part four); no cohort picks for the
   rival field (R2 second half); no per-event minutes (R5 remainder).
 
@@ -812,8 +901,8 @@ P2 is complete (B6, B7, B8, R1, R2-achievable, R3), including
 appearance-aware vice-captain inheritance and legal autosubs in candidate rank
 scoring. Of P3, R5 (team-start slice), R6 (three parts), R7, R9 (window fix),
 single-fixture Brier scoring, and R10 (bonus from ranked simulated BPS) are
-done -- see the P3 progress table. Remaining in full: **R8**, designed above.
-Remaining in part: R2 (cohort picks), R4 (persistent start/rate/team-strength
+done -- see the P3 progress table. No original audit item remains wholly
+unimplemented. Remaining in part: R2 (cohort picks), R4 (persistent start/rate/team-strength
 posteriors), R5 (event-specific minutes), R6 (newcomer prior), R10 (analytic
 `bonus90` recalibration, `--legacy-bonus` comparison flag), and CRPS/
 distribution storage.
@@ -832,9 +921,10 @@ distribution storage.
    final XI, bench and armband.~~
 8. ~~Implement R10 -- bonus awarded by ranking simulated BPS within a match,
    with FPL's tie rule, instead of an independent per-player draw.~~
-9. **Next:** design and implement R8 before adding persistent multi-week
-   epistemic worlds. Do not tune the model from the current contaminated
-   sequential replay numbers.
+9. ~~Implement R8 as a rolling-policy challenger with exact FT/bank/hit state.~~
+10. **Next:** accumulate uncontaminated replay weeks and estimate R8's terminal
+    FT value before promoting it; then add persistent multi-week epistemic
+    worlds. Do not tune from the current contaminated sequential replay numbers.
 
 Two things to know before the next live run:
 
