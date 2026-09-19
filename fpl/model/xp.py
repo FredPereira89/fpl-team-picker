@@ -6,6 +6,7 @@ CONTRACT_COLUMNS. Any replacement model that emits this frame is a drop-in.
 xP is computed per fixture and summed over the fixtures in an event, so
 double gameweeks (2+ fixtures) and blanks (0 fixtures) fall out for free.
 """
+import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
@@ -28,7 +29,9 @@ CONTRACT_COLUMNS = [
 ]
 EVENT_PREFIX = "xp_gw"
 
-GOAL_PTS = {"GKP": 6, "DEF": 6, "MID": 5, "FWD": 4}
+# FPL 2026/27: goalkeepers receive ten points for a goal.  Keep this single
+# scoring contract shared by the deterministic projection and simulator.
+GOAL_PTS = {"GKP": 10, "DEF": 6, "MID": 5, "FWD": 4}
 CS_PTS = {"GKP": 4, "DEF": 4, "MID": 1, "FWD": 0}
 ASSIST_PTS = 3
 DC_PTS = 2
@@ -39,6 +42,35 @@ CONCEDED_PENALTY_POSITIONS = {"GKP", "DEF"}
 # Where to stop summing the threshold tail. Ten points' worth of saves (30) or
 # conceded goals (20) in one match has probability far below rounding.
 MAX_THRESHOLDS = 10
+
+
+def feasible_goal_and_assist_marginals(goal_weights, assist_weights,
+                                       team_goal_rate: float):
+    """Return coherent per-goal scorer and assister probabilities.
+
+    A player cannot assist their own goal.  The independent xG/xA rates are
+    therefore coupled through ``P(assist_i) <= 1 - P(score_i)`` as well as the
+    usual team-level one-assist-per-goal limit.  Both the deterministic xP
+    calculation and Monte Carlo simulator call this function; keeping the
+    feasibility rule in one place prevents the optimizer and rank layer from
+    valuing different football worlds.
+    """
+    goal = np.maximum(np.asarray(goal_weights, dtype=float), 0.0)
+    assist = np.maximum(np.asarray(assist_weights, dtype=float), 0.0)
+    if float(team_goal_rate) <= 0:
+        return np.zeros_like(goal), np.zeros_like(assist)
+    goal_total = goal.sum(axis=0)
+    assist_total = assist.sum(axis=0)
+    goal_denominator = np.maximum(goal_total, float(team_goal_rate))
+    assist_denominator = np.maximum(assist_total, float(team_goal_rate))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scorer = np.divide(goal, goal_denominator,
+                            out=np.zeros_like(goal),
+                            where=goal_denominator > 0)
+        assister = np.divide(assist, assist_denominator,
+                             out=np.zeros_like(assist),
+                             where=assist_denominator > 0)
+    return scorer, np.minimum(assister, 1.0 - scorer)
 
 
 def p_dc_threshold(dc90: float, minutes: float, position: str) -> float:
@@ -156,20 +188,15 @@ def expected_thresholds_over_minutes(rate90: float, mins_row, per_point: int) ->
                      for p, m in minutes_branches(mins_row) if p > 0))
 
 
-def team_goal_scales(players: pd.DataFrame, rates: pd.DataFrame,
-                     minutes: pd.DataFrame, tfx: pd.DataFrame) -> dict:
-    """{(team_id, fixture_id): factor} capping player goals at the team total.
+def _team_attacking_scales(players: pd.DataFrame, rates: pd.DataFrame,
+                           minutes: pd.DataFrame, tfx: pd.DataFrame,
+                           rate_column: str) -> dict:
+    """Cap a modelled attacking event at the side's expected goal total.
 
-    Each player's historical xG per 90 already reflects the attack he plays
-    in, and the fixture multiplier then scales it by his club's attack rating
-    again -- so an elite attack's players were counted twice and, summed,
-    could exceed the goals the strength model expects the side to score. The
-    same rule the simulation's allocation applies (`simulate._allocate`): when
-    the players' expected goals exceed the side's expected total -- the
-    OPPONENT's expected goals conceded -- every attacker is scaled to fit it.
-    When they fall short nothing changes; the remainder is goals by nobody in
-    the frame. The strength model's team number is the authority, and the
-    deterministic projection now agrees with the simulation exactly.
+    A goal can have at most one FPL assist.  Applying the same cap to xA as
+    xG therefore keeps the analytic projection consistent with the joint
+    goal/assist draw in ``model.simulate``.  It deliberately does *not* force
+    assists to equal goals: unassisted goals remain possible.
     """
     if "fixture_id" not in tfx.columns:
         return {}
@@ -180,7 +207,8 @@ def team_goal_scales(players: pd.DataFrame, rates: pd.DataFrame,
         pid, team = int(p["player_id"]), int(p["team_id"])
         if pid not in r.index or pid not in m.index:
             continue
-        w = max(float(r.loc[pid, "xg90"]), 0.0) * max(float(m.loc[pid, "e_minutes"]), 0.0) / 90.0
+        w = (max(float(r.loc[pid, rate_column]), 0.0)
+             * max(float(m.loc[pid, "e_minutes"]), 0.0) / 90.0)
         lam[team] = lam.get(team, 0.0) + w
     xgc_of = {(int(f["team_id"]), int(f["fixture_id"])): float(f["xgc"])
               for _, f in tfx.iterrows()}
@@ -197,6 +225,67 @@ def team_goal_scales(players: pd.DataFrame, rates: pd.DataFrame,
     return out
 
 
+def team_goal_scales(players: pd.DataFrame, rates: pd.DataFrame,
+                     minutes: pd.DataFrame, tfx: pd.DataFrame) -> dict:
+    """{(team_id, fixture_id): factor} capping player goals at the team total.
+
+    Each player's historical xG per 90 already reflects the attack he plays
+    in, and the fixture multiplier then scales it by his club's attack rating
+    again -- so an elite attack's players were counted twice and, summed,
+    could exceed the goals the strength model expects the side to score. The
+    same rule the simulation's allocation applies (`simulate._allocate`): when
+    the players' expected goals exceed the side's expected total -- the
+    OPPONENT's expected goals conceded -- every attacker is scaled to fit it.
+    When they fall short nothing changes; the remainder is goals by nobody in
+    the frame. The strength model's team number is the authority, and the
+    deterministic projection now agrees with the simulation exactly.
+    """
+    return _team_attacking_scales(players, rates, minutes, tfx, "xg90")
+
+
+def team_assist_scales(players: pd.DataFrame, rates: pd.DataFrame,
+                       minutes: pd.DataFrame, tfx: pd.DataFrame) -> dict:
+    """{(team_id, fixture_id): factor} enforcing no more assists than goals."""
+    return _team_attacking_scales(players, rates, minutes, tfx, "xa90")
+
+
+def team_assist_feasibility_scales(players: pd.DataFrame, rates: pd.DataFrame,
+                                   minutes: pd.DataFrame, tfx: pd.DataFrame) -> dict:
+    """Per-player factors for the no-self-assist feasibility constraint."""
+    if "fixture_id" not in tfx.columns:
+        return {}
+    r = rates.set_index("player_id")
+    m = minutes.set_index("player_id")
+    xgc_of = {(int(f["team_id"]), int(f["fixture_id"])): float(f["xgc"])
+              for _, f in tfx.iterrows()}
+    out = {}
+    for _, fx in tfx.iterrows():
+        team, fixture = int(fx["team_id"]), int(fx["fixture_id"])
+        side = players[players["team_id"].astype(int) == team]
+        ids = [int(pid) for pid in side["player_id"] if pid in r.index and pid in m.index]
+        if not ids:
+            continue
+        share = np.array([max(float(m.loc[pid, "e_minutes"]), 0.0) / 90.0
+                          for pid in ids])
+        att = float(fx["att_mult"])
+        goal = np.array([max(float(r.loc[pid, "xg90"]), 0.0) for pid in ids]) * share * att
+        assist = np.array([max(float(r.loc[pid, "xa90"]), 0.0) for pid in ids]) * share * att
+        opp = (int(fx["opponent_id"]) if "opponent_id" in fx and not pd.isna(fx["opponent_id"])
+               else None)
+        # Matches the simulator's lone-row fallback exactly.
+        side_lambda = xgc_of.get((opp, fixture), float(goal.sum()))
+        _, feasible_assist = feasible_goal_and_assist_marginals(goal, assist, side_lambda)
+        raw_assist_marginal = np.divide(
+            assist, max(float(assist.sum()), float(side_lambda)),
+            out=np.zeros_like(assist), where=max(float(assist.sum()), float(side_lambda)) > 0,
+        )
+        factor = np.divide(feasible_assist, raw_assist_marginal,
+                           out=np.ones_like(feasible_assist),
+                           where=raw_assist_marginal > 1e-12)
+        out.update({(team, fixture, pid): float(f) for pid, f in zip(ids, factor)})
+    return out
+
+
 def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> float:
     e_min = float(mins_row["e_minutes"])
     if e_min <= 0:
@@ -209,7 +298,11 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
     pts = p_play + p_60  # 1 pt for appearing, 2 for 60+
     pts += (float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * goal_scale
             * GOAL_PTS[position])
-    pts += float(rate_row["xa90"]) * share * float(fx_row["att_mult"]) * ASSIST_PTS
+    assist_scale = float(fx_row["assist_scale"]) if "assist_scale" in fx_row else 1.0
+    assist_feasibility_scale = (float(fx_row["assist_feasibility_scale"])
+                                if "assist_feasibility_scale" in fx_row else 1.0)
+    pts += (float(rate_row["xa90"]) * share * float(fx_row["att_mult"])
+            * assist_scale * assist_feasibility_scale * ASSIST_PTS)
     pts += p_clean_sheet_over_minutes(float(fx_row["xgc"]), mins_row) * CS_PTS[position]
     pts += p_dc_threshold_mixture(float(rate_row["dc90"]), mins_row, position) * DC_PTS
     pts += bonus
@@ -235,10 +328,14 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
     horizon_events = list(range(from_event, from_event + cfg.horizon_gw))
     decay = float(getattr(cfg, "horizon_decay", 1.0))
     scales = team_goal_scales(players, rates, minutes, tfx)
-    if scales:
+    assist_scales = team_assist_scales(players, rates, minutes, tfx)
+    assist_feasibility_scales = team_assist_feasibility_scales(players, rates, minutes, tfx)
+    if scales or assist_scales or assist_feasibility_scales:
         tfx = tfx.copy()
-        tfx["goal_scale"] = [scales.get((int(t), int(f)), 1.0)
-                             for t, f in zip(tfx["team_id"], tfx["fixture_id"])]
+        keys = list(zip(tfx["team_id"], tfx["fixture_id"]))
+        tfx["goal_scale"] = [scales.get((int(t), int(f)), 1.0) for t, f in keys]
+        tfx["assist_scale"] = [assist_scales.get((int(t), int(f)), 1.0)
+                               for t, f in keys]
 
     rows = []
     for _, p in players.iterrows():
@@ -253,8 +350,12 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
                 continue
             bonus = expected_bonus_for(rate_row["bonus90"], mins_row["e_minutes"],
                                        att_mult=float(fx["att_mult"]))
+            fx_for_player = fx.copy()
+            if "fixture_id" in fx:
+                fx_for_player["assist_feasibility_scale"] = assist_feasibility_scales.get(
+                    (team_id, int(fx["fixture_id"]), pid), 1.0)
             per_event[event] = per_event.get(event, 0.0) + xp_for_fixture(
-                rate_row, mins_row, fx, pos, bonus
+                rate_row, mins_row, fx_for_player, pos, bonus
             )
 
         rows.append({

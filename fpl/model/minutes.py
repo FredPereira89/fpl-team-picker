@@ -327,7 +327,8 @@ def minutes_model(players: pd.DataFrame, cfg, news: dict[int, dict] | None = Non
             "confidence": confidence,
             "flags": flags,
         })
-    return reconcile_team_starts(pd.DataFrame(rows).reset_index(drop=True), players)
+    out = reconcile_team_starts(pd.DataFrame(rows).reset_index(drop=True), players)
+    return reconcile_team_appearances(out, players)
 
 
 # A side starts eleven. A team whose modelled start probabilities sum past
@@ -370,4 +371,38 @@ def reconcile_team_starts(minutes: pd.DataFrame, players: pd.DataFrame) -> pd.Da
         out.at[i, "flags"] = list(out.at[i, "flags"]) + [
             f"Start rate scaled by {factor[i]:.2f}: his side's modelled starters "
             f"summed past eleven"]
+    return out
+
+
+def reconcile_team_appearances(minutes: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
+    """Keep a side's expected substitute appearances within five.
+
+    The Premier League permits five substitutes.  Start probabilities are
+    reconciled separately because a start and a substitute appearance are
+    different mutually exclusive branches.  Only an impossible excess is
+    scaled; a shortfall is left as uncertainty rather than invented minutes.
+    """
+    if len(minutes) == 0 or "team_id" not in players.columns:
+        return minutes
+    out = minutes.copy()
+    team_of = dict(zip(players["player_id"].astype(int), players["team_id"].astype(int)))
+    teams = out["player_id"].astype(int).map(team_of)
+    p_start = out["p_start"].astype(float).clip(lower=0.0, upper=1.0)
+    p_sub = (out["p_play"].astype(float) - p_start).clip(lower=0.0)
+    totals = p_sub.groupby(teams).sum()
+    factor = teams.map(lambda t: min(1.0, 5.0 / totals[t])
+                       if t in totals.index and totals[t] > 0 else 1.0).astype(float)
+    scaled = factor < 1.0 - 1e-12
+    if not scaled.any():
+        return out
+    p_sub = p_sub * factor
+    out["p_play"] = (p_start + p_sub).clip(upper=1.0)
+    if "e_minutes" in out.columns:
+        starts_minutes = (out["m_start"].astype(float) if "m_start" in out.columns
+                          else M_START)
+        out["e_minutes"] = p_start * starts_minutes + p_sub * M_SUB
+    for i in out.index[scaled]:
+        out.at[i, "flags"] = list(out.at[i, "flags"]) + [
+            f"Substitute rate scaled by {factor[i]:.2f}: his side's modelled "
+            "substitute appearances summed past five"]
     return out

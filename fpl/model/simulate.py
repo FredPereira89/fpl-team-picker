@@ -18,21 +18,27 @@ shared. Means agree with `model.xp` by construction -- every rate here is the
 same rate, and `tests/test_simulate.py` pins the agreement -- so this adds a
 distribution without moving the projection underneath it.
 """
+from collections import deque
+
 import numpy as np
 import pandas as pd
 
 from .minutes import M_START, M_SUB
 from .xp import (GOAL_PTS, CS_PTS, ASSIST_PTS, DC_PTS, DC_THRESHOLD,
-                 SAVES_PER_POINT, CONCEDED_PER_PENALTY, CONCEDED_PENALTY_POSITIONS)
+                 SAVES_PER_POINT, CONCEDED_PER_PENALTY, CONCEDED_PENALTY_POSITIONS,
+                 feasible_goal_and_assist_marginals)
 from .bps import score_side_bps, award_match_bonus
 
 DEFAULT_SIMS = 4000
-# Dispersion of a team's attacking output around its expectation, as the shape
-# of a mean-1 Gamma multiplier shared by everyone in the side. It leaves each
-# player's MEAN untouched (E[Poisson(lambda*theta)] = lambda) while making
-# teammates' returns move together: the days a side scores three are the days
-# several of its attackers return. Lower shape = heavier team-level swings.
-TEAM_FORM_SHAPE = 4.0
+STARTERS_PER_TEAM = 11
+MAX_SUBSTITUTES_PER_TEAM = 5
+# A transport residual of 1e-10 is many orders below Monte Carlo error even
+# for a million draws; never silently sample from an unfinished coupling.
+TRANSPORT_TOLERANCE = 1e-10
+# IPF is fast for well-conditioned cases.  Difficult sparse transports route
+# to the exact max-flow fallback below rather than spending thousands of
+# vectorised passes asymptotically approaching the answer.
+TRANSPORT_MAX_ITERATIONS = 200
 
 
 def _aligned(frame: pd.DataFrame, ids, columns) -> np.ndarray:
@@ -58,8 +64,9 @@ def simulate_event_detailed(players, rates, minutes, tfx, event: int,
                             n_sims: int = DEFAULT_SIMS, seed: int = 0) -> dict:
     """The same draw with its parts exposed, for tests and diagnostics.
 
-    {"ids", "samples", "played", "goals", "conceded_team", "conceded_on",
-    "team_of", "bonus"} -- `played` records whether each player appeared in
+    {"ids", "samples", "played", "started", "subbed", "goals", "assists",
+    "conceded_team", "conceded_on", "team_goals", "team_of", "bonus"} --
+    `played` records whether each player appeared in
     at least one fixture in the gameweek.  Keeping appearance separate from
     points matters because a player can appear and score zero: captaincy
     passes to the vice only on NO appearance, and autosubs use the same
@@ -87,7 +94,10 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     ids = [int(i) for i in players["player_id"]]
     samples = np.zeros((len(ids), n_sims), dtype=float)
     played_all = np.zeros((len(ids), n_sims), dtype=bool)
+    started_all = np.zeros((len(ids), n_sims), dtype=bool)
+    subbed_all = np.zeros((len(ids), n_sims), dtype=bool)
     goals_all = np.zeros((len(ids), n_sims), dtype=float)
+    assists_all = np.zeros((len(ids), n_sims), dtype=float)
     conceded_all = np.zeros((len(ids), n_sims), dtype=float)
     bonus_all = np.zeros((len(ids), n_sims), dtype=float)
     conceded_on_all = np.zeros((len(ids), n_sims), dtype=float)
@@ -111,6 +121,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
     # covariance a rank objective built on stacks and opposing players needs.
     key = "fixture_id" if "fixture_id" in rows_in.columns else None
     groups = rows_in.groupby(key) if key else [(None, rows_in.iloc[[i]]) for i in range(len(rows_in))]
+    team_goals_all: dict[int, np.ndarray] = {}
     for _, match in groups:
         sides = [fx for _, fx in match.iterrows()]
         # Who is on the pitch, drawn once per side, then the scoreline.
@@ -127,6 +138,7 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             lam_of[team] = (float(opp["xgc"]) if opp is not None
                             else float(pitch[team]["w"].sum(axis=0).mean()))
             scored[team] = rng.poisson(lam_of[team], size=n_sims)
+            team_goals_all[team] = team_goals_all.get(team, np.zeros(n_sims, dtype=int)) + scored[team]
         # Bonus is a MATCH-wide ranking (the three best BPS across BOTH sides),
         # not a per-side one, so every side's BPS is collected before any of
         # them is awarded -- see the loop below.
@@ -139,14 +151,17 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
             opp = next((o for o in sides if int(o["team_id"]) != team), None)
             conceded = scored[int(opp["team_id"])] if opp is not None \
                 else rng.poisson(float(fx["xgc"]), size=n_sims)
-            pts, goals, bps, conceded_on = _score_side(
+            pts, goals, assists, bps, conceded_on = _score_side(
                 R[rows], M[rows], positions[rows], fx, pitch[team],
                 scored[team], conceded, lam_of[team], n_sims, rng)
             samples[rows] += pts
             # In a double gameweek one appearance is enough to keep the
             # captain's armband and prevent an autosub, so aggregate with OR.
             played_all[rows] |= pitch[team]["played"]
+            started_all[rows] |= pitch[team]["started"]
+            subbed_all[rows] |= pitch[team]["subbed"]
             goals_all[rows] += goals
+            assists_all[rows] += assists
             conceded_all[rows] += conceded[None, :]
             # Sums across a double gameweek's fixtures, same reasoning as
             # `conceded_all`: goals conceded while on the pitch, across
@@ -161,16 +176,59 @@ def _simulate(players, rates, minutes, tfx, event, n_sims, seed):
                 samples[rows] += bonus[offset:offset + len(rows)]
                 bonus_all[rows] += bonus[offset:offset + len(rows)]
                 offset += len(rows)
-    return ids, samples, {"played": played_all, "goals": goals_all,
-                          "conceded_team": conceded_all, "team_of": team_of,
+    return ids, samples, {"played": played_all, "started": started_all,
+                          "subbed": subbed_all, "goals": goals_all,
+                          "assists": assists_all, "conceded_team": conceded_all,
+                          "team_goals": team_goals_all, "team_of": team_of,
                           "bonus": bonus_all, "conceded_on": conceded_on_all}
+
+
+def _sample_fixed_slots(probabilities: np.ndarray, slots: int,
+                        n_sims: int, rng) -> np.ndarray:
+    """Sample fixed-size selections with the supplied inclusion marginals.
+
+    Systematic sampling chooses exactly ``slots`` entries, including synthetic
+    unmodelled squad places.  If probabilities sum to no more than the number
+    of slots, every real player's inclusion probability is retained exactly;
+    dummies absorb the residual.  This is the right dependency for a football
+    lineup: an eleventh start makes a twelfth impossible, unlike independent
+    Bernoulli draws.
+    """
+    p = np.clip(np.asarray(probabilities, dtype=float), 0.0, 1.0)
+    if slots <= 0 or len(p) == 0:
+        return np.zeros((len(p), n_sims), dtype=bool)
+    if p.ndim == 1:
+        p = np.broadcast_to(p[:, None], (len(p), n_sims)).copy()
+    elif p.shape[1] != n_sims:
+        raise ValueError("probability matrix must have one column per simulation")
+    total = p.sum(axis=0)
+    overfull = total > slots + 1e-9
+    if overfull.any():
+        # Hand-built frames can bypass minutes reconciliation.  Preserve their
+        # relative ordering while refusing an impossible expected lineup.
+        p *= np.minimum(1.0, float(slots) / np.maximum(total, 1e-12))[None, :]
+        total = p.sum(axis=0)
+    # Split unused places evenly across `slots` synthetic players.  This
+    # vectorises the draw even when conditional substitute probabilities vary
+    # by scenario, while each dummy remains a valid probability in [0, 1].
+    dummies = np.broadcast_to(((float(slots) - total) / float(slots))[None, :],
+                              (slots, n_sims))
+    all_p = np.concatenate([p, dummies], axis=0)
+    cumulative = np.cumsum(all_p, axis=0)
+    targets = rng.random(n_sims)[None, :] + np.arange(slots)[:, None]
+    picked = (cumulative[None, :, :] > targets[:, None, :]).argmax(axis=1)
+    out = np.zeros((len(p), n_sims), dtype=bool)
+    scenario = np.broadcast_to(np.arange(n_sims), picked.shape)
+    real = picked < len(p)
+    out[picked[real], scenario[real]] = True
+    return out
 
 
 def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
     """Minutes on the pitch per player-scenario, and each one's goal weight.
 
-    `p_start` is drawn ONCE per player as a plain Bernoulli, not per-scenario
-    from a posterior. An earlier version drew a fresh Beta `p_start` per
+    `p_start` is sampled as one coherent eleven, not as independent Bernoulli
+    draws. An earlier version drew a fresh Beta `p_start` per
     scenario, reasoning that a price prior and an ever-present's thirty
     starts can land on the same 0.8 and should not be simulated with equal
     confidence. That reasoning is correct, but the mechanism could not
@@ -195,9 +253,19 @@ def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
     """
     p_start, p_play, p_60, m_start = (M[rows, i][:, None] for i in range(4))
     n = len(rows)
-    u = rng.random((n, n_sims))
-    started = u < p_start
-    subbed = (u >= p_start) & (u < p_play)
+    started = _sample_fixed_slots(p_start[:, 0], STARTERS_PER_TEAM, n_sims, rng)
+    # Conditional on not starting, each player retains the p_play marginal.
+    # The fixed five-place draw makes substitute appearances mutually
+    # exclusive too; dummies represent unused substitutions.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sub_given_not_start = np.where(
+            p_start[:, 0] < 1.0 - 1e-12,
+            (p_play[:, 0] - p_start[:, 0]) / np.maximum(1.0 - p_start[:, 0], 1e-12),
+            0.0,
+        )
+    sub_given_not_start = np.clip(sub_given_not_start, 0.0, 1.0)
+    q = np.where(started, 0.0, sub_given_not_start[:, None])
+    subbed = _sample_fixed_slots(q, MAX_SUBSTITUTES_PER_TEAM, n_sims, rng)
     mins = np.where(started, m_start, np.where(subbed, M_SUB, 0.0))
     with np.errstate(divide="ignore", invalid="ignore"):
         p60_given_start = np.where(p_start > 0, p_60 / np.maximum(p_start, 1e-12), 0.0)
@@ -212,36 +280,185 @@ def _on_pitch(R, M, rows, fx, n_sims, rng) -> dict:
            "reached_60": reached_60, "share": share, "w": w}
 
 
-def _allocate(total: np.ndarray, w: np.ndarray, cap: float, rng) -> np.ndarray:
-    """Hand a side's goals to its players, preserving each player's mean.
+def _joint_transport(scorer_marginal: np.ndarray,
+                     assister_marginal: np.ndarray) -> np.ndarray:
+    """Couple scorer/assister marginals with a zero real-player diagonal.
 
-    Goal by goal, each of the side's `total` goals goes to player i with
-    probability w_i / D, where D = max(sum w, cap) per scenario. When the
-    players' modelled total is within the side's expected total the shares
-    sum to less than one and the remainder is a goal by nobody in the frame
-    -- an own goal, a player with no minutes on record -- so every player's
-    marginal stays exactly Poisson(w_i). When the players' total EXCEEDS the
-    side's, shares are normalised and every attacker is scaled down to fit
-    the side's total: the strength model's team number wins over the sum of
-    individual rates, which is also the audit's R7 remedy for counting team
-    quality twice. Drawn as successive conditional binomials, which is a
-    multinomial without the per-scenario loop.
+    Iterative proportional fitting is stopped by its *measured* largest row or
+    column residual, not an arbitrary pass count.  A non-convergent transport
+    is an invalid probability model, so it fails loudly rather than quietly
+    biasing the weekly rank simulation.
     """
-    n, n_sims = w.shape
-    W = w.sum(axis=0)
-    D = np.maximum(W, cap)
-    out = np.zeros((n, n_sims), dtype=float)
-    remaining = total.astype(int).copy()
-    remaining_p = np.ones(n_sims)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        for i in range(n):
-            p_i = np.where(D > 0, w[i] / D, 0.0)
-            cond = np.where(remaining_p > 1e-12, np.clip(p_i / remaining_p, 0.0, 1.0), 0.0)
-            g = rng.binomial(remaining, cond)
-            out[i] = g
-            remaining = remaining - g
-            remaining_p = remaining_p - p_i
+    categories, n_sims = scorer_marginal.shape
+    joint = scorer_marginal[:, None, :] * assister_marginal[None, :, :]
+    diagonal = np.arange(categories - 1)  # final row/column are the dummies
+    joint[diagonal, diagonal, :] = 0.0
+
+    for _ in range(TRANSPORT_MAX_ITERATIONS):
+        row_sum = joint.sum(axis=1)
+        joint *= np.divide(scorer_marginal, row_sum,
+                           out=np.zeros_like(row_sum), where=row_sum > 1e-15)[:, None, :]
+        col_sum = joint.sum(axis=0)
+        joint *= np.divide(assister_marginal, col_sum,
+                           out=np.zeros_like(col_sum), where=col_sum > 1e-15)[None, :, :]
+        residual = max(
+            float(np.max(np.abs(joint.sum(axis=1) - scorer_marginal))),
+            float(np.max(np.abs(joint.sum(axis=0) - assister_marginal))),
+        )
+        if residual <= TRANSPORT_TOLERANCE:
+            return joint
+    # IPF can converge arbitrarily slowly when a zero-diagonal transport has
+    # a nearly forced edge.  Solve only those unfinished scenario patterns as
+    # an exact bounded network flow, then verify the same tolerance.
+    row_residual = np.max(np.abs(joint.sum(axis=1) - scorer_marginal), axis=0)
+    col_residual = np.max(np.abs(joint.sum(axis=0) - assister_marginal), axis=0)
+    unfinished = np.flatnonzero(np.maximum(row_residual, col_residual) > TRANSPORT_TOLERANCE)
+    if len(unfinished):
+        signature = np.concatenate([
+            scorer_marginal[:, unfinished].T,
+            assister_marginal[:, unfinished].T,
+        ], axis=1)
+        _, inverse = np.unique(signature, axis=0, return_inverse=True)
+        for group in range(int(inverse.max()) + 1):
+            members = unfinished[inverse == group]
+            exact = _exact_transport(scorer_marginal[:, members[0]],
+                                     assister_marginal[:, members[0]])
+            joint[:, :, members] = exact[:, :, None]
+
+    final_residual = max(
+        float(np.max(np.abs(joint.sum(axis=1) - scorer_marginal))),
+        float(np.max(np.abs(joint.sum(axis=0) - assister_marginal))),
+    )
+    if final_residual > TRANSPORT_TOLERANCE:
+        raise RuntimeError(
+            "joint scorer/assister transport could not satisfy its marginals: "
+            f"max residual {final_residual:.3e}"
+        )
+    return joint
+
+
+def _exact_transport(scorer_marginal: np.ndarray,
+                     assister_marginal: np.ndarray) -> np.ndarray:
+    """Exact max-flow fallback for one zero-diagonal transport pattern."""
+    categories = len(scorer_marginal)
+    source, row0, col0, sink = 0, 1, 1 + categories, 1 + 2 * categories
+    graph = [[] for _ in range(sink + 1)]
+
+    def add_edge(start, end, capacity):
+        graph[start].append([end, len(graph[end]), float(capacity)])
+        graph[end].append([start, len(graph[start]) - 1, 0.0])
+        return len(graph[start]) - 1
+
+    for i, value in enumerate(scorer_marginal):
+        add_edge(source, row0 + i, value)
+    references = {}
+    for i in range(categories):
+        for j in range(categories):
+            if i == j and i != categories - 1:
+                continue
+            references[(i, j)] = add_edge(row0 + i, col0 + j, 1.0)
+    for j, value in enumerate(assister_marginal):
+        add_edge(col0 + j, sink, value)
+
+    flow = 0.0
+    total = float(scorer_marginal.sum())
+    while flow < total - TRANSPORT_TOLERANCE:
+        level = [-1] * len(graph)
+        level[source] = 0
+        queue = deque([source])
+        while queue:
+            node = queue.popleft()
+            for end, _, capacity in graph[node]:
+                if capacity > 1e-15 and level[end] < 0:
+                    level[end] = level[node] + 1
+                    queue.append(end)
+        if level[sink] < 0:
+            break
+        cursor = [0] * len(graph)
+
+        def push(node, available):
+            if node == sink:
+                return available
+            while cursor[node] < len(graph[node]):
+                edge_index = cursor[node]
+                end, reverse, capacity = graph[node][edge_index]
+                if capacity > 1e-15 and level[end] == level[node] + 1:
+                    sent = push(end, min(available, capacity))
+                    if sent > 1e-15:
+                        graph[node][edge_index][2] -= sent
+                        graph[end][reverse][2] += sent
+                        return sent
+                cursor[node] += 1
+            return 0.0
+
+        while True:
+            sent = push(source, total - flow)
+            if sent <= 1e-15:
+                break
+            flow += sent
+
+    if total - flow > TRANSPORT_TOLERANCE:
+        raise RuntimeError(
+            "joint scorer/assister transport is infeasible after applying "
+            f"self-assist constraints (unrouted mass {total - flow:.3e})"
+        )
+    out = np.zeros((categories, categories), dtype=float)
+    for (i, j), edge_index in references.items():
+        # Reverse capacity equals the flow sent along this forward edge.
+        end, reverse, _ = graph[row0 + i][edge_index]
+        out[i, j] = graph[end][reverse][2]
     return out
+
+
+def _allocate_goal_events(team_goals: np.ndarray, goal_weights: np.ndarray,
+                          assist_weights: np.ndarray, side_lambda: float, rng):
+    """Jointly allocate scorers and assisters one realised goal at a time.
+
+    Every realised goal first receives its scorer.  The scorer is removed from
+    the eligible assist pool for *that same goal*, which enforces FPL's final-
+    pass definition while retaining both unassisted goals and goals/assists by
+    unmodelled players.  A player may still score and assist in a multi-goal
+    match, just never on the same individual goal.
+    """
+    n, n_sims = goal_weights.shape
+    goals = np.zeros((n, n_sims), dtype=float)
+    assists = np.zeros((n, n_sims), dtype=float)
+    if side_lambda <= 0 or not np.any(team_goals):
+        return goals, assists
+
+    scorer_marginal, assister_marginal = feasible_goal_and_assist_marginals(
+        goal_weights, assist_weights, side_lambda)
+
+    # Couple the scorer and assister marginals as a transport problem.  The
+    # extra row/column represent an unmodelled scorer and an unassisted goal.
+    # Iterative proportional fitting preserves both marginal rates while the
+    # zero diagonal forbids a player assisting their own goal.
+    scorer_marginal = np.vstack([
+        scorer_marginal,
+        np.clip(1.0 - scorer_marginal.sum(axis=0), 0.0, 1.0),
+    ])
+    assister_marginal = np.vstack([
+        assister_marginal,
+        np.clip(1.0 - assister_marginal.sum(axis=0), 0.0, 1.0),
+    ])
+    categories = n + 1
+    joint = _joint_transport(scorer_marginal, assister_marginal)
+    cumulative = np.cumsum(joint.reshape(categories * categories, n_sims), axis=0)
+    # Transport convergence ensures this alters only sub-1e-10 roundoff, while
+    # making the categorical tail explicit and independent of platform float
+    # summation order.
+    cumulative[-1] = 1.0
+    scenarios = np.arange(n_sims)
+    for goal_number in range(int(np.max(team_goals))):
+        active = team_goals > goal_number
+        draw = rng.random(n_sims)
+        selected = (cumulative > draw[None, :]).argmax(axis=0)
+        scorer, assister = selected // categories, selected % categories
+        real_scorer = active & (scorer < n)
+        goals[scorer[real_scorer], scenarios[real_scorer]] += 1.0
+        real_assister = active & (assister < n)
+        assists[assister[real_assister], scenarios[real_assister]] += 1.0
+    return goals, assists
 
 
 def _conceded_on(conceded_team, started, subbed, share, n_sims, rng) -> np.ndarray:
@@ -303,19 +520,13 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     started, subbed = pitch["started"], pitch["subbed"]
     n = len(R)
 
-    goals = _allocate(team_goals, pitch["w"], float(side_lambda), rng)
-
     # Goals conceded while a given player was on the pitch, with SHARED
     # timing across every player on this side -- see `_conceded_on`.
     conceded_on = _conceded_on(conceded_team, started, subbed, share, n_sims, rng)
-    # A mean-1 team attacking multiplier for the parts still drawn per player.
-    theta = rng.gamma(TEAM_FORM_SHAPE, 1.0 / TEAM_FORM_SHAPE, size=n_sims)[None, :]
     att = float(fx["att_mult"])
-    # Assists stay independent of the allocated goals: a coherent assist model
-    # (at most one per goal, allocated by xA share) would move assist means
-    # away from model.xp unless the two were re-derived together. Recorded as
-    # a residual; goals and clean sheets are the pair the rank layer turns on.
-    assists = rng.poisson(np.maximum(xa90 * share * att * theta, 0.0))
+    assist_weights = np.maximum(xa90 * share * att, 0.0)
+    goals, assists = _allocate_goal_events(
+        team_goals, pitch["w"], assist_weights, float(side_lambda), rng)
     dc = rng.poisson(np.maximum(dc90 * share, 0.0))
     threat = float(fx["opp_threat"]) if "opp_threat" in fx else 1.0
     saves = rng.poisson(np.maximum(saves90 * share * threat, 0.0))
@@ -348,7 +559,7 @@ def _score_side(R, M, positions, fx, pitch, team_goals, conceded_team, side_lamb
     # value of its own.
     bps = score_side_bps(positions, played, reached_60, goals, assists,
                          clean_sheet, saves, cards, dc, conceded_on)
-    return pts.astype(float), goals, bps, conceded_on
+    return pts.astype(float), goals, assists, bps, conceded_on
 
 
 def moment_match(samples: np.ndarray, ids: list[int], xp: pd.DataFrame,

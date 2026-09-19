@@ -296,8 +296,8 @@ def replay_calibration(xp, root, summaries, gw: int, cfg):
 
     Two things went wrong in the script this replaces. Calibration was gated
     on the same flag that gates writing replay forecasts, so `--no-save` -- the
-    recommended way to run -- silently disabled it while production has
-    `calibrate=true`. And `apply_calibration` was called without the configured
+    recommended way to run -- silently disabled it even when the configuration
+    opted into the calibration challenger. And `apply_calibration` was called without the configured
     `horizon_decay`, so its default of 1.0 rebuilt an undiscounted xp_horizon
     and the "expected" policy stopped matching the production objective.
     Dormant until five live gameweeks are scored, then wrong every week.

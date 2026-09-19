@@ -91,7 +91,7 @@ def test_rank_settings_load_with_sane_defaults(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("budget: 100\n")
     cfg = load_config(p)
-    assert cfg.rank_sims > 0          # the distributional layer is on
+    assert cfg.rank_sims == 0         # simulation is an explicit diagnostic
     assert cfg.rank_candidates >= 1
     assert cfg.rank_target == 0.5     # "beat the median manager"
 
@@ -107,6 +107,13 @@ def test_rank_can_be_switched_off(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("budget: 100\noptimizer:\n  rank_sims: 0\n")
     assert load_config(p).rank_sims == 0
+
+
+def test_calibration_is_an_explicit_challenger_by_default(tmp_path):
+    assert Config().calibrate is False
+    p = tmp_path / "c.yaml"
+    p.write_text("model:\n  calibrate: true\n")
+    assert load_config(p).calibrate is True
 
 
 def test_a_rank_target_too_extreme_to_simulate_is_rejected_at_load(tmp_path):

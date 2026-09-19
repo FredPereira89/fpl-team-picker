@@ -50,7 +50,10 @@ class Config:
     # expected points alone, which is the only way correlated bets -- three
     # defenders sharing one clean sheet -- get priced as the single bet they
     # are. 0 sims turns it off and falls back to the plain MILP optimum.
-    rank_sims: int = 4000
+    # Simulation is diagnostic until its distributional forecast has passed
+    # the same deadline-frozen evaluation as the expected-points policy.  It
+    # is deliberately off by default to avoid needless weekly runtime.
+    rank_sims: int = 0
     rank_candidates: int = 8
     # How many of the fifteen must change between candidate squads. At 1 the
     # candidates are one swap apart and the choice between them is noise; 4
@@ -80,10 +83,10 @@ class Config:
     multi_period_transfers: bool = False
     multi_period_pool_size: int = 150
     multi_period_ft_value: float = 1.5
-    # Recalibrate xP per position against scored gameweeks (model.calibration).
-    # Self-limiting: it refuses to fit below MIN_GAMEWEEKS, so early in a season
-    # this is a no-op rather than a correction built from noise.
-    calibrate: bool = True
+    # Recalibration is an explicit challenger. Five gameweeks contain many
+    # player rows but only five independent weekly decisions, so automatic
+    # promotion would overstate its evidence.
+    calibrate: bool = False
 
 
 def load_config(path: Path) -> Config:
@@ -154,12 +157,11 @@ def load_config(path: Path) -> Config:
             f"beat and must be in (0, 1) -- 0.5 is the median manager, 0.9 a "
             f"top-tenth week, got {cfg.rank_target}"
         )
-    if cfg.rank_sims > 0:
-        # Fail here rather than twenty minutes into a run: locating an extreme
-        # quantile of the field needs rivals in proportion to 1/(1 - target),
-        # and past a point that draw costs more than the answer is worth.
-        from .optimize.rank import required_rivals
-        required_rivals(cfg.rank_target)
+    # Validate the target even while simulation is disabled.  A config can be
+    # promoted to diagnostic mode later, and an impossible latent setting is
+    # still a configuration error rather than a harmless preference.
+    from .optimize.rank import required_rivals
+    required_rivals(cfg.rank_target)
     if cfg.rank_sims < 0:
         raise ValueError(f"optimizer.rank_sims must be >= 0, got {cfg.rank_sims}")
     if not 1 <= cfg.rank_diversity <= 15:

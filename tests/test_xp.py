@@ -1,9 +1,11 @@
+import numpy as np
 import pandas as pd
 import pytest
 from fpl.config import Config
 from fpl.model.xp import (build_xp, p_dc_threshold, p_dc_threshold_mixture,
                           xp_for_fixture, minutes_branches, expected_thresholds,
-                          expected_thresholds_over_minutes, CONTRACT_COLUMNS)
+                          expected_thresholds_over_minutes, CONTRACT_COLUMNS,
+                          feasible_goal_and_assist_marginals)
 
 CFG = Config(horizon_gw=5)
 
@@ -334,3 +336,36 @@ def test_the_cap_reaches_the_projection():
     full = xp_for_fixture(rate, mins, pd.Series(base), "FWD", 0.0)
     halved = xp_for_fixture(rate, mins, pd.Series({**base, "goal_scale": 0.5}), "FWD", 0.0)
     assert full - halved == pytest.approx(0.5 * 1.0 * 4)      # half a goal at 4 pts
+
+
+def test_self_assist_feasibility_reaches_deterministic_xp():
+    """xG/xA collisions must be constrained in both model paths.
+
+    With A at 0.8 xG/xA and B at 0.2, a one-goal side cannot give A an
+    0.8 assist probability: A scores 80% of its goals.  The feasible assist
+    marginals are 0.2 for each player, which are worth 0.6 xP apiece.
+    """
+    goal, assist = feasible_goal_and_assist_marginals(
+        np.array([0.8, 0.2]), np.array([0.8, 0.2]), team_goal_rate=1.0)
+    assert goal == pytest.approx([0.8, 0.2])
+    assert assist == pytest.approx([0.2, 0.2])
+
+    players = pd.DataFrame({
+        "player_id": [1, 2], "web_name": ["A", "B"],
+        "team": ["Alpha", "Alpha"], "team_id": [1, 1],
+        "position": ["FWD", "FWD"], "price": [7.0, 7.0],
+    })
+    rates = pd.DataFrame({"player_id": [1, 2], "xg90": [0.8, 0.2],
+                          "xa90": [0.8, 0.2], "bonus90": [0.0, 0.0],
+                          "dc90": [0.0, 0.0], "saves90": [0.0, 0.0],
+                          "cards90": [0.0, 0.0]})
+    minutes = pd.DataFrame({"player_id": [1, 2], "p_start": [0.0, 0.0],
+                            "p_play": [0.0, 0.0], "p_60": [0.0, 0.0],
+                            "m_start": [90.0, 90.0], "e_minutes": [90.0, 90.0],
+                            "confidence": ["high", "high"], "flags": [[], []]})
+    tfx = pd.DataFrame({"team_id": [1], "event": [1], "fixture_id": [1],
+                        "is_home": [True], "xgc": [1.0], "p_cs": [0.0],
+                        "att_mult": [1.0]})
+    xp = build_xp(players, rates, minutes, tfx, Config(horizon_gw=1), 1).set_index("player_id")
+    assert xp.loc[1, "xp_next1"] == pytest.approx(0.8 * 4 + 0.2 * 3)
+    assert xp.loc[2, "xp_next1"] == pytest.approx(0.2 * 4 + 0.2 * 3)

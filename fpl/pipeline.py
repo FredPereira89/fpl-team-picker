@@ -433,8 +433,9 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
     transfer losing 0.2 this week and gaining 8 over the next four lost to a
     one-week move, and a hit with strong future payback was close to
     unselectable -- which defeats the entire purpose of charging four points
-    for it. With rank_sims at 4000 by default, that one-week objective
-    superseded the otherwise-correct horizon comparison every gameweek.
+    for it. When rank simulation was enabled by default, that one-week
+    objective superseded the otherwise-correct horizon comparison every
+    gameweek.
 
     So the horizon decides, and the rank layer reports. `optimizer.rank_transfers`
     restores the old behaviour for anyone who wants it, and is off by default

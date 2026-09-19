@@ -296,8 +296,8 @@ def test_replay_calibration_uses_the_configured_decay(tmp_path, monkeypatch):
     xp = pd.DataFrame({"player_id": [1], "position": ["MID"],
                        "xp_next1": [4.0], "xp_next5": [8.0], "xp_horizon": [7.0],
                        "xp_gw5": [4.0], "xp_gw6": [4.0]})
-    out, note = walkforward.replay_calibration(xp, tmp_path, {}, 5,
-                                               Config(horizon_decay=0.5))
+    out, note = walkforward.replay_calibration(
+        xp, tmp_path, {}, 5, Config(horizon_decay=0.5, calibrate=True))
     assert note.startswith("fitted")
     assert out.loc[0, "xp_horizon"] == 4.0 + 0.5 * 4.0     # not the undiscounted 8.0
 
@@ -391,7 +391,7 @@ def test_no_archived_config_returns_an_equal_copy_not_the_shared_object():
     changed the baseline every later week started from."""
     from fpl.config import Config
     from fpl.backtest.walkforward import config_for_replay
-    cfg = Config(horizon_gw=5)
+    cfg = Config(horizon_gw=5, rank_sims=4000)
     out, changed = config_for_replay(cfg, {})
     assert out == cfg and out is not cfg and changed == []
     out.rank_sims = 0

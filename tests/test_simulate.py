@@ -132,7 +132,7 @@ def test_teammates_clean_sheets_are_correlated():
     Bonus (R10) now also correlates points a little across the WHOLE match,
     not only within a side -- both teams' players compete for the same
     three ranked slots -- which narrows the same-team/cross-team gap
-    slightly versus clean sheets alone. 0.12 (was 0.15) still clears both
+    slightly versus clean sheets alone. 0.08 still clears both
     substantive claims: a real same-team effect, and same-team beating
     cross-team.
     """
@@ -140,7 +140,10 @@ def test_teammates_clean_sheets_are_correlated():
     idx = {p: i for i, p in enumerate(ids)}
     same_team = np.corrcoef(samples[idx[2]], samples[idx[3]])[0, 1]
     cross_team = np.corrcoef(samples[idx[2]], samples[idx[5]])[0, 1]
-    assert same_team > 0.12
+    # Mutually exclusive XI places introduce legitimate negative covariance
+    # between marginal starters, so this is lower than an independent-start
+    # draw.  The shared clean-sheet effect must nevertheless remain positive.
+    assert same_team > 0.08
     assert same_team > cross_team
 
 
@@ -387,6 +390,111 @@ def test_a_lone_team_row_without_an_opponent_still_simulates():
     ids, samples = simulate_event(PLAYERS, RATES, MINUTES, tfx, event=1,
                                   n_sims=500, seed=0)
     assert samples[list(ids).index(2)].sum() > 0
+
+
+def test_each_side_has_at_most_eleven_starters_and_sixteen_appearances():
+    """A real side fields eleven and can use at most five substitutes.
+
+    Marginal p_start values can sum to eleven while independent Bernoulli
+    draws still produce twelve or more starters.  This test uses a deliberately
+    broad, twenty-player roster to catch that failure directly.
+    """
+    from fpl.model.simulate import simulate_event_detailed
+
+    players = pd.DataFrame({
+        "player_id": list(range(1, 41)),
+        "web_name": [f"P{i}" for i in range(1, 41)],
+        "team": ["Alpha"] * 20 + ["Beta"] * 20,
+        "team_id": [1] * 20 + [2] * 20,
+        "position": ["MID"] * 40,
+        "price": [5.0] * 40,
+        "selected_by_percent": [1.0] * 40,
+    })
+    rates = pd.DataFrame({"player_id": players.player_id, "xg90": 0.0,
+                          "xa90": 0.0, "bonus90": 0.0, "dc90": 0.0,
+                          "saves90": 0.0, "cards90": 0.0})
+    minutes = pd.DataFrame({"player_id": players.player_id, "p_start": 0.55,
+                            "p_play": 0.80, "p_60": 0.45, "m_start": 80.0,
+                            "e_minutes": 49.0})
+    detail = simulate_event_detailed(players, rates, minutes, TFX, event=1,
+                                     n_sims=3000, seed=21)
+    for team in (1, 2):
+        rows = np.flatnonzero(detail["team_of"] == team)
+        assert (detail["started"][rows].sum(axis=0) <= 11).all()
+        assert (detail["subbed"][rows].sum(axis=0) <= 5).all()
+        assert (detail["played"][rows].sum(axis=0) <= 16).all()
+
+
+def test_assists_never_exceed_realised_team_goals():
+    """Each FPL goal has zero or one assist; independent Poisson assists do not."""
+    from fpl.model.simulate import simulate_event_detailed
+
+    rates = RATES.copy()
+    rates["xa90"] = 5.0  # make the old independent-assist failure decisive
+    detail = simulate_event_detailed(PLAYERS, rates, MINUTES, TFX, event=1,
+                                     n_sims=5000, seed=23)
+    for team in (1, 2):
+        rows = np.flatnonzero(detail["team_of"] == team)
+        assert (detail["assists"][rows].sum(axis=0) <= detail["team_goals"][team]).all()
+
+
+def test_a_player_cannot_score_and_assist_the_same_one_goal_outcome():
+    """Scorer and assister are one joint FPL event, not independent draws."""
+    from fpl.model.simulate import _allocate_goal_events
+
+    n_sims = 10_000
+    goals, assists = _allocate_goal_events(
+        team_goals=np.ones(n_sims, dtype=int),
+        goal_weights=np.ones((1, n_sims)),
+        assist_weights=np.ones((1, n_sims)),
+        side_lambda=1.0,
+        rng=np.random.default_rng(31),
+    )
+    assert (goals == 1.0).all()
+    assert (assists == 0.0).all()
+
+
+def test_constrained_assist_marginals_match_the_joint_simulator():
+    """The simulator must honour the same self-assist constraint as xP."""
+    from fpl.model.simulate import _allocate_goal_events
+    from fpl.model.xp import feasible_goal_and_assist_marginals
+
+    n_sims = 100_000
+    goal_weights = np.repeat(np.array([[0.8], [0.2]]), n_sims, axis=1)
+    assist_weights = goal_weights.copy()
+    _, expected_assists = feasible_goal_and_assist_marginals(
+        goal_weights, assist_weights, team_goal_rate=1.0)
+    goals, assists = _allocate_goal_events(
+        team_goals=np.ones(n_sims, dtype=int), goal_weights=goal_weights,
+        assist_weights=assist_weights, side_lambda=1.0,
+        rng=np.random.default_rng(37))
+    assert goals.mean(axis=1) == pytest.approx([0.8, 0.2], abs=0.01)
+    assert assists.mean(axis=1) == pytest.approx(expected_assists.mean(axis=1), abs=0.01)
+
+
+def test_transport_converges_for_near_balanced_scorer_marginals():
+    """An IPF iteration count is not a convergence criterion.
+
+    At n=200,000, a Bernoulli proportion near 0.5 has SE about 0.00112;
+    0.006 is over five SE, yet comfortably below the 0.0123 bias from the
+    former fixed-20-pass implementation.
+    """
+    from fpl.model.simulate import (_allocate_goal_events, _joint_transport,
+                                    TRANSPORT_TOLERANCE)
+
+    n_sims = 200_000
+    scorer = np.repeat(np.array([[0.49], [0.51], [0.0]]), n_sims, axis=1)
+    assister = np.repeat(np.array([[0.31], [0.49], [0.20]]), n_sims, axis=1)
+    joint = _joint_transport(scorer, assister)
+    assert np.max(np.abs(joint.sum(axis=1) - scorer)) <= TRANSPORT_TOLERANCE
+    assert np.max(np.abs(joint.sum(axis=0) - assister)) <= TRANSPORT_TOLERANCE
+
+    goals, _ = _allocate_goal_events(
+        team_goals=np.ones(n_sims, dtype=int),
+        goal_weights=np.repeat(np.array([[0.49], [0.51]]), n_sims, axis=1),
+        assist_weights=np.repeat(np.array([[0.31], [0.69]]), n_sims, axis=1),
+        side_lambda=1.0, rng=np.random.default_rng(41))
+    assert goals.mean(axis=1) == pytest.approx([0.49, 0.51], abs=0.006)
 
 
 # --- C6-5 (R4 revisited): a single event's marginal cannot be "widened" ---

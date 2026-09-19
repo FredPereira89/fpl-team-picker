@@ -5,6 +5,11 @@ import pytest
 from fpl.model.scoring import (per90_rates, blended_rates, apply_set_piece_roles,
                                 ew_mean, form_weight, blend_form)
 
+
+def test_goalkeeper_goals_use_the_current_fpl_scoring_value():
+    from fpl.model.xp import GOAL_PTS
+    assert GOAL_PTS == {"GKP": 10, "DEF": 6, "MID": 5, "FWD": 4}
+
 CFG = Config(shrinkage_minutes=900, form_half_life_gw=3, form_max_weight=0.6)
 
 # 8 filler MID players added beyond the brief's original 3-player fixture.

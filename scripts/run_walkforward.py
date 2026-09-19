@@ -82,10 +82,11 @@ def main() -> int:
                     help="last gameweek to replay (default: every one played)")
     ap.add_argument("--no-save", action="store_true",
                     help="score without writing forecasts into the ledger. Does NOT "
-                         "switch off calibration -- production calibrates, so the "
-                         "replay does too; see --no-calibrate.")
+                         "change calibration; the configured challenger setting is "
+                         "used unless --no-calibrate is supplied.")
     ap.add_argument("--no-calibrate", action="store_true",
-                    help="skip the per-position calibration a live run would apply")
+                    help="force off per-position calibration (off by default; set "
+                         "model.calibrate: true to evaluate the challenger)")
     ap.add_argument("--policies", default="hold,expected,multiperiod",
                     help="comma-separated executable policies to replay in "
                          "sequence (hold, expected, multiperiod). The free weekly rebuild is "
