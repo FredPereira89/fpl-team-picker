@@ -16,6 +16,11 @@ optimizer:
   max_paid_hits: 2
   hit_cost: 4
   bench_weight: [0.20, 0.15, 0.05, 0.02]
+  # R8 rolling transfer solver. Keep as a replay challenger until its terminal
+  # free-transfer value has enough point-in-time evidence to promote live.
+  multi_period_transfers: false
+  multi_period_pool_size: 150
+  multi_period_ft_value: 1.5
   # Minimum xP for a player allowed to sit on the bench. 0 disables it.
   # Raise to ~2.5 only while preparing a Wildcard or a Bench Boost: it buys a
   # strong bench with budget the starting XI would otherwise have, which is a

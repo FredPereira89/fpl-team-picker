@@ -59,6 +59,13 @@ class TransferPlan:
     net_xp: float = 0.0
     baseline_xp: float = 0.0
     gain: float = 0.0
+    # The rolling solver presents its first executable step through this same
+    # contract. Future moves are contingent plans, not promises: the tool
+    # re-solves after every deadline with new projections and prices.
+    strategy: str = "single-period"
+    future_plan: list[dict] = field(default_factory=list)
+    terminal_free_transfers: int | None = None
+    terminal_value: float = 0.0
 
 
 def _solve(xp_df, current, budget, max_changes, cfg, xp_col, cost=None,

@@ -177,6 +177,12 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
                 f"considered, none beat the field more often than holding once "
                 f"its points hit was charged against it."
             )
+        elif t is not None and getattr(t, "strategy", "single-period") == "multi-period":
+            out.append(
+                "No transfer recommended this week — the rolling plan finds no "
+                "advantage to moving now once future free transfers and hits "
+                "are included."
+            )
         else:
             out.append("No transfer recommended — the squad is already optimal "
                        "on projected points.")
@@ -186,8 +192,24 @@ def render(rec: Recommendation, xp_df: pd.DataFrame) -> str:
         hit = f" after a -{t.hit_cost} hit" if t.hit_cost else " (no hit — within your free transfers)"
         # The solver maximises a decayed horizon, so this figure is not a raw
         # points total -- say so rather than letting it read as one.
-        out.append(f"Suggested net gain of {t.gain:.1f} xP across the horizon{hit} "
-                   f"(discounted — gains in later gameweeks count for less).")
+        if getattr(t, "strategy", "single-period") == "multi-period":
+            out.append(
+                f"Suggested net gain of {t.gain:.1f} xP versus waiting one week"
+                f"{hit} (rolling, discounted horizon; future transfers, hits "
+                f"and {t.terminal_value:.1f} xP of terminal free-transfer value "
+                f"are included)."
+            )
+            future_events = ", ".join(
+                f"GW{step['event']}" for step in t.future_plan
+                if step["out_ids"] or step["in_ids"])
+            if future_events:
+                out.append(
+                    f"The current path also moves in {future_events}; those "
+                    "moves are contingent and will be re-optimised each week."
+                )
+        else:
+            out.append(f"Suggested net gain of {t.gain:.1f} xP across the horizon{hit} "
+                       f"(discounted — gains in later gameweeks count for less).")
         p_pos = (rec.rank or {}).get("p_gain_positive")
         if p_pos is not None:
             # The expected gain is the decision; this is how sure the model is

@@ -94,6 +94,30 @@ def test_transfer_rendered_with_net_gain():
     assert "2.5" in out
 
 
+def test_multi_period_transfer_explains_wait_baseline_and_contingent_moves():
+    plan = TransferPlan(
+        out_ids=[3], in_ids=[4], n_transfers=1, hit_cost=0,
+        squad_ids=list(range(1, 16)), starting_ids=LINEUP.xi,
+        gain=1.75, strategy="multi-period", terminal_value=3.0,
+        future_plan=[{"event": 2, "out_ids": [5], "in_ids": [6]}],
+    )
+    out = render(_rec(mode=2, transfers=plan), XP)
+    assert "versus waiting one week" in out
+    assert "terminal free-transfer value" in out
+    assert "GW2" in out and "contingent" in out
+
+
+def test_multi_period_hold_says_wait_not_globally_optimal():
+    plan = TransferPlan(
+        n_transfers=0, squad_ids=list(range(1, 16)), starting_ids=LINEUP.xi,
+        strategy="multi-period",
+        future_plan=[{"event": 2, "out_ids": [3], "in_ids": [4]}],
+    )
+    out = render(_rec(mode=2, transfers=plan), XP)
+    assert "finds no advantage to moving now" in out
+    assert "already optimal" not in out
+
+
 def test_never_uses_past_tense_action_verbs():
     plan = TransferPlan(out_ids=[3], in_ids=[4], n_transfers=1, hit_cost=4,
                         squad_ids=list(range(1, 16)), starting_ids=LINEUP.xi,

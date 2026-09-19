@@ -27,6 +27,7 @@ from ..optimize.objective import event_columns
 from ..optimize.squad import Squad, optimize_squad
 from ..optimize.transfers import (optimize_transfers, selling_price, bank_after,
                                   TransferPlan)
+from ..optimize.multiperiod import optimize_multi_period
 from ..state import State, ft_after_moves, FT_CAP
 from .walkforward import realised_score
 
@@ -174,6 +175,21 @@ def expected_points_policy(xp, state, gw, cfg) -> Decision:
                                  xp_col="xp_horizon",
                                  selling_prices=selling_values(state, xp))
     return _with_armband(Decision(list(best.squad_ids), list(best.starting_ids)), xp)
+
+
+def multi_period_policy(xp, state, gw, cfg) -> Decision:
+    """R8 challenger: optimise the whole FT/bank path, execute its first step.
+
+    The path is deliberately re-solved every gameweek. Future transfers are
+    contingent on forecasts and prices available then; only the first move is
+    an action the replay carries into state.
+    """
+    plan = optimize_multi_period(
+        xp, [int(i) for i in state.squad], state.bank,
+        int(state.free_transfers), cfg,
+        selling_prices=selling_values(state, xp),
+    ).first_week_plan()
+    return _with_armband(Decision(list(plan.squad_ids), list(plan.starting_ids)), xp)
 
 
 def oracle_rebuild_policy(xp, state, gw, cfg) -> Decision:
@@ -335,6 +351,7 @@ def initial_state(xp: pd.DataFrame, cfg, squad=None) -> ManagerState:
 EXECUTABLE_POLICIES = {
     "hold": hold_policy,
     "expected": expected_points_policy,
+    "multiperiod": multi_period_policy,
 }
 ORACLE_POLICIES = {"oracle": oracle_rebuild_policy}
 

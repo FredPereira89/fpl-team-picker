@@ -73,6 +73,13 @@ class Config:
     # worse expected finish. Discounted expected points decide; the rank
     # layer reports. Turn on to chase a specific weekly threshold deliberately.
     rank_squad: bool = False
+    # Rolling transfer optimisation is an opt-in challenger until its terminal
+    # FT value has enough sequential replay evidence to replace the established
+    # fixed-squad policy. The solver itself is production-complete; this switch
+    # controls only whether its first move decides the live recommendation.
+    multi_period_transfers: bool = False
+    multi_period_pool_size: int = 150
+    multi_period_ft_value: float = 1.5
     # Recalibrate xP per position against scored gameweeks (model.calibration).
     # Self-limiting: it refuses to fit below MIN_GAMEWEEKS, so early in a season
     # this is a no-op rather than a correction built from noise.
@@ -114,6 +121,12 @@ def load_config(path: Path) -> Config:
         rank_diversity=int(opt.get("rank_diversity", d.rank_diversity)),
         rank_transfers=bool(opt.get("rank_transfers", d.rank_transfers)),
         rank_squad=bool(opt.get("rank_squad", d.rank_squad)),
+        multi_period_transfers=bool(opt.get(
+            "multi_period_transfers", d.multi_period_transfers)),
+        multi_period_pool_size=int(opt.get(
+            "multi_period_pool_size", d.multi_period_pool_size)),
+        multi_period_ft_value=float(opt.get(
+            "multi_period_ft_value", d.multi_period_ft_value)),
         calibrate=bool(model.get("calibrate", d.calibrate)),
         rank_target=float(opt.get("rank_target", d.rank_target)),
         free_transfers=int(raw.get("free_transfers", d.free_transfers)),
@@ -156,6 +169,18 @@ def load_config(path: Path) -> Config:
     if cfg.rank_candidates < 1:
         raise ValueError(
             f"optimizer.rank_candidates must be at least 1, got {cfg.rank_candidates}")
+    if cfg.multi_period_transfers and cfg.rank_transfers:
+        raise ValueError(
+            "optimizer.multi_period_transfers and optimizer.rank_transfers cannot "
+            "both decide: one values the full horizon and the other one gameweek")
+    if cfg.multi_period_pool_size < 15:
+        raise ValueError(
+            "optimizer.multi_period_pool_size must be at least 15, got "
+            f"{cfg.multi_period_pool_size}")
+    if cfg.multi_period_ft_value < 0:
+        raise ValueError(
+            "optimizer.multi_period_ft_value cannot be negative, got "
+            f"{cfg.multi_period_ft_value}")
     if not 0.0 <= cfg.ownership_weight <= 1.0:
         raise ValueError(
             f"risk.ownership_weight scales the ownership tilt from 0 (pure "

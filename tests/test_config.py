@@ -157,3 +157,29 @@ def test_the_rank_layer_does_not_decide_the_mode_one_squad_by_default(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text("optimizer:\n  rank_squad: true\n")
     assert load_config(p).rank_squad is True
+
+
+def test_multi_period_solver_is_an_explicit_challenger(tmp_path):
+    assert Config().multi_period_transfers is False
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "optimizer:\n"
+        "  multi_period_transfers: true\n"
+        "  multi_period_pool_size: 120\n"
+        "  multi_period_ft_value: 1.25\n"
+    )
+    cfg = load_config(p)
+    assert cfg.multi_period_transfers is True
+    assert cfg.multi_period_pool_size == 120
+    assert cfg.multi_period_ft_value == 1.25
+
+
+def test_one_week_rank_and_multi_period_cannot_both_decide(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "optimizer:\n"
+        "  multi_period_transfers: true\n"
+        "  rank_transfers: true\n"
+    )
+    with pytest.raises(ValueError, match="cannot both decide"):
+        load_config(p)

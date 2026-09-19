@@ -11,7 +11,8 @@ import pytest
 from fpl.config import Config
 from fpl.backtest.replay import (ManagerState, Decision, step, replay_season,
                                  compare_policies, hold_policy,
-                                 expected_points_policy, oracle_rebuild_policy,
+                                 expected_points_policy, multi_period_policy,
+                                 oracle_rebuild_policy,
                                  selling_values, ORACLE_POLICIES)
 
 
@@ -254,6 +255,19 @@ def test_the_expected_points_policy_spends_a_free_transfer_when_it_pays():
     _, after = step(pool, _actuals(), _state(free_transfers=1), 1, _cfg(),
                     expected_points_policy)
     assert 4 in after.squad
+
+
+def test_multi_period_policy_is_an_executable_replay_challenger():
+    upgrade = {p: 2.0 for p in POOL.player_id}
+    upgrade[4] = 20.0
+    pool = _pool(xp_next1=upgrade)
+    pool["xp_gw1"] = pool["xp_next1"]
+    pool["xp_horizon"] = pool["xp_next1"]
+    result, after = step(
+        pool, _actuals(), _state(free_transfers=1), 1, _cfg(),
+        multi_period_policy)
+    assert 4 in after.squad
+    assert result.hit_cost == 0
 
 
 def test_the_oracle_is_not_charged_for_its_free_rebuild():

@@ -980,3 +980,26 @@ def test_a_wildcard_chip_clears_the_stale_rank_stats(tmp_path, monkeypatch):
                 current_squad=_legal_current_squad(), bank=5.0, free_transfers=1)
     assert rec.chip_squad is True
     assert rec.rank is None
+
+
+def test_live_pipeline_uses_multi_period_first_step_only_when_opted_in(monkeypatch):
+    from types import SimpleNamespace
+    from fpl.optimize.transfers import TransferPlan
+    from fpl.pipeline import _choose_transfers
+
+    rolling = TransferPlan(
+        out_ids=[1], in_ids=[16], n_transfers=1,
+        squad_ids=list(range(2, 17)), starting_ids=list(range(2, 13)),
+        strategy="multi-period", gain=2.0,
+    )
+    monkeypatch.setattr(
+        "fpl.pipeline.optimize_multi_period",
+        lambda *a, **k: SimpleNamespace(first_week_plan=lambda: rolling),
+    )
+    cfg = Config(rank_sims=0, multi_period_transfers=True)
+    best, options, stats = _choose_transfers(
+        pd.DataFrame(), None, None, None, None, cfg, 1,
+        list(range(1, 16)), 0.0, 1, {})
+    assert best is rolling
+    assert options == [rolling]
+    assert stats is None

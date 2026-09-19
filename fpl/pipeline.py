@@ -35,6 +35,7 @@ from .optimize.chips import advise_chips, ChipAdvice
 from .optimize.actions import wildcard_action, freehit_action
 from .optimize.transfers import (optimize_transfers, enumerate_transfer_plans,
                                  selling_price, bank_after)
+from .optimize.multiperiod import optimize_multi_period
 from .report.weekly import Recommendation, render
 
 # Backtest result (scripts/run_backtest.py, trained on 2024/25, tested on
@@ -439,6 +440,12 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
     restores the old behaviour for anyone who wants it, and is off by default
     because a one-week target cannot price a five-week decision.
     """
+    rolling = None
+    if bool(getattr(cfg, "multi_period_transfers", False)):
+        rolling = optimize_multi_period(
+            xp, current_squad, bank, free_transfers, cfg,
+            selling_prices=selling).first_week_plan()
+
     plans = []
     lineups = []
     if int(cfg.rank_sims) > 0:
@@ -448,9 +455,18 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
         plans = enumerate_transfer_plans(xp, current_squad, bank, free_transfers, cfg,
                                          xp_col=HORIZON_COL, selling_prices=selling,
                                          k=int(cfg.rank_candidates))
+        if rolling is not None:
+            duplicate = next((i for i, p in enumerate(plans)
+                              if set(p.squad_ids) == set(rolling.squad_ids)), None)
+            if duplicate is None:
+                plans.append(rolling)
+            else:
+                plans[duplicate] = rolling
         if plans:
             plans = _with_weekly_xi(plans, xp)
             lineups = _candidate_lineups(plans, xp)
+            rolling = next(
+                (p for p in plans if p.strategy == "multi-period"), rolling)
 
     if plans and int(cfg.rank_sims) > 0 and bool(getattr(cfg, "rank_transfers", False)):
         (ids, samples, played, positions, rival_scores,
@@ -471,7 +487,7 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
     if plans:
         # net_xp is the discounted horizon total with this plan's hit already
         # subtracted, which is exactly the quantity a transfer decision turns on.
-        best = max(plans, key=lambda p: (p.net_xp, -p.n_transfers))
+        best = rolling or max(plans, key=lambda p: (p.net_xp, -p.n_transfers))
         stats = None
         if int(cfg.rank_sims) > 0:
             # Diagnostic only: how the CHOSEN plan fares against the field. It
@@ -492,6 +508,9 @@ def _choose_transfers(xp, players, rates, minutes, tfx, cfg, from_event,
             _stash_rank_context(stats, ids, samples, played, positions, rival_scores,
                                bar, target, lineups[best_index], penalty=best.hit_cost)
         return best, plans, stats
+
+    if rolling is not None:
+        return rolling, [rolling], None
 
     best, options = optimize_transfers(xp, current_squad, bank, free_transfers, cfg,
                                        xp_col=HORIZON_COL, selling_prices=selling)
@@ -705,7 +724,13 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
             xp, players, rates, minutes, tfx, cfg, from_event,
             current_squad, bank, free_transfers, selling)
         squad_ids, starting_ids, transfers = best.squad_ids, best.starting_ids, best
-        quality = _squad_quality(xp, cfg, current_squad, bank, selling, best)
+        # R8 deliberately does not optimise chips yet. Its objective includes
+        # future transfers and terminal FT value, while `_squad_quality` values
+        # a fixed post-Wildcard squad; subtracting those unlike currencies can
+        # manufacture or hide a Wildcard surplus. Leave that one heuristic off
+        # until chips are modelled inside the rolling path.
+        quality = (None if best.strategy == "multi-period" else
+                   _squad_quality(xp, cfg, current_squad, bank, selling, best))
     else:
         actual_mode = 1
         quality = None   # no existing squad to have drifted

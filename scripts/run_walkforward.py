@@ -51,7 +51,8 @@ from fpl.backtest.walkforward import (forecast_inputs, actuals_frame, realised_s
                                       gameweek_inputs, actioned_snapshot,
                                       replay_calibration, config_for_replay)
 from fpl.backtest.replay import (ManagerState, compare_policies, hold_policy,
-                                 expected_points_policy, oracle_rebuild_policy,
+                                 expected_points_policy, multi_period_policy,
+                                 oracle_rebuild_policy,
                                  initial_state)
 from fpl.data import snapshots
 from fpl.optimize.squad import optimize_squad
@@ -85,9 +86,9 @@ def main() -> int:
                          "replay does too; see --no-calibrate.")
     ap.add_argument("--no-calibrate", action="store_true",
                     help="skip the per-position calibration a live run would apply")
-    ap.add_argument("--policies", default="hold,expected",
+    ap.add_argument("--policies", default="hold,expected,multiperiod",
                     help="comma-separated executable policies to replay in "
-                         "sequence (hold, expected). The free weekly rebuild is "
+                         "sequence (hold, expected, multiperiod). The free weekly rebuild is "
                          "always reported separately as an oracle ceiling.")
     ap.add_argument("--squad", default=None,
                     help="comma/space separated starting 15 for the sequential "
@@ -252,7 +253,11 @@ def main() -> int:
               f"claim to be about you.")
 
     wanted = [n.strip() for n in str(args.policies).split(",") if n.strip()]
-    catalogue = {"hold": hold_policy, "expected": expected_points_policy}
+    catalogue = {
+        "hold": hold_policy,
+        "expected": expected_points_policy,
+        "multiperiod": multi_period_policy,
+    }
     chosen = {n: catalogue[n] for n in wanted if n in catalogue}
     unknown = [n for n in wanted if n not in catalogue]
     if unknown:
