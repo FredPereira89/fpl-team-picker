@@ -1006,24 +1006,162 @@ rounds, both addressed — see its Problem/Goals sections). Plan:
 **Approach:** cache slug→paths index (mtime-validated, self-healing) +
 concurrent element-summary fetch (bounded thread pool, shared token-bucket
 limiter, 429/5xx retry with Retry-After, per-player failure containment,
-cancellable) + optional xP vectorization. Executing via
-superpowers:subagent-driven-development. SDD workspace:
-`.superpowers/sdd/2026-09-22-fetch-and-cache-perf/` (ledger:
-`progress.md` inside it — check there first for exact task status).
+cancellable) + optional xP vectorization.
 
-**Status:** executing via SDD, task-by-task with review after each. Read the
-SDD ledger (`.superpowers/sdd/2026-09-22-fetch-and-cache-perf-plans/progress.md`,
-NOTE: workspace dir has a `-plans` suffix due to a path-resolution quirk hit
-during setup — see ledger's "Tooling note") for exact status; do not
-re-derive progress from memory.
+**STATUS AS OF 2026-09-22 20:50 — HANDING OFF TO CODEX FOR TASKS 5-7.**
+Everything below this line is written for a fresh agent (Codex) picking this
+up cold. Tasks 1-4 were executed by Claude via
+superpowers:subagent-driven-development (SDD) and are DONE, committed,
+reviewed clean. The user asked to stop here and hand the rest to Codex —
+this is not an interruption, it's a deliberate handoff point.
 
-**Latest:** Tasks 1-3 complete. Task 3 needed one fix round (a containment
-test didn't reach the branch it claimed to — see ledger's "plan-text defect"
-ruling; fixed and re-reviewed clean, edaf677). Task 4 (cache slug index,
-first production-code change) dispatched and in progress. Tasks 5-6 remain
-(rate limiter, concurrent fetch). Task 7 (optional xP vectorization) is
-explicitly gated on user go-ahead after Task 6, per the plan. No other
-Critical/Important findings so far; one setup-time tooling gotcha recorded
-in the SDD ledger (sdd-workspace script's `git rev-parse --show-toplevel`
-path-style instability — see ledger's "Tooling note" — worked around by
-managing the workspace dir by hand).
+### Where everything lives
+
+- **Spec** (binding authority, read this if the plan and code ever seem to
+  disagree): `docs/superpowers/specs/2026-09-22-fetch-and-cache-perf-design.md`
+- **Plan** (the full 7-task implementation plan, complete code for every
+  task): `docs/superpowers/plans/2026-09-22-fetch-and-cache-perf.md`
+- **SDD ledger** (full task-by-task history, every review verdict, every
+  ruling made so far, with reasoning):
+  `.superpowers/sdd/2026-09-22-fetch-and-cache-perf-plans/progress.md`
+  **NOTE the `-plans` suffix** — an earlier attempt manually created a
+  workspace dir WITHOUT that suffix
+  (`.superpowers/sdd/2026-09-22-fetch-and-cache-perf/`, containing only a
+  stray `plan-path` marker, no ledger) before discovering that this
+  environment's `sdd-workspace` helper script resolves `git rev-parse
+  --show-toplevel` differently inside a subshell than in a direct shell call
+  (Windows-drive-letter path vs. POSIX path), which broke its own
+  plan-ownership matching. **If that other directory still exists, ignore
+  it — it is stale and empty of real content.** The ledger's own "Tooling
+  note" and "Ruling: commit attribution line" entries have the full story.
+- **Pre-extracted task briefs**, each containing the EXACT code to write —
+  Codex should read these directly rather than re-deriving from the plan:
+  - `.superpowers/sdd/2026-09-22-fetch-and-cache-perf-plans/task-5-brief.md`
+    (Phase 2a: `TokenBucket` rate limiter — NOT YET STARTED)
+  - `.superpowers/sdd/2026-09-22-fetch-and-cache-perf-plans/task-6-brief.md`
+    (Phase 2b: concurrent `element_summaries`, the big one — NOT YET STARTED)
+  - Task 7 (optional xP vectorization) has no pre-extracted brief; it's in
+    the plan document itself under "### Task 7" — **do not start it without
+    asking the user first**, see below.
+  - Tasks 1-4's briefs/reports/review-packages are also in that directory,
+    kept as historical record — task-1 through task-4 briefs, reports,
+    review-packages, plus `task-3-fix-review-package.md` for the one fix
+    round Task 3 needed.
+
+### Current repo state (verify with `git log --oneline -5` before trusting this)
+
+- Worktree: `.claude/worktrees/perf-fetch-and-cache`, branch
+  `worktree-perf-fetch-and-cache`, branched from `master` @ `c3a5c8c`.
+- HEAD as of handoff: `edd452d` ("perf: index cache snapshots by slug instead
+  of globbing per lookup").
+- Working tree is clean (no uncommitted changes).
+- `python -m pytest -q -p no:cacheprovider` → **793 passed, 3 xfailed**.
+- `python scripts/bench.py golden check` → **golden: OK**.
+- `docs/perf/README.md` has real numbers filled in for `baseline` and
+  `phase1-cache-index` columns; `phase2-concurrent-fetch` and `phase3-xp` are
+  still `—`, to be filled in by Tasks 6 and 7 respectively.
+- Success criteria progress: **criterion 2** (cache-only GW6 run ≤ 20s) is
+  MET — 34.26s → 14.52s. **Criterion 1** (refresh ≤ 3 min) is NOT YET MET —
+  that's what Task 6 delivers.
+
+### What's done (Tasks 1-4)
+
+1. **Task 1** (`8fa9182`): `scripts/bench.py` benchmark harness, a
+   clock-frozen GW6 "golden" decision + xP frame captured from unmodified
+   master (`docs/perf/golden-gw6/`), baseline numbers.
+2. **Task 2** (`18af003`): `tests/test_perf_contracts.py` — 4
+   `xfail(strict=True)` tests pinning HOW the cache/fetch should scale
+   (directory scans, in-flight requests, rate cap, real concurrency). One
+   xfail was removed by Task 4; the other three are removed by Task 6.
+3. **Task 3** (`4629607`, fixed at `edaf677`): parity + per-player
+   containment tests for today's SEQUENTIAL `element_summaries`, so Task 6's
+   rewrite has a safety net. **One fix round was needed**: the review found
+   that `test_a_corrupt_fallback_snapshot_fails_only_that_player`, exactly as
+   given in the plan's own Task 3 brief, didn't actually reach the code
+   branch its name claimed (a corrupt file always raises during
+   `Cache.get_fresh()`'s FIRST statement, before the network/fallback path is
+   ever reached) — it silently duplicated another test. **Lesson for
+   Codex:** the plan's given test code is not infallible; when a test's
+   name/docstring claims to pin a specific branch, trace it against the real
+   current code before trusting it, the way the Task 3 reviewer did. Full
+   before/after and the traced fix are in the ledger and in
+   `task-3-report.md`/`task-3-fix-review-package.md`.
+4. **Task 4** (`edd452d`): replaced `Cache`'s per-lookup `glob()` with a
+   slug→paths index, validated against the directory's mtime, self-healing
+   on a vanished snapshot. Reviewed clean. **One forward-looking finding was
+   raised and adjudicated (see below) — it's a Task 6 concern, not a Task 4
+   defect.**
+
+### What's left
+
+- **Task 5** (not started): `fpl/data/throttle.py` — `TokenBucket`, a
+  thread-safe, cancellable rate limiter with NO slot reservation (so a pause
+  triggered by one 429 holds back threads that were already asleep waiting
+  their turn — this was itself a fix from an earlier plan review, see the
+  spec's revision history). Small, isolated, no dependency on anything else
+  not already done. Brief: `task-5-brief.md`.
+- **Task 6** (not started): replaces `fpl/data/client.py` wholesale with a
+  concurrent `element_summaries` — bounded thread pool, the Task 5 limiter,
+  429/5xx retry with `Retry-After` (parses both delay-seconds and HTTP-dates,
+  never shortens it, gives up asking after 120s), per-player failure
+  containment matching today's sequential semantics (this is what Task 3's
+  tests exist to verify), and clean cancellation (Ctrl-C / a raising
+  `progress` callback must stop workers within about one in-flight request's
+  time, not hang). Also touches `fpl/config.py`, `config.yaml`, and 4
+  production call sites. Ends with **Step 10, a manual live smoke test that
+  needs real network access to FPL's API** — this can't be fully automated,
+  budget for it. THIS IS THE HIGH-RISK TASK — concurrency, cancellation, and
+  retry logic are all easy to get subtly wrong. Brief: `task-6-brief.md`.
+  **Read the "How stopping works" section at the top of the brief before
+  writing any code** — it's the part most likely to be gotten wrong.
+- **Task 7** (optional, NOT YET APPROVED): vectorizes the xP threshold tail
+  in `fpl/model/xp.py` for a further ~3s of the cache-only run. **The plan's
+  own text says "Stop here... Task 7 runs only if they say go" after Task 6.
+  Do not start Task 7 without explicitly asking the user first**, even if
+  Tasks 5-6 go smoothly. This is not optional politeness — it's what the
+  user/plan actually specified.
+
+### Adjudicated findings Codex must carry forward
+
+**From Task 4's review (Important, forward-looking — this is a Task 6 review
+focus item, not a Task 4 defect):** Task 4 made `Cache` correct only under a
+"one writer at a time" assumption (unsynchronized `self._index`/
+`self._index_mtime`). The plan's Global Constraints already require that
+Task 6 never violates this ("All cache and client-state mutation happens on
+the main thread. Worker threads only perform HTTP") — Task 6's own brief
+code has `_fetch_json` (the only method worker threads run) touch nothing
+but the HTTP session, with every `cache.put`/`prune`/`newest` call happening
+inside `_fetch_misses`'s main-thread loop after `wait(...)` returns. **When
+Task 6 is implemented and reviewed, the reviewer must independently verify
+by reading the actual code — not just trusting the brief — that no worker
+thread ever touches `self.cache` directly.** If a future implementation
+deviates from the given Task 6 code in a way that lets a worker thread call
+into `Cache`, this becomes a real, blocking race condition, not a
+theoretical one.
+
+**Minor (deferred to final review, not urgent):** `Cache.prune()`'s guard
+`if removed and self._index is not None:` has a dead half (`self._index` is
+always a dict by that point) — cosmetic, harmless, low priority.
+
+### Process notes for Codex
+
+- This was executed with fresh-subagent-per-task + review-after-each-task +
+  a bounded fix loop (max 5 rounds) for any Critical/Important finding,
+  following the `superpowers:subagent-driven-development` skill. Codex is
+  not required to replicate that exact process, but the QUALITY BAR each
+  task was held to should carry forward:
+  - Every task's changes are verified against the GW6 golden check
+    (`python scripts/bench.py golden check` → must stay `golden: OK`) AND
+    the full test suite (`python -m pytest -q -p no:cacheprovider`) before
+    being considered done.
+  - Commit messages in this branch so far end with
+    `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` (the plan's own
+    example commit text says `Claude Opus 5.5` — that was written under an
+    earlier model and was deliberately overridden throughout this session;
+    Codex should use whatever attribution convention it's configured with,
+    not literally copy either of those).
+  - No new git worktrees, no branch switches — everything happens in-place
+    on `worktree-perf-fetch-and-cache`.
+  - No new third-party dependencies at any point in this plan.
+- Update this handoff section (or add a new dated one below it, don't just
+  silently overwrite) after each task, in case of another interruption.
