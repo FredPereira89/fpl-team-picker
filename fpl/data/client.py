@@ -39,14 +39,20 @@ class DataCoverageError(RuntimeError):
     """
 
 
+class FreshDataError(RuntimeError):
+    """A live run could not obtain every required response from FPL."""
+
+
 class FplClient:
     def __init__(self, cache: Cache, ttl_hours: float = 6, rate_limit_s: float = 1.0,
                  session=None, fetch_workers: int = 4,
-                 fetch_rate_per_s: float | None = None):
+                 fetch_rate_per_s: float | None = None,
+                 require_fresh: bool = False):
         self.cache = cache
         self.ttl_hours = ttl_hours
         self.rate_limit_s = rate_limit_s
         self.session = session or requests.Session()
+        self.require_fresh = require_fresh
         self.stale = False
         # When each payload this run used was captured. A forecast is only
         # reproducible if it records which snapshots it read: "the model got
@@ -138,9 +144,10 @@ class FplClient:
     def _get(self, path: str, slug: str, ttl_hours: float | None = None,
              not_before=None, require_final_through=None):
         ttl = self.ttl_hours if ttl_hours is None else ttl_hours
-        cached = self._cached(slug, ttl, not_before, require_final_through)
-        if cached is not None:
-            return cached
+        if not self.require_fresh:
+            cached = self._cached(slug, ttl, not_before, require_final_through)
+            if cached is not None:
+                return cached
         url = BASE + path
         if any(f in url.lower() for f in FORBIDDEN):
             raise ValueError(f"refusing to call authenticated endpoint: {url}")
@@ -149,11 +156,22 @@ class FplClient:
             resp = self.session.get(url, timeout=30)
             resp.raise_for_status()
             payload = resp.json()
-        except Exception:
+        except Exception as exc:
+            if self.require_fresh:
+                raise FreshDataError(f"Could not fetch fresh {slug} from FPL") from exc
             fallback = self._fallback(slug)
             if fallback is None:
                 raise
             return fallback
+        if self.require_fresh:
+            if slug == "bootstrap-static" and not (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("elements"), list)
+                    and isinstance(payload.get("teams"), list)
+                    and isinstance(payload.get("element_types"), list)):
+                raise FreshDataError("FPL returned incomplete fresh bootstrap data")
+            if slug == "fixtures" and not isinstance(payload, list):
+                raise FreshDataError("FPL returned incomplete fresh fixture data")
         self._store(slug, payload)
         return payload
 
@@ -245,7 +263,7 @@ class FplClient:
     def element_summaries(self, player_ids, ttl_hours: float = HISTORY_TTL_H,
                           progress=None, not_before=None,
                           require_final_through=None) -> dict[int, dict]:
-        """Fetch many element-summaries, tolerating individual failures.
+        """Fetch many element-summaries; strict runs refuse incomplete data.
 
         The long default TTL dates from when `history_past` was the only field
         read from these — it is immutable once a season ends, so age did not
@@ -262,6 +280,7 @@ class FplClient:
         caller has to be able to tell the two apart.
         """
         ids = list(dict.fromkeys(int(pid) for pid in player_ids))
+        self.fetch_failures.difference_update(ids)
         found: dict[int, dict] = {}
         done = 0
 
@@ -277,9 +296,14 @@ class FplClient:
 
         def settle(pid: int, payload, fetched: bool) -> None:
             slug = f"element-summary-{pid}"
+            if self.require_fresh and not (isinstance(payload, dict)
+                                           and isinstance(payload.get("history"), list)
+                                           and isinstance(payload.get("history_past"), list)):
+                payload = None
             try:
                 if payload is None:
-                    payload = self._fallback(slug)
+                    if not self.require_fresh:
+                        payload = self._fallback(slug)
                 elif fetched:
                     self._store(slug, payload)
             except Exception:
@@ -294,6 +318,9 @@ class FplClient:
 
         misses = []
         for pid in ids:
+            if self.require_fresh:
+                misses.append(pid)
+                continue
             try:
                 cached = self._cached(f"element-summary-{pid}", ttl_hours,
                                       not_before, require_final_through)
@@ -311,6 +338,13 @@ class FplClient:
 
         if misses:
             self._fetch_misses(misses, settle)
+        if self.require_fresh and self.fetch_failures:
+            failed = sorted(self.fetch_failures & set(ids))
+            raise FreshDataError(
+                f"Fresh player history unavailable for {len(failed)} of {len(ids)} "
+                f"players (IDs: {', '.join(map(str, failed[:10]))}"
+                f"{'...' if len(failed) > 10 else ''}); no prediction was made"
+            )
         return {pid: found[pid] for pid in ids if pid in found}
 
     def _fetch_misses(self, misses: list[int], settle) -> None:
@@ -342,6 +376,8 @@ class FplClient:
                     except Exception:
                         payload = None
                     settle(pid, payload, fetched=payload is not None)
+                    if self.require_fresh and pid in self.fetch_failures:
+                        stop.set()
                     if not stop.is_set():
                         submit_next()
             for pid in remaining:

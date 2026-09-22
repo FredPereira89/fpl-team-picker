@@ -1,5 +1,14 @@
 # Performance log — fetch and cache
 
+Normal recommendation runs now require a live response for fixtures,
+bootstrap-static, and every player in the live bootstrap list. Cached snapshots
+are still written for provenance, but are not read or used as a fallback in a
+normal run. An incomplete live refresh stops before a prediction is saved.
+`--no-refresh` explicitly retains the older cache-first/fallback behavior and
+must not be used when a fully current prediction is required. The timings below
+are historical measurements of the cache-enabled and simulated-refresh paths,
+not a live end-to-end timing for the new default.
+
 Spec: `docs/superpowers/specs/2026-09-22-fetch-and-cache-perf-design.md`
 Plan: `docs/superpowers/plans/2026-09-22-fetch-and-cache-perf.md`
 

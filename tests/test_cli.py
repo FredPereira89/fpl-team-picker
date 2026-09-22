@@ -1,10 +1,52 @@
 import json
 import pytest
+from types import SimpleNamespace
 from fpl.cli import resolve_current_squad, record_transfers
 from fpl.config import Config
 from fpl.state import load_state, save_state, State
 from pathlib import Path as _P
 _REPO = _P(__file__).resolve().parents[1]
+
+
+def test_cli_requires_fresh_data_by_default_and_cached_mode_is_explicit(
+        tmp_path, monkeypatch, capsys):
+    import run_gameweek
+    from fpl.data.client import FreshDataError
+
+    class ReachedPipeline(Exception):
+        pass
+
+    options = []
+
+    def make_client(*args, **kwargs):
+        options.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(run_gameweek, "ROOT", tmp_path)
+    monkeypatch.setattr(run_gameweek, "load_config", lambda path: Config())
+    monkeypatch.setattr(run_gameweek, "load_state",
+                        lambda *args: SimpleNamespace(chip_events=[]))
+    monkeypatch.setattr(run_gameweek, "load_overrides", lambda *args, **kwargs: {})
+    monkeypatch.setattr(run_gameweek, "FplClient", make_client)
+
+    def stop_before_pipeline(*args, **kwargs):
+        raise ReachedPipeline
+
+    monkeypatch.setattr(run_gameweek, "run", stop_before_pipeline)
+
+    with pytest.raises(ReachedPipeline):
+        run_gameweek.main(["--mode", "1"])
+    with pytest.raises(ReachedPipeline):
+        run_gameweek.main(["--mode", "1", "--no-refresh"])
+
+    assert [item["require_fresh"] for item in options] == [True, False]
+
+    def fail_freshly(*args, **kwargs):
+        raise FreshDataError("player 1 did not refresh")
+
+    monkeypatch.setattr(run_gameweek, "run", fail_freshly)
+    assert run_gameweek.main(["--mode", "1"]) == 1
+    assert "player 1 did not refresh" in capsys.readouterr().err
 
 
 class FakeClient:

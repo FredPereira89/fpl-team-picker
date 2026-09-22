@@ -10,7 +10,7 @@ from pathlib import Path
 from fpl.cli import resolve_current_squad, record_transfers
 from fpl.config import load_config
 from fpl.data.cache import Cache
-from fpl.data.client import FplClient
+from fpl.data.client import FplClient, FreshDataError
 from fpl.data.overrides import load_overrides
 from fpl.optimize.transfers import bank_after
 from fpl.pipeline import run
@@ -46,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", type=int, choices=(1, 2), default=1,
                     help="1 = full squad build, 2 = weekly transfers")
     ap.add_argument("--gw", type=int, default=1, help="gameweek to optimise for")
-    ap.add_argument("--no-refresh", action="store_true", help="use cached data only")
+    ap.add_argument("--no-refresh", action="store_true",
+                    help="allow cached API data and stale fallback (not for live decisions)")
     ap.add_argument("--confirm", action="store_true",
                     help="record this week as PLAYED: store the squad you applied, "
                          "spend the transfers and any chip in data/state.json. "
@@ -82,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
 
     data_root = ROOT / "data"
     state_path = data_root / "state.json"
-    client = None
+    client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours,
+                       fetch_workers=cfg.fetch_workers,
+                       fetch_rate_per_s=cfg.fetch_rate_per_s,
+                       require_fresh=not args.no_refresh)
     current_squad = None
     bank = 0.0
     free_transfers = cfg.free_transfers
@@ -93,9 +97,6 @@ def main(argv: list[str] | None = None) -> int:
     first_event = 1
 
     if args.mode == 2:
-        client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours,
-                           fetch_workers=cfg.fetch_workers,
-                           fetch_rate_per_s=cfg.fetch_rate_per_s)
         live, errors = resolve_current_squad(cfg, args.gw, state_path, client)
         if live is None:
             for msg in errors:
@@ -132,10 +133,14 @@ def main(argv: list[str] | None = None) -> int:
     planned = (manifest.select_version(data_root, args.gw)
                if args.confirm and args.forecast_version is None else None)
 
-    rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
-                  current_squad=current_squad, bank=bank, free_transfers=free_transfers,
-                  news=news, progress=progress, purchase_prices=purchase_prices,
-                  chip_events=chip_events, first_event=first_event)
+    try:
+        rec, xp = run(cfg, mode=args.mode, from_event=args.gw, root=data_root, client=client,
+                      current_squad=current_squad, bank=bank, free_transfers=free_transfers,
+                      news=news, progress=progress, purchase_prices=purchase_prices,
+                      chip_events=chip_events, first_event=first_event)
+    except FreshDataError as exc:
+        print(f"Fresh FPL refresh failed: {exc}", file=sys.stderr)
+        return 1
     print(render(rec, xp))
     written_versions = manifest.entries(data_root, args.gw)
     if written_versions:

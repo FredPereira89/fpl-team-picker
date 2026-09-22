@@ -576,7 +576,8 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
     root = Path(root)
     client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours,
                                  fetch_workers=cfg.fetch_workers,
-                                 fetch_rate_per_s=cfg.fetch_rate_per_s)
+                                 fetch_rate_per_s=cfg.fetch_rate_per_s,
+                                 require_fresh=True)
 
     # Fixtures first, because whether today is a matchday decides how long
     # everything else may be cached. On a matchday prices, news and status

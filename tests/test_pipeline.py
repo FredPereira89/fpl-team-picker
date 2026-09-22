@@ -84,6 +84,56 @@ def test_mode_one_produces_a_valid_recommendation(tmp_path):
     assert rec.lineup.captain in rec.lineup.xi
 
 
+def test_pipeline_without_injected_client_requires_live_data(tmp_path, monkeypatch):
+    import fpl.pipeline as pipeline
+
+    class ClientCreated(Exception):
+        pass
+
+    def check_client(*args, **kwargs):
+        assert kwargs["require_fresh"] is True
+        raise ClientCreated
+
+    monkeypatch.setattr(pipeline, "FplClient", check_client)
+    with pytest.raises(ClientCreated):
+        run(Config(rank_sims=0), mode=1, from_event=1, root=tmp_path)
+
+
+def test_strict_pipeline_makes_no_prediction_when_player_fetch_fails(tmp_path):
+    from fpl.data.cache import Cache
+    from fpl.data.client import BASE, FplClient, FreshDataError
+
+    cache = Cache(tmp_path / "cache")
+    cache.put("element-summary-1", {"history": [], "history_past": []})
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def get(self, url, timeout=None):
+            if url == BASE + "fixtures/":
+                return Response(FIXTURES)
+            if url == BASE + "bootstrap-static/":
+                return Response(BOOTSTRAP)
+            if url == BASE + "element-summary/1/":
+                raise RuntimeError("FPL player request failed")
+            return Response({"history": [], "history_past": []})
+
+    client = FplClient(cache, rate_limit_s=0, session=Session(), require_fresh=True)
+    with pytest.raises(FreshDataError, match="Fresh player history unavailable"):
+        run(Config(rank_sims=0), mode=1, from_event=1, root=tmp_path, client=client)
+
+    assert not (tmp_path / "predictions").exists()
+    assert not (tmp_path / "processed").exists()
+
+
 def test_mode_one_respects_budget(tmp_path):
     rec, _ = run(Config(rank_sims=0, budget=100.0), mode=1, from_event=1, root=tmp_path,
                  client=FakeClient())

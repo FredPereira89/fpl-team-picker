@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fpl.data.cache import Cache
-from fpl.data.client import FplClient, BASE
+from fpl.data.client import FplClient, FreshDataError, BASE
 
 def now() -> datetime:
     """Real current time: FplClient has no clock injection point, so these
@@ -48,6 +48,42 @@ def test_second_call_uses_cache_not_network(tmp_path):
     FplClient(cache, rate_limit_s=0, session=s).bootstrap()
     FplClient(cache, rate_limit_s=0, session=s).bootstrap()
     assert len(s.calls) == 1
+
+
+def test_strict_run_refetches_bootstrap_and_fixtures_despite_fresh_cache(tmp_path):
+    cache = Cache(tmp_path)
+    cache.put("bootstrap-static", {"elements": [{"id": 1}], "teams": [],
+                                   "element_types": []})
+    cache.put("fixtures", [{"id": 1}])
+    fresh_bootstrap = {"elements": [{"id": 2}], "teams": [], "element_types": []}
+    s = FakeSession({BASE + "bootstrap-static/": fresh_bootstrap,
+                     BASE + "fixtures/": [{"id": 2}]})
+    c = FplClient(cache, rate_limit_s=0, session=s, require_fresh=True)
+
+    assert c.bootstrap() == fresh_bootstrap
+    assert c.fixtures() == [{"id": 2}]
+    assert s.calls == [BASE + "bootstrap-static/", BASE + "fixtures/"]
+    assert cache.newest("bootstrap-static")[0] == fresh_bootstrap
+
+
+def test_strict_run_rejects_stale_fallback_on_bootstrap_failure(tmp_path):
+    cache = Cache(tmp_path)
+    cache.put("bootstrap-static", {"elements": [], "teams": [], "element_types": []})
+    s = FakeSession({}, fail=True)
+    c = FplClient(cache, rate_limit_s=0, session=s, require_fresh=True)
+
+    with pytest.raises(FreshDataError, match="bootstrap-static"):
+        c.bootstrap()
+    assert s.calls == [BASE + "bootstrap-static/"]
+
+
+def test_strict_run_rejects_malformed_fresh_bootstrap(tmp_path):
+    s = FakeSession({BASE + "bootstrap-static/": {"elements": []}})
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s, require_fresh=True)
+
+    with pytest.raises(FreshDataError, match="incomplete fresh bootstrap"):
+        c.bootstrap()
+    assert c.cache.newest("bootstrap-static") is None
 
 
 def test_falls_back_to_stale_cache_on_failure(tmp_path):
@@ -178,6 +214,43 @@ def test_element_summaries_mixes_hits_and_fetches(tmp_path):
     assert c.stale is False and c.fetch_failures == set()
     assert set(c.sources) == {f"element-summary-{p}" for p in (1, 2, 3, 4)}
     assert cache.newest("element-summary-3")[0] == {"id": 3, "src": "net"}
+
+
+def test_strict_run_refetches_every_player_even_with_fresh_cache(tmp_path):
+    cache = Cache(tmp_path)
+    for pid in (1, 2):
+        cache.put(f"element-summary-{pid}", {"history": [], "history_past": [],
+                                              "src": "old"})
+    fresh = {pid: {"history": [], "history_past": [], "src": "live"}
+             for pid in (1, 2)}
+    s = PerUrlSession({_es(pid): payload for pid, payload in fresh.items()})
+    c = FplClient(cache, rate_limit_s=0, session=s, require_fresh=True)
+
+    assert c.element_summaries([1, 2]) == fresh
+    assert sorted(s.calls) == [_es(1), _es(2)]
+    assert all(cache.newest(f"element-summary-{pid}")[0] == fresh[pid]
+               for pid in (1, 2))
+
+
+def test_strict_run_aborts_if_one_player_fails_despite_cached_copy(tmp_path):
+    cache = Cache(tmp_path)
+    cache.put("element-summary-1", {"history": [], "history_past": [], "src": "old"})
+    s = PerUrlSession({}, failing=[_es(1)])
+    c = FplClient(cache, rate_limit_s=0, session=s, require_fresh=True)
+
+    with pytest.raises(FreshDataError, match="1 of 1 players"):
+        c.element_summaries([1])
+    assert s.calls == [_es(1)]
+    assert c.fetch_failures == {1}
+
+
+def test_strict_run_rejects_incomplete_player_payload(tmp_path):
+    s = PerUrlSession({_es(1): {"history_past": []}})
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s, require_fresh=True)
+
+    with pytest.raises(FreshDataError, match="1 of 1 players"):
+        c.element_summaries([1])
+    assert c.cache.newest("element-summary-1") is None
 
 
 def test_element_summaries_writes_the_snapshot_marker(tmp_path):
