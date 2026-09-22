@@ -66,20 +66,28 @@ def test_a_clean_run_reports_nothing():
                          fetch_failed=set(), owned_ids=[1, 2]) == []
 
 
-def test_the_client_records_which_players_failed():
+def test_the_client_records_which_players_failed(tmp_path):
     """`stale` is a single global boolean; it cannot say who is affected."""
-    from fpl.data.client import FplClient
+    from fpl.data.cache import Cache
+    from fpl.data.client import BASE, FplClient
 
-    class Flaky(FplClient):
-        def element_summary(self, player_id, **kw):
-            if int(player_id) == 3:
+    class Flaky:
+        def get(self, url, timeout=None):
+            if url == BASE + "element-summary/3/":
                 raise RuntimeError("503")
-            return {"history_past": [], "history": []}
 
-    client = Flaky.__new__(Flaky)
-    client.stale = False
-    client.fetch_failures = set()
-    got = FplClient.element_summaries(client, [1, 2, 3])
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"history_past": [], "history": []}
+
+                def raise_for_status(self):
+                    pass
+            return R()
+
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=Flaky())
+    got = client.element_summaries([1, 2, 3])
     assert set(got) == {1, 2}
     assert client.fetch_failures == {3}
 
