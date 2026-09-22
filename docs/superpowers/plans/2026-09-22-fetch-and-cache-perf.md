@@ -4,32 +4,47 @@
 
 **Goal:** Cut the weekly FPL run's refresh from 11+ minutes to about 2.5 and its cache-only run from 40.6 s to ≤ 20 s, with no change to any recommendation.
 
-**Architecture:** First measure (a bench harness, a frozen GW6 golden output, and complexity tests that fail on today's code). Then replace the per-lookup directory `glob` in `Cache` with a lazily built slug→paths index. Then fetch missing element-summaries through a bounded thread pool behind a shared token-bucket rate limiter with 429/5xx backoff. HTTP runs on worker threads; every cache write and piece of client bookkeeping stays on the main thread. An optional last phase vectorises the xP threshold tail.
+**Architecture:** First measure (a bench harness, a clock-frozen GW6 golden output, and complexity tests that fail on today's code). Then replace the per-lookup directory `glob` in `Cache` with a slug→paths index. It is validated by the directory's mtime and heals itself if a snapshot vanishes. Then fetch missing element-summaries through a bounded, cancellable thread pool behind a shared token-bucket limiter with 429/5xx backoff that honours `Retry-After`. HTTP runs on worker threads; every cache write and piece of client bookkeeping stays on the main thread. An optional last phase vectorises the xP threshold tail.
 
-**Tech Stack:** Python 3.13, pandas 2.2, numpy 1.26, scipy 1.14, requests 2.31, pytest 8, and `concurrent.futures` / `threading` from the stdlib. No new dependencies.
+**Tech Stack:** Python 3.13, pandas 2.2, numpy 1.26, scipy 1.14, requests 2.31, pytest 8, and `concurrent.futures` / `threading` / `email.utils` from the stdlib. No new dependencies.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-fetch-and-cache-perf-design.md`
+
+**Revision 2 (2026-09-22)** addresses the plan review of `f7c6a93`:
+1. The limiter no longer reserves slots, so a pause holds back threads already waiting.
+2. An interrupt now stops workers (cancel event, bounded submission, sessions closed only after workers exit).
+3. The behaviour contract is restated honestly (retries and de-duplication are intentional changes).
+4. The cache index notices other writers through the directory mtime and heals a vanished snapshot.
+5. `Retry-After` accepts HTTP-dates and is never shortened.
+6. The golden run freezes the clock.
+7. The refresh bench uses `config.yaml`'s fetch settings.
 
 ## Global Constraints
 
 - Work only in the worktree `C:\Users\user\Documents\FPL Team Picker\.claude\worktrees\perf-fetch-and-cache` (branch `worktree-perf-fetch-and-cache`). Never run git against the main checkout.
 - No new third-party dependencies (`requirements.txt` stays unchanged).
-- No behaviour change. `element_summaries` must leave the same dict, `fetch_failures`, `stale`, `unverified` and `sources` as today's code. The GW6 golden decision must stay identical, and every numeric xP column must match within **1e-4 absolute**.
+- **Behaviour contract.** Whenever every fetch succeeds, or fails permanently (4xx other than 429, retries exhausted, or no network), `element_summaries` leaves the same dict, `fetch_failures`, `stale`, `unverified` and `sources` as today's code. There are exactly **two intentional differences**:
+  - Transient failures (429, 5xx, connection errors, timeouts) are retried up to 3 times before counting as failures.
+  - Duplicate ids are fetched once, and `progress` totals count unique ids.
+
+  The GW6 golden decision must stay identical, and every numeric xP column must match within **1e-4 absolute**, with the clock frozen at capture time.
 - All existing tests pass after every task (774 at the start; `python -m pytest -q -p no:cacheprovider`).
-- Defaults: `fetch_workers: 4`, `fetch_rate_per_s: 5.0`. `fetch_workers: 1` with `fetch_rate_per_s: 1.0` must reproduce today's sequential behaviour.
+- Defaults: `fetch_workers: 4`, `fetch_rate_per_s: 5.0`. `fetch_workers: 1` with `fetch_rate_per_s: 1.0` restores today's **request pacing**: one request in flight, starts at least 1 s apart. Retries and de-duplication remain.
 - Only `FplClient.element_summaries` becomes concurrent. `_get`, `bootstrap`, `fixtures`, `entry*` and the `rate_limit_s` throttle keep their current behaviour.
 - All cache and client-state mutation happens on the main thread. Worker threads only perform HTTP.
+- A server's `Retry-After` is never shortened. A wait of ≤ 120 s (`MAX_RETRY_AFTER_S`) is sat out. A longer one ends the element-summary fetch for this run, and the remaining players take the stale-fallback / `fetch_failures` path, the same as in an outage.
+- `Cache` assumes one writer per directory at a time. Other writers are detected best-effort through the directory mtime (NTFS timestamps are tick-granular). A snapshot deleted by someone else causes one rescan, never a crash.
 - Tests assert complexity (scan counts, in-flight counts, rate windows), never absolute wall time on real data.
 - The code style matches the repo: comments explain *why*, in full sentences, at the density of the surrounding code.
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## Review Focus
 
-1. **Ctrl-C (or any exception) in the middle of a 667-player refresh** must stop promptly, not wait for every queued request. Summaries already fetched must be on disk, so a re-run resumes. → Task 6, `test_an_interrupted_refresh_stops_promptly_and_keeps_what_it_fetched`.
-2. **FPL answers a burst with 429 (with or without `Retry-After`).** The request is retried, all workers pause together, and the player is not recorded as a failure. → Task 6, `test_429_pauses_the_limiter_and_retries`.
-3. **Players whose request keeps failing** (404 for a removed player, persistent 503) end in the stale fallback or in `fetch_failures` after a bounded number of tries. A 404 is never retried and nothing loops forever. → Task 6, `test_404_is_not_retried` and `test_persistent_503_gives_up_after_bounded_retries`.
-4. **Cache folder holding files that aren't snapshots**, or slugs sharing a prefix (`.meta` sidecars, a stray `fixtures_notes.json`, `element-summary-1` next to `element-summary-10`): each lookup returns only its own snapshots and never crashes. → Task 4, `test_index_ignores_files_that_are_not_snapshots` and `test_index_keeps_prefix_sharing_slugs_apart`.
-5. **Snapshots written or pruned after the index was built** (the refresh writes 667 new ones mid-run) are visible to the next lookup, and pruned ones are gone. → Task 4, `test_put_after_the_index_is_built_is_visible` and `test_prune_updates_the_index`.
+1. **Ctrl-C (or any exception) in the middle of a 667-player refresh**, including while a worker sits in a retry backoff, must stop the *workers*, not just return from the call. No request may start after the call has raised; already-fetched summaries must be on disk. → Task 6, `test_an_interrupted_refresh_stops_its_workers` and `test_an_interrupt_cuts_a_retry_backoff_short`.
+2. **FPL answers a burst with 429 while other workers are already waiting for their slot.** The pause must hold them too, and the throttled request is retried, not failed. → Task 5, `test_a_pause_holds_back_threads_already_waiting`; Task 6, `test_429_pauses_the_limiter_and_retries`.
+3. **`Retry-After` as an HTTP-date, or longer than a run can wait.** The date is parsed, and a long wait is obeyed by not asking again, with the remaining players falling back to their cached snapshots. → Task 6, `test_retry_after_accepts_seconds_and_http_dates` and `test_a_long_retry_after_stops_asking_and_falls_back`.
+4. **Players whose request keeps failing** (404 for a removed player, persistent 503) end in the stale fallback or in `fetch_failures` after a bounded number of tries; a 404 is never retried. → Task 6, `test_404_is_not_retried` and `test_persistent_503_gives_up_after_bounded_retries`.
+5. **The cache folder is changed by something other than this `Cache`**: files that aren't snapshots, prefix-sharing slugs, another writer adding a snapshot, or deleting one the index still lists. Each lookup stays correct and never crashes. → Task 4, `test_index_ignores_files_that_are_not_snapshots`, `test_index_keeps_prefix_sharing_slugs_apart`, `test_another_writer_is_noticed` and `test_a_snapshot_deleted_elsewhere_heals_instead_of_crashing`.
 
 ---
 
@@ -40,16 +55,16 @@
 | `scripts/bench.py` | create | Benchmarks (`run`) and the GW6 golden capture and check (`golden capture` / `golden check`). All pipeline runs happen in a temporary copy of the repo. |
 | `docs/perf/README.md` | create | The before/after table for every phase. |
 | `docs/perf/*.json` | create | Raw benchmark output, one file per `bench.py run --label`. |
-| `docs/perf/golden-gw6/decision.json`, `xp.parquet` | create | The frozen GW6 decision and xP frame from unmodified master. |
+| `docs/perf/golden-gw6/decision.json`, `xp.parquet`, `clock.txt` | create | The frozen GW6 decision and xP frame from unmodified master, and the instant the clock is frozen at for every check. |
 | `tests/test_perf_contracts.py` | create | Complexity contracts: directory scans, in-flight bound, rate cap, real concurrency. |
 | `tests/test_client.py` | modify | Parity tests pinning `element_summaries` semantics, plus retry and interrupt tests. |
 | `tests/test_coverage_gate.py` | modify | Replace the implementation-coupled client test with a behavioural one. |
 | `tests/test_cache.py` | modify | Index behaviour tests. |
 | `tests/test_throttle.py` | create | `TokenBucket` unit tests. |
 | `tests/test_config.py` | modify | The new `data.fetch_*` keys. |
-| `fpl/data/cache.py` | modify | Slug→paths index replacing the per-lookup `glob`. |
-| `fpl/data/throttle.py` | create | `TokenBucket`: a thread-safe global rate limiter with a shared pause. |
-| `fpl/data/client.py` | modify | Concurrent `element_summaries`, the retrying `_fetch_json`, per-thread sessions, and shared helpers `_cached` / `_store` / `_fallback`. |
+| `fpl/data/cache.py` | modify | Slug→paths index replacing the per-lookup `glob`; validated by directory mtime, self-healing on a vanished snapshot. |
+| `fpl/data/throttle.py` | create | `TokenBucket` (thread-safe, cancellable, no reservations, so a pause holds waiting threads) and `FetchCancelled`. |
+| `fpl/data/client.py` | replace | Concurrent `element_summaries` via the bounded, cancellable `_fetch_misses`; the retrying `_fetch_json` with `Retry-After`; per-thread sessions; shared helpers `_cached` / `_store` / `_fallback`. |
 | `fpl/config.py`, `config.yaml` | modify | `fetch_workers`, `fetch_rate_per_s`. |
 | `run_gameweek.py`, `fpl/pipeline.py`, `scripts/run_backtest.py`, `scripts/score_gameweek.py` | modify | Pass the fetch settings to `FplClient`. |
 | `fpl/model/xp.py` | modify (Task 7, optional) | Vectorised threshold tail; per-team fixture grouping; no per-fixture copy. |
@@ -60,7 +75,7 @@
 
 **Files:**
 - Create: `scripts/bench.py`
-- Create: `docs/perf/README.md`, `docs/perf/baseline.json` (generated), `docs/perf/golden-gw6/decision.json` and `xp.parquet` (generated)
+- Create: `docs/perf/README.md`, `docs/perf/baseline.json` (generated), `docs/perf/golden-gw6/decision.json`, `xp.parquet` and `clock.txt` (generated)
 - Commit also: `docs/superpowers/specs/2026-09-22-fetch-and-cache-perf-design.md`, this plan
 
 **Interfaces:**
@@ -109,11 +124,13 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from fpl.config import load_config  # noqa: E402
 from fpl.data.cache import Cache  # noqa: E402
 from fpl.data.client import FplClient  # noqa: E402
 
 PERF = ROOT / "docs" / "perf"
 GOLDEN = PERF / "golden-gw6"
+GOLDEN_CLOCK = GOLDEN / "clock.txt"
 GW = 6
 N_PLAYERS = 667
 REFRESH_N = 30
@@ -121,10 +138,44 @@ REFRESH_LATENCY_S = 0.15
 XP_TOL = 1e-4
 
 # Runs inside the temporary repo copy. It wraps `run` so the Recommendation and
-# the xP frame can be captured without teaching run_gameweek a new flag.
+# the xP frame can be captured without teaching run_gameweek a new flag, and it
+# freezes the clock at the instant recorded when the golden output was
+# captured: override ages (fpl/data/overrides.py) and the matchday check
+# (fpl/pipeline.py) read datetime.now(), so without this a golden check a few
+# days later could drift with no code change at all.
 DRIVER = r'''
-import json, sys
+import importlib, json, pkgutil, sys
+from datetime import datetime, timezone
+
+import fpl
+for info in pkgutil.walk_packages(fpl.__path__, "fpl."):
+    importlib.import_module(info.name)       # patch below reaches every module
 import run_gameweek as rg
+
+FROZEN = datetime.fromisoformat(sys.argv[2])
+
+
+class _FrozenMeta(type):
+    # A plain subclass would make isinstance(real_datetime, datetime) False in
+    # every patched module -- fpl.data.overrides._as_datetime depends on it.
+    def __instancecheck__(cls, obj):
+        return isinstance(obj, datetime)
+
+
+class FrozenDateTime(datetime, metaclass=_FrozenMeta):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN.astimezone(tz) if tz is not None else FROZEN.astimezone().replace(tzinfo=None)
+
+    @classmethod
+    def utcnow(cls):
+        return FROZEN.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+for mod in list(sys.modules.values()):
+    name = getattr(mod, "__name__", "") or ""
+    if (name == "run_gameweek" or name.startswith("fpl.")) and getattr(mod, "datetime", None) is datetime:
+        mod.datetime = FrozenDateTime
 
 captured = {}
 _orig = rg.run
@@ -214,16 +265,28 @@ def bench_cache_hits() -> float:
     return elapsed
 
 
+def _production_fetch_settings() -> dict:
+    """The fetch settings a real run would use, read from config.yaml the way
+    run_gameweek does. Before phase 2 there are none: the client's 1 s throttle
+    IS the production path, so an empty dict measures exactly that."""
+    cfg = load_config(ROOT / "config.yaml")
+    if not hasattr(cfg, "fetch_workers"):
+        return {}
+    return {"fetch_workers": cfg.fetch_workers, "fetch_rate_per_s": cfg.fetch_rate_per_s}
+
+
 def bench_refresh(n: int = REFRESH_N, latency_s: float = REFRESH_LATENCY_S) -> dict:
-    """An empty cache, fetched at the PRODUCTION settings of whichever code is
-    checked out (FplClient's own defaults), then extrapolated to 667 players."""
+    """An empty cache fetched at the production settings from config.yaml, then
+    extrapolated to 667 players."""
+    settings = _production_fetch_settings()
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
-        client = FplClient(Cache(Path(d)), session=_LatencySession(latency_s))
+        client = FplClient(Cache(Path(d)), session=_LatencySession(latency_s), **settings)
         t = time.perf_counter()
         out = client.element_summaries(range(1, n + 1))
         elapsed = time.perf_counter() - t
     assert len(out) == n, "refresh: some fetches failed"
-    return {"n": n, "latency_s": latency_s, "seconds": round(elapsed, 3),
+    return {"n": n, "latency_s": latency_s, "settings": settings or "sequential, 1 s throttle",
+            "seconds": round(elapsed, 3),
             "req_per_s": round(n / elapsed, 2),
             "extrapolated_667_s": round(elapsed / n * N_PLAYERS, 1)}
 
@@ -279,11 +342,11 @@ def cmd_run(label: str) -> int:
     return 0
 
 
-def _golden_run() -> tuple[dict, pd.DataFrame]:
+def _golden_run(frozen_now: str) -> tuple[dict, pd.DataFrame]:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         repo = _temp_repo(Path(d))
         (repo / "golden_driver.py").write_text(DRIVER)
-        proc = subprocess.run([sys.executable, "golden_driver.py", str(GW)], cwd=repo,
+        proc = subprocess.run([sys.executable, "golden_driver.py", str(GW), frozen_now], cwd=repo,
                               capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0:
             print(proc.stdout[-3000:], proc.stderr[-3000:], sep="\n")
@@ -325,9 +388,14 @@ def compare_xp(old: pd.DataFrame, new: pd.DataFrame, tol: float = XP_TOL) -> lis
 def cmd_golden(action: str) -> int:
     if not _have_real_cache():
         return 1
-    decision, xp = _golden_run()
+    if action == "capture":
+        frozen_now = datetime.now(timezone.utc).isoformat()
+    else:
+        frozen_now = GOLDEN_CLOCK.read_text().strip()
+    decision, xp = _golden_run(frozen_now)
     if action == "capture":
         GOLDEN.mkdir(parents=True, exist_ok=True)
+        GOLDEN_CLOCK.write_text(frozen_now + "\n")
         (GOLDEN / "decision.json").write_text(json.dumps(decision, indent=2) + "\n")
         xp.to_parquet(GOLDEN / "xp.parquet")
         print(json.dumps(decision, indent=2))
@@ -365,7 +433,7 @@ if __name__ == "__main__":
 python scripts/bench.py golden capture
 python scripts/bench.py golden check
 ```
-Expected: `capture` prints the decision (GW6 squad after the Wildcard, captain, and so on). `check` prints `golden: OK` and exits 0. If `check` reports drift on unchanged code, **stop**: the run isn't deterministic (look for simulation seeds or time-dependent inputs), and no later parity claim means anything until that's fixed.
+Expected: `capture` prints the decision (GW6 squad after the Wildcard, captain, and so on) and writes the frozen instant to `clock.txt`. `check` replays the run at that same instant and prints `golden: OK`, exiting 0. (This round-trip, and a planted 1% xP change being flagged as 8 problems, were verified on a scratch copy while revising the plan.) If `check` reports drift on unchanged code, **stop**: the run isn't deterministic (look for simulation seeds or time-dependent inputs), and no later parity claim means anything until that's fixed.
 
 - [ ] **Step 4: Record the baseline numbers**
 
@@ -754,17 +822,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: Phase 1 — cache index
 
 **Files:**
-- Modify: `fpl/data/cache.py:1-4` (imports), `:116-122` (`__init__`, `_paths`), `:124-137` (`put`), `:200-207` (`prune`)
+- Modify: `fpl/data/cache.py:1-4` (imports), `:116-122` (`__init__`, `_paths`), `:124-137` (`put`), `:139-145` (`newest`), `:200-207` (`prune`)
 - Test: `tests/test_cache.py` (append), `tests/test_perf_contracts.py` (remove one xfail)
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: `Cache` keeps its public API (`put`, `newest`, `newest_stamp`, `newest_meta`, `get_fresh`, `prune`) and adds `Cache.refresh() -> None`. The index is built with `os.scandir(self.root)`, called through the `os` module attribute, which is what the scan-count contract patches.
+- Produces: `Cache` keeps its public API (`put`, `newest`, `newest_stamp`, `newest_meta`, `get_fresh`, `prune`) and adds `Cache.refresh() -> None`. The private attributes are `_index: dict[str, list[Path]] | None` and `_index_mtime: int | None` (the directory's `st_mtime_ns` when the index was last known to be current). The index is built with `os.scandir(self.root)`, called through the `os` module attribute, which is what the scan-count contract and the rescan test patch.
 
-- [ ] **Step 1: Write the failing index tests (append to `tests/test_cache.py`)**
+- [ ] **Step 1: Write the index tests (append to `tests/test_cache.py`)**
 
 ```python
 # --- the slug index ---------------------------------------------------------
+import os
+from pathlib import Path
+
 
 def test_put_after_the_index_is_built_is_visible(tmp_path):
     c = Cache(tmp_path)
@@ -804,6 +875,59 @@ def test_index_keeps_prefix_sharing_slugs_apart(tmp_path):
     assert fresh.newest("element-summary-10")[0] == {"id": 10}
 
 
+def _set_dir_mtime(path, mtime_ns):
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, mtime_ns))
+
+
+def test_another_writer_is_noticed(tmp_path):
+    reader, writer = Cache(tmp_path), Cache(tmp_path)
+    assert reader.newest("fixtures") is None                   # index built
+    writer.put("fixtures", [9], now=NOW)
+    # The filesystem normally moves the directory mtime on create; pin a
+    # distinct value so the test does not depend on timestamp granularity.
+    _set_dir_mtime(tmp_path, os.stat(tmp_path).st_mtime_ns + 10**9)
+    assert reader.newest("fixtures")[0] == [9]
+
+
+def test_a_snapshot_deleted_elsewhere_heals_instead_of_crashing(tmp_path):
+    reader = Cache(tmp_path)
+    reader.put("fixtures", ["old"], now=NOW - timedelta(hours=1))
+    reader.put("fixtures", ["new"], now=NOW)
+    assert reader.newest("fixtures")[0] == ["new"]             # index current
+    known = os.stat(tmp_path).st_mtime_ns
+    reader._paths("fixtures")[0].unlink()                      # "another process" prunes it
+    # Worst case: the deletion landed inside one timestamp tick, so the
+    # directory mtime looks unchanged and only the missing file tells.
+    _set_dir_mtime(tmp_path, known)
+    assert reader.newest("fixtures")[0] == ["old"]
+
+
+def test_own_writes_do_not_trigger_rescans(tmp_path, monkeypatch):
+    c = Cache(tmp_path)
+    c.newest("fixtures")                                       # index built
+    scans = {"n": 0}
+    real_scandir, real_glob = os.scandir, Path.glob
+
+    # Both, because pathlib's glob does not list through os.scandir.
+    def counting_scandir(path=".", *a, **k):
+        scans["n"] += 1
+        return real_scandir(path, *a, **k)
+
+    def counting_glob(self, pattern, *a, **k):
+        scans["n"] += 1
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    for h in range(20):
+        c.put("fixtures", [h], now=NOW + timedelta(hours=h), meta={"final_through": 1})
+        c.prune("fixtures", keep=3)
+        c.newest("fixtures")
+    assert scans["n"] == 0
+    assert c.newest("fixtures")[0] == [19]
+
+
 def test_refresh_sees_another_writer(tmp_path):
     reader, writer = Cache(tmp_path), Cache(tmp_path)
     assert reader.newest("fixtures") is None
@@ -814,8 +938,12 @@ def test_refresh_sees_another_writer(tmp_path):
 
 - [ ] **Step 2: Run them to see which fail**
 
-Run: `python -m pytest tests/test_cache.py -v -p no:cacheprovider -k "index or refresh or prune_updates or put_after"`
-Expected: `test_index_ignores_files_that_are_not_snapshots` FAILS (`fixtures_notes.json` sorts above the real snapshot, so `newest` raises `ValueError` from `strptime`), and `test_refresh_sees_another_writer` FAILS (`AttributeError: 'Cache' object has no attribute 'refresh'`). The other three pass on the glob code; they are regression guards for the index.
+Run: `python -m pytest tests/test_cache.py -v -p no:cacheprovider -k "index or refresh or prune_updates or put_after or writer or elsewhere or rescans"`
+Expected, on the glob code:
+- `test_index_ignores_files_that_are_not_snapshots` FAILS: `fixtures_notes.json` sorts above the real snapshot and `newest` raises `ValueError` from `strptime`.
+- `test_refresh_sees_another_writer` FAILS with `AttributeError: 'Cache' object has no attribute 'refresh'`.
+- `test_own_writes_do_not_trigger_rescans` FAILS: `glob` lists the directory on every call.
+- The other five pass. They're regression guards the index must keep passing.
 
 - [ ] **Step 3: Implement the index in `fpl/data/cache.py`**
 
@@ -832,22 +960,31 @@ Replace `__init__` and `_paths` (lines 116–122) with:
 
 ```python
 class Cache:
+    """Timestamped JSON snapshots, one directory, one writer at a time.
+
+    Lookups read an index of the directory instead of listing it: globbing per
+    lookup listed the whole cache for every call, and a weekly run makes ~2,700
+    of them against ~4,000 files -- 22 of its 40 seconds. The index is checked
+    against the directory's mtime on every lookup, so a snapshot written by
+    another process is normally noticed; because filesystem timestamps are
+    tick-granular that check is best-effort, and a snapshot deleted elsewhere
+    is caught when reading it fails (see `newest`).
+    """
+
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        # slug -> snapshot paths, newest first. Built on first use by ONE scan of
-        # the directory and kept current by put/prune. Globbing per lookup
-        # listed the whole cache for every call, and a weekly run makes ~2,700
-        # of them against ~4,000 files: 22 of its 40 seconds.
+        # slug -> snapshot paths, newest first.
         self._index: dict[str, list[Path]] | None = None
+        # The directory mtime at which the index was last known to be current.
+        self._index_mtime: int | None = None
 
     def refresh(self) -> None:
-        """Forget the index so the next lookup rescans the directory.
-
-        For a caller that knows another process has written to the cache. One
-        run owns the cache at a time today, so nothing calls this yet.
-        """
+        """Forget the index so the next lookup rescans the directory."""
         self._index = None
+
+    def _dir_mtime(self) -> int:
+        return os.stat(self.root).st_mtime_ns
 
     @staticmethod
     def _slug_of(name: str) -> str | None:
@@ -868,50 +1005,95 @@ class Cache:
             return None
         return slug
 
-    def _build_index(self) -> dict[str, list[Path]]:
-        index: dict[str, list[Path]] = {}
-        with os.scandir(self.root) as entries:
-            for entry in entries:
-                slug = self._slug_of(entry.name)
-                if slug is not None and entry.is_file():
-                    index.setdefault(slug, []).append(self.root / entry.name)
-        for paths in index.values():
-            paths.sort(reverse=True)
-        return index
+    def _current_index(self) -> dict[str, list[Path]]:
+        mtime = self._dir_mtime()
+        if self._index is None or mtime != self._index_mtime:
+            # mtime is read BEFORE the scan: a write that lands during it moves
+            # the mtime again and forces another rebuild, never a missed file.
+            self._index_mtime = mtime
+            index: dict[str, list[Path]] = {}
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    slug = self._slug_of(entry.name)
+                    if slug is not None and entry.is_file():
+                        index.setdefault(slug, []).append(self.root / entry.name)
+            for paths in index.values():
+                paths.sort(reverse=True)
+            self._index = index
+        return self._index
 
     def _paths(self, slug: str) -> list[Path]:
-        if self._index is None:
-            self._index = self._build_index()
-        return list(self._index.get(slug, ()))
+        return list(self._current_index().get(slug, ()))
 ```
 
-In `put`, after the sidecar write and before `return p`, add:
+Replace `put` (lines 124–137), keeping its docstring and changing its last sentence as shown:
 
 ```python
-        if self._index is not None:
+    def put(self, slug: str, payload, now: datetime | None = None,
+            meta: dict | None = None) -> Path:
+        """Write a snapshot, and beside it what was true of the data when it was
+        taken (`meta`), which no later reader can work out from the timestamp.
+
+        The sidecar deliberately does not end in `.json`: the index only takes
+        `*.json` snapshots and would otherwise try to read it as one.
+        """
+        # Was the index current just before this write? Only then can our own
+        # write be folded in; otherwise someone else wrote too, so rebuild.
+        current = self._index is not None and self._dir_mtime() == self._index_mtime
+        ts = _as_utc(now or _now())
+        p = self.root / f"{slug}_{ts.strftime(TS_FMT)}.json"
+        p.write_text(json.dumps(payload))
+        if meta:
+            p.with_suffix(META_SUFFIX).write_text(json.dumps(meta))
+        if current:
             paths = self._index.setdefault(slug, [])
             if p not in paths:
                 paths.append(p)
                 paths.sort(reverse=True)
+            self._index_mtime = self._dir_mtime()
+        else:
+            self._index = None
         return p
+```
+
+Replace `newest` (lines 139–145) with:
+
+```python
+    def newest(self, slug: str):
+        for retried in (False, True):
+            paths = self._paths(slug)
+            if not paths:
+                return None
+            p = paths[0]
+            try:
+                text = p.read_text()
+            except FileNotFoundError:
+                # Pruned by another process inside one mtime tick, so the index
+                # still lists it. Rescan once rather than crash the run.
+                if retried:
+                    raise
+                self.refresh()
+                continue
+            ts = datetime.strptime(p.stem.rsplit("_", 1)[1], TS_FMT).replace(tzinfo=timezone.utc)
+            return json.loads(text), ts
 ```
 
 Replace `prune` (lines 200–207) with:
 
 ```python
     def prune(self, slug: str, keep: int = 3) -> int:
-        paths = self._paths(slug)
+        paths = self._paths(slug)          # validates the index against the mtime
         removed = 0
         for p in paths[keep:]:
-            p.unlink()
+            # missing_ok: another process may have pruned the same snapshot.
+            p.unlink(missing_ok=True)
             p.with_suffix(META_SUFFIX).unlink(missing_ok=True)
             removed += 1
-        if self._index is not None:
+        if removed and self._index is not None:
             self._index[slug] = paths[:keep]
+            self._index_mtime = self._dir_mtime()
         return removed
 ```
-
-(The `put` docstring's line "`_paths` globs for snapshots and would otherwise try to read it as one" should now read "`_paths` indexes `*.json` snapshots and would otherwise try to read it as one.")
 
 - [ ] **Step 4: Run the cache tests and the scan contract**
 
@@ -923,11 +1105,11 @@ Expected: every cache test PASSES; `test_cache_scans_directory_once` PASSES; the
 - [ ] **Step 5: Full suite, golden check, bench**
 
 ```bash
-python -m pytest -q -p no:cacheprovider        # expect 786 passed, 3 xfailed
+python -m pytest -q -p no:cacheprovider        # expect 789 passed, 3 xfailed
 python scripts/bench.py golden check           # expect golden: OK
 python scripts/bench.py run --label phase1-cache-index
 ```
-Expected bench: `cache_hits_s` under 1 s, and `gw6_cache_only_s` ≤ 20 (success criterion 2). `refresh` is still about 650 s extrapolated; that's phase 2. Fill the `phase1-cache-index` column in `docs/perf/README.md`.
+Expected bench: `cache_hits_s` under 1 s (the per-lookup `os.stat` costs about 2,700 × ~20 µs), and `gw6_cache_only_s` ≤ 20 (success criterion 2). `refresh` is still about 650 s extrapolated; that's phase 2. Fill the `phase1-cache-index` column in `docs/perf/README.md`.
 
 - [ ] **Step 6: Commit**
 
@@ -935,7 +1117,9 @@ Expected bench: `cache_hits_s` under 1 s, and `gw6_cache_only_s` ≤ 20 (success
 git add fpl/data/cache.py tests/test_cache.py tests/test_perf_contracts.py docs/perf
 git commit -m "perf: index cache snapshots by slug instead of globbing per lookup
 
-One directory scan per Cache instead of ~2,700 on a weekly run.
+One directory scan per Cache instead of ~2,700 on a weekly run. The index
+is checked against the directory mtime, so other writers are noticed, and a
+snapshot deleted elsewhere triggers one rescan instead of a crash.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -950,7 +1134,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `TokenBucket(rate: float, clock=time.monotonic, sleep=time.sleep)` with `acquire() -> None` (blocks until this caller may start a request) and `pause_for(seconds: float) -> None` (no acquisition by any thread before now + seconds). `rate <= 0` disables spacing, but `pause_for` still applies. Thread-safe. Task 6 uses exactly these names.
+- Produces:
+  - `FetchCancelled(Exception)`.
+  - `TokenBucket(rate: float, clock=time.monotonic, sleep=time.sleep)` with:
+    - `acquire(cancel: threading.Event | None = None) -> None`: blocks until this caller may start a request. It raises `FetchCancelled` if `cancel` is set, whether before or while waiting.
+    - `pause_for(seconds: float) -> None`: no acquisition by any thread, *including threads already waiting*, before now + seconds.
+    - `rate` (float attribute).
+  - `rate <= 0` disables spacing, but pauses and cancellation still apply. Thread-safe. Task 6 uses exactly these names.
 
 - [ ] **Step 1: Write the failing tests (`tests/test_throttle.py`)**
 
@@ -958,7 +1148,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import threading
 import time
 
-from fpl.data.throttle import TokenBucket
+import pytest
+
+from fpl.data.throttle import FetchCancelled, TokenBucket
 
 
 class FakeClock:
@@ -1008,6 +1200,66 @@ def test_pause_holds_every_caller_even_uncapped():
     assert clk.sleeps == [3.0]
 
 
+def test_a_pause_holds_back_threads_already_waiting():
+    """The review's case: a 429 lands while other workers are already asleep
+    waiting for their slot. None of them may start inside the pause."""
+    b = TokenBucket(10)
+    lock = threading.Lock()
+    starts: list[float] = []
+    paused: dict = {}
+
+    def worker():
+        for _ in range(3):
+            b.acquire()
+            with lock:
+                starts.append(time.monotonic())
+                if len(starts) == 2:
+                    b.pause_for(0.5)
+                    paused["at"] = time.monotonic()
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(starts) == 12
+    later = [t for t in starts if t > paused["at"]]
+    assert later, "nothing started after the pause"
+    assert min(later) >= paused["at"] + 0.5 - 0.02
+
+
+def test_cancel_wakes_a_waiting_caller():
+    b = TokenBucket(0)
+    b.pause_for(30.0)
+    stop = threading.Event()
+    outcome: dict = {}
+
+    def waiter():
+        try:
+            b.acquire(stop)
+            outcome["result"] = "acquired"
+        except FetchCancelled:
+            outcome["result"] = "cancelled"
+
+    t = threading.Thread(target=waiter)
+    started = time.monotonic()
+    t.start()
+    time.sleep(0.05)
+    stop.set()
+    t.join(timeout=2.0)
+    assert not t.is_alive()
+    assert outcome["result"] == "cancelled"
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_cancelled_caller_never_acquires():
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(FetchCancelled):
+        TokenBucket(0).acquire(stop)
+
+
 def test_is_safe_across_threads():
     b = TokenBucket(20)
     t = time.monotonic()
@@ -1034,14 +1286,23 @@ import threading
 import time
 
 
+class FetchCancelled(Exception):
+    """The fetch this caller belongs to was stopped while it waited."""
+
+
 class TokenBucket:
     """At most `rate` acquisitions per second across all threads sharing it.
 
     Capacity is one: acquisitions are spaced 1/rate apart and an idle bucket
     banks nothing, so a pause never turns into a burst -- FPL's edge answers
     bursts with 429s. `rate <= 0` disables the spacing (tests, and anyone who
-    explicitly opts out) but still honours `pause_for`, which is how a 429
-    seen by one worker holds back all of them.
+    explicitly opts out) but still honours pauses and cancellation.
+
+    Nothing is reserved while waiting. Every wake-up re-reads the next free
+    slot and the pause under the lock, so a pause set by one worker after a
+    429 holds back workers that were already asleep waiting for their turn.
+    Booking a future slot and sleeping towards it would let them start inside
+    the pause.
     """
 
     def __init__(self, rate: float, clock=time.monotonic, sleep=time.sleep):
@@ -1055,29 +1316,36 @@ class TokenBucket:
         with self._lock:
             self._paused_until = max(self._paused_until, self._clock() + float(seconds))
 
-    def acquire(self) -> None:
-        # Reserve a start time under the lock, sleep outside it, so one waiting
-        # thread never blocks the others from reserving theirs.
-        with self._lock:
-            now = self._clock()
-            start = max(now, self._next, self._paused_until)
-            if self.rate > 0:
-                self._next = start + 1.0 / self.rate
-            wait = start - now
-        if wait > 0:
-            self._sleep(wait)
+    def acquire(self, cancel: threading.Event | None = None) -> None:
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise FetchCancelled
+            with self._lock:
+                now = self._clock()
+                ready_at = max(self._next, self._paused_until)
+                if now >= ready_at:
+                    # Spaced from when this caller actually goes, not from
+                    # when it was due, so a late wake-up never shortens the gap.
+                    if self.rate > 0:
+                        self._next = now + 1.0 / self.rate
+                    return
+                wait = ready_at - now
+            if cancel is not None:
+                cancel.wait(wait)      # returns early when the fetch is stopped
+            else:
+                self._sleep(wait)
 ```
 
 - [ ] **Step 4: Run the tests**
 
 Run: `python -m pytest tests/test_throttle.py -v -p no:cacheprovider`
-Expected: 5 PASS.
+Expected: 8 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add fpl/data/throttle.py tests/test_throttle.py
-git commit -m "feat: thread-safe token-bucket limiter for the FPL fetch
+git commit -m "feat: cancellable token-bucket limiter whose pauses hold waiting threads
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1087,21 +1355,37 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 6: Phase 2b — concurrent `element_summaries`, retries, config, call sites
 
 **Files:**
-- Modify: `fpl/data/client.py` (whole module; `_get` keeps its behaviour)
+- Replace: `fpl/data/client.py` (the full new module is below; `_get`, the single-endpoint methods and the throttle keep their behaviour)
 - Modify: `fpl/config.py:44-45` (dataclass fields) and `:119-120` (loader), `config.yaml` (`data:` block)
 - Modify: `run_gameweek.py:96` and `:109-111` (progress comment), `fpl/pipeline.py:577`, `scripts/run_backtest.py:176`, `scripts/score_gameweek.py:60`
 - Test: `tests/test_client.py` (append), `tests/test_config.py` (append), `tests/test_perf_contracts.py` (remove three xfails)
 
 **Interfaces:**
-- Consumes: `TokenBucket(rate)`, `.acquire()`, `.pause_for(seconds)` from Task 5; the Task 3 parity tests as the behaviour contract.
-- Produces: `FplClient(cache, ttl_hours=6, rate_limit_s=1.0, session=None, fetch_workers=4, fetch_rate_per_s=None)`. When `fetch_rate_per_s` is `None`, it resolves to `0.0` if `rate_limit_s` is falsy, else `DEFAULT_FETCH_RATE = 5.0`. The module constants are `RETRY_STATUSES`, `MAX_RETRIES = 3`, `BACKOFF_S = (1.0, 2.0, 4.0)` and `MAX_RETRY_AFTER_S = 60.0`; tests monkeypatch `BACKOFF_S`. `Config.fetch_workers: int = 4` and `Config.fetch_rate_per_s: float = 5.0`.
+- Consumes: `TokenBucket(rate)`, `.acquire(cancel)`, `.pause_for(seconds)` and `FetchCancelled` from Task 5; the Task 3 parity tests as the behaviour contract.
+- Produces:
+  - `FplClient(cache, ttl_hours=6, rate_limit_s=1.0, session=None, fetch_workers=4, fetch_rate_per_s=None)`. When `fetch_rate_per_s` is `None`, it resolves to `0.0` if `rate_limit_s` is falsy, else `DEFAULT_FETCH_RATE = 5.0`.
+  - Module constants `RETRY_STATUSES`, `MAX_RETRIES = 3`, `BACKOFF_S = (1.0, 2.0, 4.0)`, `MAX_RETRY_AFTER_S = 120.0` and `POLL_S = 0.25`. Tests monkeypatch `BACKOFF_S`.
+  - `ServerBackoff(Exception)`.
+  - `FplClient._retry_after(resp) -> float | None` (staticmethod).
+  - `Config.fetch_workers: int = 4` and `Config.fetch_rate_per_s: float = 5.0`.
 
-- [ ] **Step 1: Write the failing retry, interrupt and dedupe tests (append to `tests/test_client.py`)**
+**How stopping works.** Read this before the code.
+- `_fetch_misses` keeps at most `2 × fetch_workers` futures queued.
+- Every worker checks one `threading.Event` before each rate wait, request, backoff and retry. The rate and backoff waits are `Event.wait`, so they wake at once.
+- The calling thread waits in `POLL_S` slices, so Ctrl-C is seen on Windows.
+- On any exception it sets the event, then **joins** the pool (`shutdown(wait=True, cancel_futures=True)`), which returns within one in-flight request, and only then closes the worker sessions. No request starts after `element_summaries` has left, and no session is closed under a running request.
+- A `ServerBackoff` (Retry-After > 120 s) sets the same event but doesn't raise. The players not yet fetched take the stale-fallback / `fetch_failures` path.
+
+- [ ] **Step 1: Write the failing retry, Retry-After, interrupt and dedupe tests (append to `tests/test_client.py`)**
 
 ```python
-# --- concurrent fetch: retries, interruption, duplicates ----------------------
+# --- concurrent fetch: retries, Retry-After, interruption, duplicates -----------
+# The two intentional differences from the sequential crawl live here: a
+# transient failure is retried before it counts, and an id given twice is
+# fetched once. Everything else is pinned by the parity tests above.
 import threading
 import time
+from email.utils import format_datetime
 
 import requests
 
@@ -1124,8 +1408,9 @@ class ScriptedSession:
     """Each URL answers from its own script of steps; the last step repeats.
     A step is a status code, a (status, headers) pair, or an exception class."""
 
-    def __init__(self, scripts):
+    def __init__(self, scripts, latency_s: float = 0.0):
         self.scripts = {u: list(s) for u, s in scripts.items()}
+        self.latency_s = latency_s
         self.calls: list[str] = []
         self.lock = threading.Lock()
 
@@ -1134,6 +1419,8 @@ class ScriptedSession:
             self.calls.append(url)
             steps = self.scripts[url]
             step = steps.pop(0) if len(steps) > 1 else steps[0]
+        if self.latency_s:
+            time.sleep(self.latency_s)
         if isinstance(step, type) and issubclass(step, Exception):
             raise step("scripted")
         status, headers = step if isinstance(step, tuple) else (step, {})
@@ -1207,38 +1494,80 @@ def test_an_unexpected_error_is_not_retried(tmp_path, no_backoff):
     assert len(s.calls) == 1
 
 
-def test_an_interrupted_refresh_stops_promptly_and_keeps_what_it_fetched(tmp_path):
-    class SlowSession:
-        def __init__(self):
-            self.calls = 0
-            self.lock = threading.Lock()
+def test_retry_after_accepts_seconds_and_http_dates():
+    ra = FplClient._retry_after
+    assert ra(ScriptedResponse({}, 429, {"Retry-After": "7"})) == 7.0
+    soon = datetime.now(timezone.utc) + timedelta(seconds=90)
+    got = ra(ScriptedResponse({}, 429, {"Retry-After": format_datetime(soon, usegmt=True)}))
+    assert 85 <= got <= 91
+    past = datetime.now(timezone.utc) - timedelta(seconds=30)
+    assert ra(ScriptedResponse({}, 429, {"Retry-After": format_datetime(past, usegmt=True)})) == 0.0
+    assert ra(ScriptedResponse({}, 429, {"Retry-After": "soon"})) is None
+    assert ra(ScriptedResponse({}, 429, {})) is None
 
-        def get(self, url, timeout=None):
-            with self.lock:
-                self.calls += 1
-            time.sleep(0.1)
-            return ScriptedResponse({"url": url})
 
-    class Stop(Exception):
-        pass
+def test_a_long_retry_after_stops_asking_and_falls_back(tmp_path, no_backoff):
+    cache = Cache(tmp_path)
+    for pid in (2, 3, 4, 5):
+        cache.put(f"element-summary-{pid}", {"src": "old"}, now=now() - timedelta(days=11))
+    scripts = {_es(1): [(429, {"Retry-After": "3600"})]}
+    scripts.update({_es(p): [200] for p in (2, 3, 4, 5)})
+    s = ScriptedSession(scripts)
+    c = FplClient(cache, rate_limit_s=0, session=s, fetch_workers=1)
 
+    out = c.element_summaries([1, 2, 3, 4, 5], not_before=now() - timedelta(days=2))
+
+    assert s.calls.count(_es(1)) == 1                  # never re-asked
+    assert len(s.calls) <= 2                           # at most the one already queued
+    assert set(out) == {2, 3, 4, 5}
+    assert all(out[p] == {"src": "old"} for p in (3, 4, 5))
+    assert c.fetch_failures == {1}
+    assert c.stale is True
+
+
+class _Stop(Exception):
+    pass
+
+
+def _stop_at(n):
     def progress(done, total):
-        if done == 3:
-            raise Stop
+        if done == n:
+            raise _Stop
+    return progress
 
-    s = SlowSession()
+
+def test_an_interrupted_refresh_stops_its_workers(tmp_path):
+    s = ScriptedSession({_es(p): [200] for p in range(1, 41)}, latency_s=0.1)
     cache = Cache(tmp_path)
     c = FplClient(cache, rate_limit_s=0, session=s, fetch_workers=2, fetch_rate_per_s=0)
 
     t = time.monotonic()
-    with pytest.raises(Stop):
-        c.element_summaries(range(1, 41), progress=progress)
+    with pytest.raises(_Stop):
+        c.element_summaries(range(1, 41), progress=_stop_at(3))
     elapsed = time.monotonic() - t
+    calls_at_return = len(s.calls)
+    time.sleep(0.3)
 
-    # Draining the queue would take 40 x 0.1 / 2 = 2 s.
-    assert elapsed < 1.0
-    assert s.calls < 40
+    assert elapsed < 1.0                               # draining would take 2 s
+    assert len(s.calls) == calls_at_return             # no worker is still fetching
+    assert calls_at_return <= 3 + 2 * 2                # only the bounded window ran
     assert sum(1 for p in range(1, 41) if cache.newest(f"element-summary-{p}")) >= 3
+
+
+def test_an_interrupt_cuts_a_retry_backoff_short(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_mod, "BACKOFF_S", (5.0, 5.0, 5.0))
+    scripts = {_es(1): [503, 200]}
+    scripts.update({_es(p): [200] for p in range(2, 9)})
+    s = ScriptedSession(scripts, latency_s=0.02)
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s,
+                  fetch_workers=2, fetch_rate_per_s=0)
+
+    t = time.monotonic()
+    with pytest.raises(_Stop):
+        c.element_summaries(range(1, 9), progress=_stop_at(3))
+
+    assert time.monotonic() - t < 1.0                  # not the 5 s backoff
+    assert s.calls.count(_es(1)) == 1                  # and no retry after the stop
 
 
 def test_duplicate_ids_are_fetched_once(tmp_path):
@@ -1283,21 +1612,28 @@ def test_fetch_settings_default_when_absent(tmp_path):
 - [ ] **Step 3: Run the new tests to confirm they fail**
 
 Run: `python -m pytest tests/test_client.py tests/test_config.py -v -p no:cacheprovider`
-Expected: most Step 1 tests FAIL or ERROR (the `no_backoff` fixture can't patch the missing `BACKOFF_S`; `_limiter` and `fetch_workers` don't exist; the old code dedupes nothing and never retries); the Step 2 tests FAIL (`AttributeError: 'Config' object has no attribute 'fetch_workers'`). Every Task 3 parity test still PASSES.
+Expected: most Step 1 tests FAIL or ERROR, because the `no_backoff` fixture can't patch the missing `BACKOFF_S`; `_limiter`, `_retry_after` and `fetch_workers` don't exist; and the old code neither retries nor dedupes. `test_404_is_not_retried` and `test_an_unexpected_error_is_not_retried` may already pass (the old code never retries anything). The Step 2 tests FAIL with `AttributeError: 'Config' object has no attribute 'fetch_workers'`. Every Task 3 parity test still PASSES.
 
-- [ ] **Step 4: Rewrite `fpl/data/client.py`**
+- [ ] **Step 4: Replace `fpl/data/client.py` with this module**
 
-Keep the module docstring, `BASE`, `UA`, `FORBIDDEN`, `HISTORY_TTL_H`, `DataCoverageError`, `_record_source`, `source_summary`, `_throttle`, `bootstrap`, `fixtures`, `element_summary`, `entry`, `entry_history` and `entry_picks` exactly as they are. Change the imports and constants, `__init__`, `_get` (refactored onto shared helpers, same behaviour) and `element_summaries`, and add `_cached`, `_store`, `_fallback`, `_worker_session`, `_close_worker_sessions`, `_fetch_json` and `_retry_after`:
+It was prototyped against every test in this plan and the Task 3 parity tests (83/83 passing).
 
 ```python
+"""Read-only HTTP client for the public FPL API.
+
+Never calls any endpoint requiring a login/session cookie (e.g. my-team/),
+and never issues a non-GET request.
+"""
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
 from .cache import Cache
-from .throttle import TokenBucket
+from .throttle import FetchCancelled, TokenBucket
 
 BASE = "https://fantasy.premierleague.com/api/"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; fpl-team-picker/1.0)"}
@@ -1305,19 +1641,37 @@ FORBIDDEN = ("my-team",)
 # `history_past` for a completed season is immutable, so these can cache hard.
 HISTORY_TTL_H = 24 * 30
 # Element-summaries are the one bulk fetch: ~667 of them after every gameweek.
-# One at a time behind a 1 s throttle that was 11+ minutes; a few in flight
-# under a shared cap keeps the same total politeness budget per second while
-# the network latency overlaps.
+# One at a time behind a 1 s throttle that was 11+ minutes. A few in flight
+# under one shared cap overlaps the network latency without asking FPL for
+# more than a handful of requests a second.
 DEFAULT_FETCH_RATE = 5.0
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 MAX_RETRIES = 3
 BACKOFF_S = (1.0, 2.0, 4.0)
-MAX_RETRY_AFTER_S = 60.0
-```
+# The longest server-requested wait a run sits out. A longer Retry-After is
+# obeyed by not asking again this run: the players still to fetch fall back to
+# their cached snapshots, exactly as they would in an outage.
+MAX_RETRY_AFTER_S = 120.0
+# How often the calling thread wakes while workers fetch. A blocking wait on
+# Windows does not see Ctrl-C until it returns; a short timed one does.
+POLL_S = 0.25
 
-`__init__` (the signature changes; the body keeps every existing attribute and comment, then adds the fetch machinery):
 
-```python
+class DataCoverageError(RuntimeError):
+    """Too much of this run's player history is missing to optimise safely.
+
+    Raised rather than warned because the failure is invisible downstream: a
+    player whose summary could not be fetched is zeroed and routed to the same
+    price prior as a genuine new signing, and the optimizer then returns a
+    confident, legal team built on an estimate nothing supports.
+    """
+
+
+class ServerBackoff(Exception):
+    """FPL asked us to stay away longer than a run can wait."""
+
+
+class FplClient:
     def __init__(self, cache: Cache, ttl_hours: float = 6, rate_limit_s: float = 1.0,
                  session=None, fetch_workers: int = 4,
                  fetch_rate_per_s: float | None = None):
@@ -1325,8 +1679,24 @@ MAX_RETRY_AFTER_S = 60.0
         self.ttl_hours = ttl_hours
         self.rate_limit_s = rate_limit_s
         self.session = session or requests.Session()
-        # (Keep today's lines 33-51 verbatim here: stale, sources, snapshot_meta,
-        #  unverified, fetch_failures and _last_call, with their comments.)
+        self.stale = False
+        # When each payload this run used was captured. A forecast is only
+        # reproducible if it records which snapshots it read: "the model got
+        # worse" and "the model was handed a week-old bootstrap" look identical
+        # in the score ledger otherwise.
+        self.sources: dict[str, str] = {}
+        # Recorded alongside every snapshot this client writes. `final_through`
+        # says which gameweeks FPL had finished CHECKING at capture time, which
+        # a timestamp cannot express and a later reader cannot recover.
+        self.snapshot_meta: dict = {}
+        # Slugs served from a snapshot too old to carry a `final_through`
+        # marker, when one was asked for.
+        self.unverified: set[str] = set()
+        # Players whose element-summary could not be fetched OR served from
+        # cache on this run. `stale` is one global boolean and cannot say WHO
+        # is affected, which is exactly what the caller needs to decide whether
+        # the missing history touches the squad.
+        self.fetch_failures: set[int] = set()
         self._last_call = 0.0
         # A caller that turned the throttle off (the tests) has turned the
         # bulk fetch's cap off too, unless it says otherwise.
@@ -1341,11 +1711,36 @@ MAX_RETRY_AFTER_S = 60.0
         self._local = threading.local()
         self._worker_sessions: list = []
         self._sessions_lock = threading.Lock()
-```
 
-The shared helpers and the refactored `_get`:
+    def _record_source(self, slug: str) -> None:
+        ts = self.cache.newest_stamp(slug)
+        if ts is not None:
+            self.sources[slug] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-```python
+    def source_summary(self) -> dict:
+        """Snapshot times, with the per-player summaries collapsed to a range.
+
+        Seven hundred element-summary entries say nothing a first-and-last pair
+        does not, and would dwarf the forecast they annotate.
+        """
+        out, summaries = {}, []
+        for slug, ts in self.sources.items():
+            if slug.startswith("element-summary-"):
+                summaries.append(ts)
+            else:
+                out[slug] = ts
+        if summaries:
+            out["element-summary"] = {"oldest": min(summaries), "newest": max(summaries),
+                                      "n": len(summaries)}
+        return out
+
+    def _throttle(self) -> None:
+        if self.rate_limit_s:
+            delta = time.monotonic() - self._last_call
+            if delta < self.rate_limit_s:
+                time.sleep(self.rate_limit_s - delta)
+            self._last_call = time.monotonic()
+
     def _cached(self, slug: str, ttl_hours: float, not_before=None,
                 require_final_through=None):
         """The fresh cached payload for `slug`, or None -- with the source and
@@ -1400,11 +1795,7 @@ The shared helpers and the refactored `_get`:
             return fallback
         self._store(slug, payload)
         return payload
-```
 
-The worker-side HTTP:
-
-```python
     def _worker_session(self):
         if self._shared_session:
             return self.session
@@ -1422,59 +1813,107 @@ The worker-side HTTP:
             s.close()
 
     @staticmethod
-    def _retry_after(resp) -> float:
-        value = (getattr(resp, "headers", None) or {}).get("Retry-After")
-        try:
-            return min(max(float(value), 0.0), MAX_RETRY_AFTER_S)
-        except (TypeError, ValueError):
-            return 0.0
+    def _retry_after(resp) -> float | None:
+        """Seconds the server asked us to wait, or None if it did not say.
 
-    def _fetch_json(self, url: str):
+        RFC 9110 allows either delay-seconds or an HTTP-date.
+        """
+        value = (getattr(resp, "headers", None) or {}).get("Retry-After")
+        if value is None:
+            return None
+        value = str(value).strip()
+        try:
+            return max(float(value), 0.0)
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max((when - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+    @staticmethod
+    def _pause(seconds: float, stop: threading.Event) -> None:
+        if stop.wait(seconds):
+            raise FetchCancelled
+
+    def _fetch_json(self, url: str, stop: threading.Event):
         """GET `url` on a worker thread, through the shared limiter.
 
         Retries what is worth retrying -- rate limiting, server errors, dropped
         connections -- with backoff; a 404 or anything unexpected fails at
-        once. Touches no cache and no client state: the calling thread does
-        all of that, so none of it needs a lock.
+        once. Every wait watches `stop`, so a stopped fetch leaves promptly.
+        Touches no cache and no client state: the calling thread does all of
+        that, so none of it needs a lock.
         """
         if any(f in url.lower() for f in FORBIDDEN):
             raise ValueError(f"refusing to call authenticated endpoint: {url}")
         session = self._worker_session()
         for attempt in range(MAX_RETRIES + 1):
             last = attempt == MAX_RETRIES
-            self._limiter.acquire()
+            self._limiter.acquire(stop)
             try:
                 resp = session.get(url, timeout=30)
             except (requests.ConnectionError, requests.Timeout):
                 if last:
                     raise
-                time.sleep(BACKOFF_S[attempt])
+                self._pause(BACKOFF_S[attempt], stop)
                 continue
             status = getattr(resp, "status_code", 200)
-            if status in RETRY_STATUSES and not last:
-                wait = max(BACKOFF_S[attempt], self._retry_after(resp))
+            if status in RETRY_STATUSES:
+                asked = self._retry_after(resp)
+                if asked is not None and asked > MAX_RETRY_AFTER_S:
+                    raise ServerBackoff(f"{url}: Retry-After {asked:.0f}s")
+                wait_s = max(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)], asked or 0.0)
                 if status == 429:
-                    # FPL is telling us all to slow down, not just this worker.
-                    self._limiter.pause_for(wait)
-                else:
-                    time.sleep(wait)
-                continue
+                    # FPL is telling every worker to slow down, not just this one.
+                    self._limiter.pause_for(wait_s)
+                if not last:
+                    if status != 429:
+                        self._pause(wait_s, stop)
+                    continue
             resp.raise_for_status()
             return resp.json()
-```
 
-`element_summaries` (keep the existing docstring and add the paragraph shown at its end):
+    def bootstrap(self) -> dict:
+        return self._get("bootstrap-static/", "bootstrap-static")
 
-```python
+    def fixtures(self) -> list[dict]:
+        return self._get("fixtures/", "fixtures")
+
+    def element_summary(self, player_id: int, ttl_hours: float | None = None,
+                        not_before=None, require_final_through=None) -> dict:
+        return self._get(f"element-summary/{player_id}/", f"element-summary-{player_id}",
+                         ttl_hours=ttl_hours, not_before=not_before,
+                         require_final_through=require_final_through)
+
     def element_summaries(self, player_ids, ttl_hours: float = HISTORY_TTL_H,
                           progress=None, not_before=None,
                           require_final_through=None) -> dict[int, dict]:
-        """...existing docstring, unchanged, then:
+        """Fetch many element-summaries, tolerating individual failures.
+
+        The long default TTL dates from when `history_past` was the only field
+        read from these — it is immutable once a season ends, so age did not
+        matter. `history_current_frame` now reads THIS season's rounds from the
+        same payload, which age very much does affect, so callers that need the
+        current season must pass `not_before=data_complete_after(fixtures)`.
+        Without it a 30-day-old snapshot counts as fresh and the model silently
+        runs on whatever gameweek happened to be current when it was taken.
+
+        A player whose summary can't be fetched is omitted from the result AND
+        recorded in `fetch_failures`. Downstream, an omitted player is zeroed
+        and routed to the price prior -- the right treatment for a newcomer and
+        badly wrong for an established player lost to an outage -- so the
+        caller has to be able to tell the two apart.
 
         Cache hits are resolved first, on this thread. Only the misses go to
         the network, `fetch_workers` at a time under the shared rate cap, and
-        every result is written back on this thread as it arrives -- so the
-        cache and the bookkeeping above never see two threads at once.
+        each result is written back on this thread as it arrives -- so the
+        cache and the bookkeeping above never see two threads at once. A
+        transient failure is retried before it counts as one, and an id given
+        twice is fetched once.
         """
         ids = list(dict.fromkeys(int(pid) for pid in player_ids))
         found: dict[int, dict] = {}
@@ -1485,6 +1924,17 @@ The worker-side HTTP:
             done += 1
             if progress:
                 progress(done, len(ids))
+
+        def settle(pid: int, payload) -> None:
+            """Record one player's outcome; `payload` None means the fetch failed."""
+            if payload is None:
+                payload = self._fallback(f"element-summary-{pid}")
+                if payload is None:
+                    self.stale = True
+                    self.fetch_failures.add(pid)
+            if payload is not None:
+                found[pid] = payload
+            tick()
 
         misses = []
         for pid in ids:
@@ -1497,37 +1947,69 @@ The worker-side HTTP:
                 tick()
 
         if misses:
-            pool = ThreadPoolExecutor(max_workers=self.fetch_workers)
-            try:
-                futures = {pool.submit(self._fetch_json, f"{BASE}element-summary/{pid}/"): pid
-                           for pid in misses}
-                for fut in as_completed(futures):
-                    pid = futures[fut]
-                    slug = f"element-summary-{pid}"
+            self._fetch_misses(misses, settle)
+        return {pid: found[pid] for pid in ids if pid in found}
+
+    def _fetch_misses(self, misses: list[int], settle) -> None:
+        """Fetch `misses` on worker threads and `settle` each on this one.
+
+        At most two requests per worker are queued at any moment, so stopping
+        never has hundreds of queued futures to cancel. Stopping -- an
+        exception here, including Ctrl-C or a raising progress callback -- sets
+        `stop`, which every worker checks before each rate wait, request,
+        backoff and retry; the pool is then joined, so no request starts after
+        this method has left, and only then are the workers' sessions closed.
+        """
+        stop = threading.Event()
+        queue = iter(misses)
+        pending: dict = {}
+        pool = ThreadPoolExecutor(max_workers=self.fetch_workers)
+
+        def submit_next() -> None:
+            pid = next(queue, None)
+            if pid is not None:
+                url = f"{BASE}element-summary/{pid}/"
+                pending[pool.submit(self._fetch_json, url, stop)] = pid
+
+        try:
+            for _ in range(2 * self.fetch_workers):
+                submit_next()
+            while pending:
+                finished, _ = wait(pending, timeout=POLL_S, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    pid = pending.pop(fut)
                     try:
                         payload = fut.result()
+                    except ServerBackoff:
+                        # Obey it: ask for nothing more this run.
+                        stop.set()
+                        payload = None
                     except Exception:
-                        payload = self._fallback(slug)
-                        if payload is None:
-                            self.stale = True
-                            self.fetch_failures.add(pid)
+                        payload = None
                     else:
-                        self._store(slug, payload)
-                    if payload is not None:
-                        found[pid] = payload
-                    tick()
-            except BaseException:
-                # Ctrl-C, or a progress callback raising: stop now rather than
-                # drain hundreds of queued requests. Whatever already arrived
-                # is on disk, so a re-run resumes from the cache.
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
-            else:
-                pool.shutdown(wait=True)
-            finally:
-                self._close_worker_sessions()
+                        self._store(f"element-summary-{pid}", payload)
+                    settle(pid, payload)
+                    if not stop.is_set():
+                        submit_next()
+            # Only reached with ids left after a ServerBackoff: they were never
+            # asked for, and take the same fallback as a failed request.
+            for pid in queue:
+                settle(pid, None)
+        except BaseException:
+            stop.set()
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            self._close_worker_sessions()
 
-        return {pid: found[pid] for pid in ids if pid in found}
+    def entry(self, entry_id: int) -> dict:
+        return self._get(f"entry/{entry_id}/", f"entry-{entry_id}")
+
+    def entry_history(self, entry_id: int) -> dict:
+        return self._get(f"entry/{entry_id}/history/", f"entry-history-{entry_id}")
+
+    def entry_picks(self, entry_id: int, gw: int) -> dict:
+        return self._get(f"entry/{entry_id}/event/{gw}/picks/", f"entry-picks-{entry_id}-{gw}")
 ```
 
 - [ ] **Step 5: Add the config keys**
@@ -1536,8 +2018,8 @@ The worker-side HTTP:
 
 ```python
     # The bulk element-summary fetch after each gameweek: requests in flight
-    # and the global cap across them. 1 worker at 1.0/s is the old sequential
-    # crawl -- the lever to pull if FPL starts refusing us.
+    # and the global cap across them. 1 worker at 1.0/s restores the old
+    # pacing (retries remain) -- the lever to pull if FPL starts refusing us.
     fetch_workers: int = 4
     fetch_rate_per_s: float = 5.0
 ```
@@ -1561,8 +2043,6 @@ data:
 
 - [ ] **Step 6: Pass the settings at every production call site**
 
-Each of these four lines gains `fetch_workers=cfg.fetch_workers, fetch_rate_per_s=cfg.fetch_rate_per_s`:
-
 ```python
 # run_gameweek.py:96
         client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours,
@@ -1580,23 +2060,23 @@ Each of these four lines gains `fetch_workers=cfg.fetch_workers, fetch_rate_per_
                        fetch_workers=cfg.fetch_workers, fetch_rate_per_s=cfg.fetch_rate_per_s)
 ```
 
-In `run_gameweek.py`, the progress comment at line 110 changes from "Player history is fetched one request per second on a cold cache, so a first run takes minutes" to "Player history is fetched a few requests at a time on a cold cache, so a first run still takes a couple of minutes".
+In `run_gameweek.py`, the progress comment at lines 110–111 changes from "Player history is fetched one request per second on a cold cache, so a first run takes minutes." to "Player history is fetched a few requests at a time on a cold cache, so a first run still takes a couple of minutes."
 
 Verify that nothing constructs a production client without the settings:
 Run: `grep -rn "FplClient(" fpl scripts run_gameweek.py`
-Expected: the four lines above, plus the two in `scripts/bench.py` (those intentionally use FplClient's own defaults, so the bench measures what a bare client does).
+Expected: the four lines above, plus the two in `scripts/bench.py`. Both of those pass the settings from `config.yaml` (Task 1) or use no network at all.
 
 - [ ] **Step 7: Remove the three phase 2 xfail markers and run the targeted tests**
 
 Delete the `@pytest.mark.xfail(...)` lines above `test_refresh_is_concurrent`, `test_refresh_respects_worker_bound` and `test_refresh_respects_rate_cap` in `tests/test_perf_contracts.py`.
 
-Run: `python -m pytest tests/test_client.py tests/test_config.py tests/test_perf_contracts.py tests/test_coverage_gate.py tests/test_throttle.py -v -p no:cacheprovider`
+Run: `python -m pytest tests/test_client.py tests/test_config.py tests/test_perf_contracts.py tests/test_coverage_gate.py tests/test_throttle.py tests/test_cache.py -v -p no:cacheprovider`
 Expected: all PASS, including every Task 3 parity test unchanged.
 
 - [ ] **Step 8: Full suite, golden check, bench**
 
 ```bash
-python -m pytest -q -p no:cacheprovider        # expect 805 passed, 0 xfailed
+python -m pytest -q -p no:cacheprovider        # expect 814 passed, 0 xfailed
 python scripts/bench.py golden check           # expect golden: OK
 python scripts/bench.py run --label phase2-concurrent-fetch
 ```
@@ -1608,24 +2088,26 @@ Expected bench: `refresh.req_per_s` ≈ 5 and `refresh.extrapolated_667_s` ≈ 1
 git add fpl/data/client.py fpl/config.py config.yaml run_gameweek.py fpl/pipeline.py scripts/run_backtest.py scripts/score_gameweek.py tests/test_client.py tests/test_config.py tests/test_perf_contracts.py docs/perf
 git commit -m "perf: fetch element-summaries concurrently under a shared rate cap
 
-4 in flight at 5 req/s with 429/5xx backoff: a post-gameweek refresh drops
-from 11+ minutes to about 2.5. Cache writes and failure bookkeeping stay on
-the calling thread; fetch_workers: 1 / fetch_rate_per_s: 1.0 restores the
-old sequential crawl.
+4 in flight at 5 req/s: a post-gameweek refresh drops from 11+ minutes to
+about 2.5. Transient failures (429/5xx/connection) are retried with backoff
+and Retry-After is honoured, never shortened; a wait past 120 s ends the
+fetch and the rest fall back to cache. Stopping joins the workers before
+returning. Cache writes and failure bookkeeping stay on the calling thread.
+fetch_workers: 1 / fetch_rate_per_s: 1.0 restores the old request pacing.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 - [ ] **Step 10: Live smoke test (manual; needs the network; the only step that talks to FPL)**
 
-In a scratch copy of the repo (never the worktree's own `data/`), delete ~50 element-summary snapshots so they must be refetched, then run the real pipeline once:
+In a scratch copy of the repo (never the worktree's own `data/`), delete ~50 players' element-summary snapshots so they must be refetched, then run the real pipeline once:
 
 ```bash
 S=$(mktemp -d) && cp -r fpl run_gameweek.py config.yaml data "$S"/ && cd "$S" \
   && ls data/cache/element-summary-*.json | head -150 | xargs rm \
   && time python run_gameweek.py --mode 2 --gw 6 | tail -5
 ```
-Expected: "Fetching player history" completes ~50 refetches in ≈ 10–15 s, no 429 storms (a stray retry is fine), and a report renders without errors. It will **not** necessarily match the golden decision: without `--no-refresh`, bootstrap and fixtures are refreshed live too. If FPL refuses requests, lower `fetch_rate_per_s` in `config.yaml` and report it. Don't raise the default.
+Expected: "Fetching player history" completes ~50 refetches in ≈ 10–15 s, no 429 storms (a stray retry is fine), and a report renders without errors. It will **not** necessarily match the golden decision: without `--no-refresh`, bootstrap and fixtures are refreshed live too. Also press Ctrl-C once during a second such run: it must return to the prompt within about a second, without a traceback storm. If FPL refuses requests, lower `fetch_rate_per_s` in `config.yaml` and report it. Don't raise the default.
 
 **Stop here.** Phases 0–2 are the agreed scope. Report the README table to the user; Task 7 runs only if they say go.
 
@@ -1716,7 +2198,7 @@ Replace `fixtures = tfx[tfx["team_id"] == team_id]` with `fixtures = fixtures_by
 
 ```bash
 python -m pytest tests/test_xp.py -q -p no:cacheprovider
-python -m pytest -q -p no:cacheprovider        # expect 806 passed
+python -m pytest -q -p no:cacheprovider        # expect 815 passed
 python scripts/bench.py golden check           # expect golden: OK (xP within 1e-4)
 python scripts/bench.py run --label phase3-xp
 ```

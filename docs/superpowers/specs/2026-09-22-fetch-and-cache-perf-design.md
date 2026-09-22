@@ -40,12 +40,21 @@ therefore also taxes every request during a refresh.
    **≤ 16 s** if the optional xP phase lands. (An earlier draft said 12 s. The
    phase 3 changes remove about 3 s of the 7.8 s in `build_xp`. The rest is
    row-wise pandas that phase 3 deliberately leaves alone.)
-3. **No behaviour change.**
-   - `element_summaries` returns the same dict and leaves `fetch_failures`,
-     `stale`, `unverified` and `sources` exactly as the current code does, for
-     every mix of cache hits, fetches and failures.
+3. **Same outputs, with two intentional fetch changes.** (Revised after plan
+   review: the first draft claimed "no behaviour change", which retries and
+   de-duplication make false.)
+   - Whenever every fetch succeeds or fails permanently (a 4xx other than 429,
+     retries exhausted, or no network), `element_summaries` returns the same
+     dict and leaves `fetch_failures`, `stale`, `unverified` and `sources`
+     exactly as the current code does.
+   - Intentional difference 1: transient failures (429, 5xx, connection errors,
+     timeouts) are retried up to 3 times before counting as failures, so a blip
+     that used to produce a stale fallback now produces fresh data.
+   - Intentional difference 2: duplicate ids are fetched once, and `progress`
+     totals count unique ids. No caller passes duplicates today.
    - The GW6 golden run gives the same squad, starting XI, bench order,
-     captain, vice-captain, transfers and chip advice.
+     captain, vice-captain, transfers and chip advice, with the clock frozen
+     at the capture instant.
    - Every numeric column of the xP frame matches within **1e-4 absolute**.
      `build_xp` rounds to 4 dp, so this allows one rounding tick.
 4. All 774 existing tests pass after every phase.
@@ -73,22 +82,29 @@ per-benchmark wall time (median of 3). Three benchmarks:
   temp dir: 667 slugs × 3 snapshots each, with `.meta` sidecars, plus ~2,000
   unrelated files so the directory is realistically large. Every lookup is a
   cache hit. This isolates the `_paths` cost.
-- **`refresh`**: `element_summaries` over N players (default 40) with an empty
-  cache and a fake session that sleeps a fixed 150 ms per request. It runs at
-  the production settings of whichever code is checked out. It reports wall
-  time, requests/s and the extrapolation to 667 players.
+- **`refresh`**: `element_summaries` over N players (default 30) with an empty
+  cache and a fake session that sleeps a fixed 150 ms per request. It uses the
+  fetch settings from `config.yaml`, as `run_gameweek` does. Before phase 2
+  there are none, and the client's 1 s throttle is the production path. It
+  reports wall time, requests/s and the extrapolation to 667 players.
 - **`gw6_cache_only`**: `run_gameweek.py --mode 2 --gw 6 --no-refresh` as a
   subprocess, against a scratch copy of `data/` (a plan-only run still writes a
   forecast version, and the real manifest must not collect benchmark entries).
   Skipped with a clear message if `data/cache` is absent (mobile/cloud
   checkouts).
 
-**Golden output.** `scripts/bench.py --capture-golden` runs the GW6 cache-only
+**Golden output.** `scripts/bench.py golden capture` runs the GW6 cache-only
 pipeline once on unmodified master. It writes `docs/perf/golden-gw6/`:
-`rec.json` (squad, XI, bench order, captain, vice-captain, transfers, chip) and
-`xp.parquet`. `--check-golden` re-runs the pipeline and diffs against these
-files with the tolerance above. The golden run uses the real `data/cache`, so it
-is a local check, not a CI test.
+`decision.json` (squad, XI, bench order, captain, vice-captain, transfers,
+chip), `xp.parquet` and `clock.txt`. `golden check` re-runs the pipeline and
+diffs against these files with the tolerance above.
+
+The pipeline reads the wall clock (override ages in `fpl/data/overrides.py`,
+the matchday check in `fpl/pipeline.py`), so both runs execute with
+`datetime.now()` frozen at the instant in `clock.txt`. The frozen class needs a
+metaclass so that `isinstance(real_datetime, datetime)` stays true in the
+patched modules. The golden run uses the real `data/cache`, so it is a local
+check, not a CI test.
 
 **`tests/test_perf_contracts.py`** holds deterministic, CI-safe tests that
 assert *complexity, not wall time*:
@@ -134,12 +150,24 @@ through a session that fails for player 3. It keeps its assertion
   the fixed-width `TS_FMT` makes chronological).
 - `put` inserts the new path into the slug's list in position. `prune` removes
   the unlinked paths. `_paths(slug)` returns a copy of the list, or `[]`.
-- New `refresh()` public method drops the index, for the rare caller that knows
-  another process has written the cache. Nothing calls it today.
+- **Other writers.** One writer per directory is the working assumption: only
+  one `Cache` per process touches `data/cache`. A concurrent second run is
+  possible, though, because the script runs headless. So the index remembers
+  the directory's `st_mtime_ns`, and every lookup stats the directory and
+  rebuilds when it has changed.
+  - `put` and `prune` fold their own writes in and adopt the new mtime, so they
+    never trigger a rescan. If someone else wrote first, the index is dropped
+    instead.
+  - Timestamps are tick-granular, so this detection is best-effort. The
+    guarantee is narrower: a snapshot that vanished (pruned elsewhere) makes
+    `newest` rescan once instead of crashing, and `prune` uses
+    `unlink(missing_ok=True)`.
+- New `refresh()` public method drops the index outright.
 - The public API and return types do not change.
 
-Complexity: one O(F) scan per `Cache` instance, then O(1) per lookup and
-O(k) per `put`/`prune` for a slug with k snapshots (k ≤ 3 after pruning).
+Complexity: one O(F) scan per `Cache` instance (plus one per external change),
+then O(1) per lookup plus one `stat`, and O(k) per `put`/`prune` for a slug with
+k snapshots (k ≤ 3 after pruning).
 
 ### Phase 2 — Concurrent element-summary fetch (`fpl/data/client.py`)
 
@@ -161,15 +189,29 @@ Three passes:
    injected `session` (the tests do this), every worker uses that one object
    instead.
    - **Rate limiter:** a token bucket with capacity 1 and refill rate
-     R tokens/s, guarded by a `threading.Lock`. `acquire()` sleeps outside the
-     lock until the next token is due. R = 0 disables it.
-   - **Retries:** on HTTP 429, or on a 5xx or connection error, retry up to 3
-     times with exponential backoff (1 s, 2 s, 4 s), or wait `Retry-After`
-     seconds when the header is present and larger. A 429 also sets a shared
-     "pause until" time the limiter honours, so every worker backs off together.
-     Other 4xx errors are not retried.
-3. **Integrate results (main thread).** Use `as_completed`, so progress keeps
-   ticking at the pace of the network. On success: `cache.put(slug, payload,
+     R tokens/s, guarded by a `threading.Lock`. It **reserves nothing**: each
+     wake-up re-reads the next free slot and the shared pause under the lock.
+     So a pause set after a 429 also holds back workers that were already
+     asleep waiting for their turn. (The first draft booked future slots, and
+     those workers would have started inside the pause.) R = 0 disables the
+     spacing but not pauses or cancellation.
+   - **Retries:** on HTTP 429, or on a 5xx, connection error or timeout, retry
+     up to 3 times with exponential backoff (1 s, 2 s, 4 s), or the server's
+     `Retry-After` when it is larger. `Retry-After` is parsed as delay-seconds
+     or an HTTP-date (RFC 9110) and is **never shortened**. A 429 sets the
+     limiter's shared pause, so every worker backs off together. A 404, other
+     4xx errors and unexpected exceptions are not retried.
+   - **A wait longer than a run can sit out** (`Retry-After` > 120 s) is obeyed
+     by not asking again this run. The fetch stops, and every player not yet
+     fetched takes the stale-fallback / `fetch_failures` path, the same as in
+     an outage. The coverage gate then decides whether the run may proceed.
+   - **Bounded and cancellable.** At most `2 × W` futures are queued at once.
+     One `threading.Event` is checked before each rate wait, request, backoff
+     and retry, and the rate and backoff waits are `Event.wait`, so they wake
+     immediately when it is set.
+3. **Integrate results (main thread).** Wait in 0.25 s slices
+   (`wait(..., FIRST_COMPLETED)`); a blocking wait on Windows does not see
+   Ctrl-C until it returns. On success: `cache.put(slug, payload,
    meta=snapshot_meta or None)`, `cache.prune(slug, keep=3)`,
    `_record_source(slug)`. On final failure: do the same as today, so use
    `cache.newest(slug)` as the stale fallback and set `stale`, or on no cache
@@ -217,14 +259,25 @@ Only lands if phases 1–2 are merged and the golden check still passes.
 ## Error handling
 
 - The per-player failure semantics are unchanged (see the phase 0 parity
-  tests). A retried request that finally succeeds counts as a success.
-- If the executor itself raises (for example `KeyboardInterrupt`), pending
-  futures are cancelled and the exception propagates. Summaries already
-  integrated are on disk, so a re-run resumes from the cache: the same
-  resumability the sequential loop has.
-- Wall time can never exceed today's: with `fetch_workers: 1` and
-  `fetch_rate_per_s: 1.0` the fetch reduces to the current sequential
-  behaviour. That is the rollback lever if FPL starts refusing us.
+  tests), apart from the two intentional differences in success criterion 3.
+  A retried request that finally succeeds counts as a success.
+- **Stopping.** On any exception in the calling thread (Ctrl-C, or a raising
+  progress callback), the fetch:
+  1. sets the cancel event;
+  2. joins the pool (`shutdown(wait=True, cancel_futures=True)`), which returns
+     within one in-flight request because every worker exits at its next check;
+  3. only then closes the per-thread sessions;
+  4. re-raises.
+
+  No request starts after `element_summaries` has left, no session is closed
+  under a running request, and Python's exit-time thread join has nothing left
+  to wait for. Summaries already integrated are on disk, so a re-run resumes
+  from the cache: the same resumability the sequential loop has.
+- **Rollback.** `fetch_workers: 1` and `fetch_rate_per_s: 1.0` restore today's
+  request pacing: one request in flight, starts at least 1 s apart. Retries
+  and de-duplication remain; they aren't separately switchable, because
+  neither can make a run slower than a transient failure followed by a
+  re-run. That is the lever if FPL starts refusing us.
 
 ## Testing summary
 
@@ -233,7 +286,9 @@ Only lands if phases 1–2 are merged and the golden check still passes.
 | Complexity contracts | scans ≤ 1, in-flight ≤ W, rate ≤ R, concurrency real | `tests/test_perf_contracts.py` | CI, every phase |
 | Fetch parity | hit/miss/fail/stale/unverified/progress semantics | `tests/test_client.py` | written before phase 2; passes before and after |
 | Cache parity | ordering, put/prune/newest/newest_meta behaviour with the index | `tests/test_cache.py` | before and after phase 1 |
-| Golden run | GW6 decisions identical; xP within 1e-4 | `scripts/bench.py --check-golden` | locally, end of every phase |
+| Limiter | spacing, no burst, pause holds already-waiting threads, cancellation | `tests/test_throttle.py` | phase 2a |
+| Fetch robustness | retries, Retry-After (seconds/date/too long), 404, interrupt stops workers, backoff cut short, dedupe | `tests/test_client.py` | phase 2b |
+| Golden run | GW6 decisions identical; xP within 1e-4; clock frozen | `scripts/bench.py golden check` | locally, end of every phase |
 | Benchmarks | wall time for cache_hits / refresh / gw6_cache_only | `scripts/bench.py` → `docs/perf/*.json` | baseline, then after every phase |
 | Regression | the full existing suite (774) | `pytest` | every commit |
 
