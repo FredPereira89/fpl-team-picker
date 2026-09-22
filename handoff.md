@@ -1216,4 +1216,8 @@ GW6 run at 12.00s, down from 14.79s after phase 2 and 34.26s at baseline.
 The simulated refresh result is 134.8s extrapolated versus 134.5s in phase
 2, effectively unchanged as expected. This work remains on the feature
 branch, not merged; the user's approval to implement now superseded the
-spec's earlier post-merge timing. A fresh final review is pending.
+spec's earlier post-merge timing. Fresh final review approved Task 7 with no
+Critical or Important findings. One minor provenance caveat remains:
+`phase3-xp.json` records the pre-commit HEAD (`395099b`) because the bench ran
+before the implementation commit (`bb20389`); the measured code is that
+implementation commit. Integration into `master` remains the user's choice.
