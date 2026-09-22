@@ -39,13 +39,35 @@ REFRESH_N = 30
 REFRESH_LATENCY_S = 0.15
 XP_TOL = 1e-4
 
+# A cache-only benchmark must fail on any network attempt, including a miss
+# that the client would otherwise catch and replace with stale data. Raising
+# BaseException (rather than Exception) keeps the guard outside the client's
+# per-player failure containment. This code runs only in scratch subprocesses.
+OFFLINE_GUARD = r'''
+import requests
+
+class OfflineNetworkAttempt(BaseException):
+    pass
+
+def _deny_network(self, method, url, *args, **kwargs):
+    raise OfflineNetworkAttempt(f"offline benchmark attempted network: {url}")
+
+requests.sessions.Session.request = _deny_network
+'''
+
+OFFLINE_RUNNER = OFFLINE_GUARD + r'''
+import sys
+import run_gameweek
+raise SystemExit(run_gameweek.main(sys.argv[1:]))
+'''
+
 # Runs inside the temporary repo copy. It wraps `run` so the Recommendation and
 # the xP frame can be captured without teaching run_gameweek a new flag, and it
 # freezes the clock at the instant recorded when the golden output was
 # captured: override ages (fpl/data/overrides.py) and the matchday check
 # (fpl/pipeline.py) read datetime.now(), so without this a golden check a few
 # days later could drift with no code change at all.
-DRIVER = r'''
+DRIVER = OFFLINE_GUARD + r'''
 import importlib, json, pkgutil, sys
 from datetime import datetime, timezone
 
@@ -214,8 +236,9 @@ def bench_gw6_cache_only() -> float | None:
         return None
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         repo = _temp_repo(Path(d))
+        (repo / "offline_run.py").write_text(OFFLINE_RUNNER)
         t = time.perf_counter()
-        subprocess.run([sys.executable, "run_gameweek.py", "--mode", "2", "--gw", str(GW),
+        subprocess.run([sys.executable, "offline_run.py", "--mode", "2", "--gw", str(GW),
                         "--no-refresh"], cwd=repo, check=True, capture_output=True)
         return time.perf_counter() - t
 
@@ -227,11 +250,13 @@ def _median(fn, repeats: int) -> float:
 def cmd_run(label: str) -> int:
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
                             capture_output=True, text=True).stdout.strip()
+    refresh = sorted((bench_refresh() for _ in range(3)),
+                     key=lambda sample: sample["seconds"])[1]
     result = {
         "label": label, "commit": commit, "python": platform.python_version(),
         "machine": platform.platform(), "when": datetime.now(timezone.utc).isoformat(),
         "cache_hits_s": round(_median(bench_cache_hits, 3), 3),
-        "refresh": bench_refresh(),
+        "refresh": refresh,
     }
     gw6 = [bench_gw6_cache_only() for _ in range(3)]
     result["gw6_cache_only_s"] = (round(statistics.median(gw6), 2)

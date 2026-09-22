@@ -1,10 +1,10 @@
 {
   "label": "phase2-concurrent-fetch",
-  "commit": "4215929",
+  "commit": "0b77181",
   "python": "3.13.1",
   "machine": "Windows-11-10.0.26200-SP0",
-  "when": "2026-09-22T20:06:23.207083+00:00",
-  "cache_hits_s": 1.678,
+  "when": "2026-09-22T20:15:40.478849+00:00",
+  "cache_hits_s": 1.607,
   "refresh": {
     "n": 30,
     "latency_s": 0.15,
@@ -12,9 +12,9 @@
       "fetch_workers": 4,
       "fetch_rate_per_s": 5.0
     },
-    "seconds": 6.107,
-    "req_per_s": 4.91,
-    "extrapolated_667_s": 135.8
+    "seconds": 6.05,
+    "req_per_s": 4.96,
+    "extrapolated_667_s": 134.5
   },
-  "gw6_cache_only_s": 15.0
+  "gw6_cache_only_s": 14.79
 }

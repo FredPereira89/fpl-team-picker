@@ -1171,3 +1171,34 @@ always a dict by that point) — cosmetic, harmless, low priority.
 Task 5 is complete at `f144b14`. The rate limiter was implemented after its
 eight tests failed on the missing module. All eight pass; the full suite is
 801 passed, 3 xfailed, and the GW6 golden check passes. Task 6 is next.
+
+Task 6 is implemented at `0b77181`. The client now fetches element summaries
+with four HTTP workers under a shared 5 starts/s cap; all cache reads, writes,
+and client-state updates remain on the calling thread. Retries, Retry-After,
+long server pauses, per-player cache failures, duplicate IDs, and cancellation
+are covered by tests. Config settings are wired through all four production
+client constructors. The final 820-test suite passes (one existing statistical
+warning), and the frozen GW6 golden check is OK. The phase-2 benchmark reports
+134.5s extrapolated refresh versus 648.4s baseline, and a 14.79s cache-only
+GW6 run versus 34.26s baseline. The refreshed benchmark measures 4.96
+requests/s. A live scratch-copy Mode-2 run with 150
+snapshots removed completed in 27s and rendered a report; a second live run
+interrupted during fetch returned promptly with one KeyboardInterrupt
+traceback. No 429 errors were observed. The scratch copy remains at
+`C:\Users\user\AppData\Local\Temp\fpl-perf-smoke-codex` because this
+environment rejected its recursive deletion; it contains only copies and
+live-smoke outputs, not changes to this worktree's `data/`.
+
+The final review found two benchmark-integrity issues, now fixed: the refresh
+result is the median of three runs, and both the golden driver and cache-only
+GW6 benchmark fail immediately on any network attempt. The review also noted
+that overlapping writers can race the cache index, but this is outside its
+documented one-writer-per-directory contract; external-writer detection is
+best-effort. No cache implementation change was made for that finding.
+
+Implementation ruling: retry 429 and all HTTP 5xx statuses, matching the
+spec's general “5xx” wording (the plan's sample code listed only selected
+5xx statuses). The one-writer cache constraint was independently confirmed
+against the implemented `_fetch_json` worker and `_fetch_misses` main-thread
+integration. Final whole-branch review findings are resolved. Task 7 remains optional
+and requires explicit user approval.
