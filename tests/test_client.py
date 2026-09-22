@@ -285,9 +285,25 @@ def test_a_failed_cache_write_fails_only_that_player(tmp_path, monkeypatch):
     assert sorted(s.calls) == [_es(1), _es(2)]
 
 
-def test_a_corrupt_fallback_snapshot_fails_only_that_player(tmp_path):
+def test_a_corrupt_fallback_snapshot_fails_only_that_player(tmp_path, monkeypatch):
     cache = Cache(tmp_path)
-    _write_corrupt(cache, "element-summary-1", timedelta(days=11))   # stale AND unreadable
+    # A genuinely stale-but-valid snapshot: get_fresh's initial read succeeds
+    # and is cleanly rejected for staleness (no exception raised), so the code
+    # reaches the network attempt and, on its failure, the except block's OWN
+    # newest() call -- which is what this test corrupts, on its second call
+    # only, mirroring how test_a_failed_cache_write_fails_only_that_player
+    # monkeypatches cache.put for the same reason.
+    cache.put("element-summary-1", {"id": 1, "src": "old"}, now=now() - timedelta(days=11))
+    real_newest = cache.newest
+    calls = {"n": 0}
+
+    def newest(slug, *a, **k):
+        calls["n"] += 1
+        if slug == "element-summary-1" and calls["n"] > 1:
+            raise OSError("second read failed")
+        return real_newest(slug, *a, **k)
+
+    monkeypatch.setattr(cache, "newest", newest)
     s = PerUrlSession({_es(2): {"id": 2}}, failing=[_es(1)])
     c = FplClient(cache, rate_limit_s=0, session=s)
 
@@ -295,6 +311,7 @@ def test_a_corrupt_fallback_snapshot_fails_only_that_player(tmp_path):
 
     assert out == {2: {"id": 2}}
     assert c.fetch_failures == {1}
+    assert s.calls == [_es(1), _es(2)]     # player 1's network attempt DID happen
 
 
 def test_a_raising_progress_callback_still_stops_the_fetch(tmp_path):
