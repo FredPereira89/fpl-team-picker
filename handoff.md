@@ -1017,9 +1017,12 @@ NOTE: workspace dir has a `-plans` suffix due to a path-resolution quirk hit
 during setup — see ledger's "Tooling note") for exact status; do not
 re-derive progress from memory.
 
-**Latest:** Task 1/6 (bench harness, GW6 golden capture, baseline numbers)
-implemented and committed (8fa9182); golden capture→check round-trip clean
-(`golden: OK`), 774 tests still pass. Task review in progress. Tasks 2-6
-remain (complexity-contract tests, parity tests, cache index, rate limiter,
-concurrent fetch). Task 7 (optional xP vectorization) is explicitly gated on
-user go-ahead after Task 6, per the plan.
+**Latest:** Tasks 1-2 complete, reviews clean. Task 3 implemented (commit
+4629607, parity/containment tests for element_summaries, 784 passed/4
+xfailed), review in progress. Tasks 4-6 remain (cache index, rate limiter,
+concurrent fetch — the production code changes). Task 7 (optional xP
+vectorization) is explicitly gated on user go-ahead after Task 6, per the
+plan. No Critical/Important findings in any review so far; one setup-time
+tooling gotcha recorded in the SDD ledger (sdd-workspace script's
+`git rev-parse --show-toplevel` path-style instability — see ledger's
+"Tooling note" — worked around by managing the workspace dir by hand).
