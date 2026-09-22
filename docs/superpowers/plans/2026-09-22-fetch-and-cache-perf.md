@@ -23,9 +23,10 @@
 
 - Work only in the worktree `C:\Users\user\Documents\FPL Team Picker\.claude\worktrees\perf-fetch-and-cache` (branch `worktree-perf-fetch-and-cache`). Never run git against the main checkout.
 - No new third-party dependencies (`requirements.txt` stays unchanged).
-- **Behaviour contract.** Whenever every fetch succeeds, or fails permanently (4xx other than 429, retries exhausted, or no network), `element_summaries` leaves the same dict, `fetch_failures`, `stale`, `unverified` and `sources` as today's code. There are exactly **two intentional differences**:
+- **Behaviour contract.** Whenever every fetch succeeds, or fails permanently (4xx other than 429, retries exhausted, or no network), `element_summaries` leaves the same dict, `fetch_failures`, `stale`, `unverified` and `sources` as today's code, including per-player containment: any cache read, write, prune or fallback error fails only that player. There are exactly **three intentional differences**:
   - Transient failures (429, 5xx, connection errors, timeouts) are retried up to 3 times before counting as failures.
   - Duplicate ids are fetched once, and `progress` totals count unique ids.
+  - A `Retry-After` longer than 120 s stops the element-summary fetch for the rest of the run. The players not yet fetched take the stale-fallback / `fetch_failures` path instead of being attempted (today every later player would still be tried).
 
   The GW6 golden decision must stay identical, and every numeric xP column must match within **1e-4 absolute**, with the clock frozen at capture time.
 - All existing tests pass after every task (774 at the start; `python -m pytest -q -p no:cacheprovider`).
@@ -765,6 +766,74 @@ def test_progress_counts_every_player_once_in_order(tmp_path):
 
     assert [d for d, _ in seen] == [1, 2, 3, 4, 5]
     assert {t for _, t in seen} == {5}
+
+
+# Per-player containment: the sequential loop wraps EVERYTHING for one player
+# -- cache read, fetch, write, prune, fallback -- in one try/except, so a
+# broken cache entry fails that player and the run moves on.
+
+def _write_corrupt(cache, slug, age):
+    from fpl.data.cache import TS_FMT
+    stamp = (now() - age).strftime(TS_FMT)
+    (cache.root / f"{slug}_{stamp}.json").write_text("{not json")
+
+
+def test_a_corrupt_cached_snapshot_fails_only_that_player(tmp_path):
+    cache = Cache(tmp_path)
+    _write_corrupt(cache, "element-summary-1", timedelta(hours=1))   # fresh, unreadable
+    s = PerUrlSession({_es(2): {"id": 2}})
+    c = FplClient(cache, rate_limit_s=0, session=s)
+
+    out = c.element_summaries([1, 2])
+
+    assert out == {2: {"id": 2}}
+    assert c.fetch_failures == {1}
+    assert c.stale is True
+    assert s.calls == [_es(2)]            # today: marked failed, not refetched
+
+
+def test_a_failed_cache_write_fails_only_that_player(tmp_path, monkeypatch):
+    cache = Cache(tmp_path)
+    real_put = cache.put
+
+    def put(slug, payload, *a, **k):
+        if slug == "element-summary-1":
+            raise OSError("disk full")
+        return real_put(slug, payload, *a, **k)
+
+    monkeypatch.setattr(cache, "put", put)
+    s = PerUrlSession({_es(1): {"id": 1}, _es(2): {"id": 2}})
+    c = FplClient(cache, rate_limit_s=0, session=s)
+
+    out = c.element_summaries([1, 2])
+
+    assert out == {2: {"id": 2}}
+    assert c.fetch_failures == {1}         # today: not rescued by a fallback
+    assert c.stale is True
+    assert sorted(s.calls) == [_es(1), _es(2)]
+
+
+def test_a_corrupt_fallback_snapshot_fails_only_that_player(tmp_path):
+    cache = Cache(tmp_path)
+    _write_corrupt(cache, "element-summary-1", timedelta(days=11))   # stale AND unreadable
+    s = PerUrlSession({_es(2): {"id": 2}}, failing=[_es(1)])
+    c = FplClient(cache, rate_limit_s=0, session=s)
+
+    out = c.element_summaries([1, 2], not_before=now() - timedelta(days=2))
+
+    assert out == {2: {"id": 2}}
+    assert c.fetch_failures == {1}
+
+
+def test_a_raising_progress_callback_still_stops_the_fetch(tmp_path):
+    s = PerUrlSession({_es(p): {"id": p} for p in (1, 2, 3)})
+    c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s)
+
+    def progress(done, total):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        c.element_summaries([1, 2, 3], progress=progress)
 ```
 
 - [ ] **Step 2: Replace the implementation-coupled test in `tests/test_coverage_gate.py`**
@@ -806,7 +875,7 @@ Expected: all PASS. These describe current behaviour; a failure here means the t
 - [ ] **Step 4: Run the full suite**
 
 Run: `python -m pytest -q -p no:cacheprovider`
-Expected: `780 passed, 4 xfailed` (774 + 6 new parity tests; the coverage-gate test was replaced, not added).
+Expected: `784 passed, 4 xfailed` (774 + 10 new parity and containment tests; the coverage-gate test was replaced, not added).
 
 - [ ] **Step 5: Commit**
 
@@ -1105,7 +1174,7 @@ Expected: every cache test PASSES; `test_cache_scans_directory_once` PASSES; the
 - [ ] **Step 5: Full suite, golden check, bench**
 
 ```bash
-python -m pytest -q -p no:cacheprovider        # expect 789 passed, 3 xfailed
+python -m pytest -q -p no:cacheprovider        # expect 793 passed, 3 xfailed
 python scripts/bench.py golden check           # expect golden: OK
 python scripts/bench.py run --label phase1-cache-index
 ```
@@ -1211,8 +1280,11 @@ def test_a_pause_holds_back_threads_already_waiting():
     def worker():
         for _ in range(3):
             b.acquire()
+            # Stamp before taking the recording lock: a thread that acquired
+            # just before the pause but queued on the lock must not look late.
+            started = time.monotonic()
             with lock:
-                starts.append(time.monotonic())
+                starts.append(started)
                 if len(starts) == 2:
                     b.pause_for(0.5)
                     paused["at"] = time.monotonic()
@@ -1373,16 +1445,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - `_fetch_misses` keeps at most `2 × fetch_workers` futures queued.
 - Every worker checks one `threading.Event` before each rate wait, request, backoff and retry. The rate and backoff waits are `Event.wait`, so they wake at once.
 - The calling thread waits in `POLL_S` slices, so Ctrl-C is seen on Windows.
-- On any exception it sets the event, then **joins** the pool (`shutdown(wait=True, cancel_futures=True)`), which returns within one in-flight request, and only then closes the worker sessions. No request starts after `element_summaries` has left, and no session is closed under a running request.
+- On any exception it sets the event, then **joins** the pool (`shutdown(wait=True, cancel_futures=True)`), and only then closes the worker sessions. No request starts after `element_summaries` has left, and no session is closed under a running request.
+- **Stopping is bounded, not instant.** A request already on the wire can't be interrupted, so the join waits for the slowest one in flight: normally a fraction of a second, at worst its 30 s timeout.
+- **Per-player containment.** Every cache operation for one player (the hit check, the write and prune, the fallback read) is wrapped so that a failure marks only that player failed. This matches the sequential loop's per-player `try/except`: a corrupt fresh snapshot fails the player without a refetch, and a failed write isn't rescued by a fallback. `progress` is called outside the containment, so a raising callback still stops the whole fetch.
 - A `ServerBackoff` (Retry-After > 120 s) sets the same event but doesn't raise. The players not yet fetched take the stale-fallback / `fetch_failures` path.
 
 - [ ] **Step 1: Write the failing retry, Retry-After, interrupt and dedupe tests (append to `tests/test_client.py`)**
 
 ```python
 # --- concurrent fetch: retries, Retry-After, interruption, duplicates -----------
-# The two intentional differences from the sequential crawl live here: a
-# transient failure is retried before it counts, and an id given twice is
-# fetched once. Everything else is pinned by the parity tests above.
+# The three intentional differences from the sequential crawl live here: a
+# transient failure is retried before it counts, an id given twice is fetched
+# once, and a Retry-After too long to sit out ends the fetch for this run. Everything else is pinned by the parity tests above.
 import threading
 import time
 from email.utils import format_datetime
@@ -1616,7 +1690,7 @@ Expected: most Step 1 tests FAIL or ERROR, because the `no_backoff` fixture can'
 
 - [ ] **Step 4: Replace `fpl/data/client.py` with this module**
 
-It was prototyped against every test in this plan and the Task 3 parity tests (83/83 passing).
+It was prototyped against every test in this plan, including the Task 3 parity and containment tests (all passing).
 
 ```python
 """Read-only HTTP client for the public FPL API.
@@ -1914,6 +1988,12 @@ class FplClient:
         cache and the bookkeeping above never see two threads at once. A
         transient failure is retried before it counts as one, and an id given
         twice is fetched once.
+
+        Every cache operation for one player -- reading, writing, pruning,
+        falling back -- fails THAT player only, exactly as the sequential loop's
+        per-player try/except did: a corrupt snapshot or a failed write marks
+        the player failed and the run moves on. `progress` stays outside that
+        containment, so a raising callback still stops the whole fetch.
         """
         ids = list(dict.fromkeys(int(pid) for pid in player_ids))
         found: dict[int, dict] = {}
@@ -1925,21 +2005,40 @@ class FplClient:
             if progress:
                 progress(done, len(ids))
 
-        def settle(pid: int, payload) -> None:
-            """Record one player's outcome; `payload` None means the fetch failed."""
-            if payload is None:
-                payload = self._fallback(f"element-summary-{pid}")
+        def fail(pid: int) -> None:
+            self.stale = True
+            self.fetch_failures.add(pid)
+
+        def settle(pid: int, payload, fetched: bool) -> None:
+            """Record one player's outcome. `payload` None means the request
+            failed; `fetched` means it came off the network and must be stored."""
+            slug = f"element-summary-{pid}"
+            try:
                 if payload is None:
-                    self.stale = True
-                    self.fetch_failures.add(pid)
-            if payload is not None:
+                    payload = self._fallback(slug)
+                elif fetched:
+                    self._store(slug, payload)
+            except Exception:
+                # As before: a cache that cannot be read or written fails the
+                # player, and a failed write is not rescued by a fallback.
+                payload = None
+            if payload is None:
+                fail(pid)
+            else:
                 found[pid] = payload
             tick()
 
         misses = []
         for pid in ids:
-            cached = self._cached(f"element-summary-{pid}", ttl_hours, not_before,
-                                  require_final_through)
+            try:
+                cached = self._cached(f"element-summary-{pid}", ttl_hours, not_before,
+                                      require_final_through)
+            except Exception:
+                # An unreadable snapshot fails the player without a refetch --
+                # what the sequential loop did.
+                fail(pid)
+                tick()
+                continue
             if cached is None:
                 misses.append(pid)
             else:
@@ -1959,6 +2058,9 @@ class FplClient:
         `stop`, which every worker checks before each rate wait, request,
         backoff and retry; the pool is then joined, so no request starts after
         this method has left, and only then are the workers' sessions closed.
+        A request already on the wire cannot be interrupted, so stopping takes
+        as long as the slowest one in flight -- normally a fraction of a
+        second, at worst its 30 s timeout.
         """
         stop = threading.Event()
         queue = iter(misses)
@@ -1986,15 +2088,13 @@ class FplClient:
                         payload = None
                     except Exception:
                         payload = None
-                    else:
-                        self._store(f"element-summary-{pid}", payload)
-                    settle(pid, payload)
+                    settle(pid, payload, fetched=payload is not None)
                     if not stop.is_set():
                         submit_next()
             # Only reached with ids left after a ServerBackoff: they were never
             # asked for, and take the same fallback as a failed request.
             for pid in queue:
-                settle(pid, None)
+                settle(pid, None, fetched=False)
         except BaseException:
             stop.set()
             raise
@@ -2076,7 +2176,7 @@ Expected: all PASS, including every Task 3 parity test unchanged.
 - [ ] **Step 8: Full suite, golden check, bench**
 
 ```bash
-python -m pytest -q -p no:cacheprovider        # expect 814 passed, 0 xfailed
+python -m pytest -q -p no:cacheprovider        # expect 818 passed, 0 xfailed
 python scripts/bench.py golden check           # expect golden: OK
 python scripts/bench.py run --label phase2-concurrent-fetch
 ```
@@ -2107,7 +2207,7 @@ S=$(mktemp -d) && cp -r fpl run_gameweek.py config.yaml data "$S"/ && cd "$S" \
   && ls data/cache/element-summary-*.json | head -150 | xargs rm \
   && time python run_gameweek.py --mode 2 --gw 6 | tail -5
 ```
-Expected: "Fetching player history" completes ~50 refetches in ≈ 10–15 s, no 429 storms (a stray retry is fine), and a report renders without errors. It will **not** necessarily match the golden decision: without `--no-refresh`, bootstrap and fixtures are refreshed live too. Also press Ctrl-C once during a second such run: it must return to the prompt within about a second, without a traceback storm. If FPL refuses requests, lower `fetch_rate_per_s` in `config.yaml` and report it. Don't raise the default.
+Expected: "Fetching player history" completes ~50 refetches in ≈ 10–15 s, no 429 storms (a stray retry is fine), and a report renders without errors. It will **not** necessarily match the golden decision: without `--no-refresh`, bootstrap and fixtures are refreshed live too. Also press Ctrl-C once during a second such run. It must return to the prompt as soon as the requests already in flight finish (normally well under a second, bounded by the 30 s request timeout), with one traceback, not a storm, and no further "Fetching" lines. If FPL refuses requests, lower `fetch_rate_per_s` in `config.yaml` and report it. Don't raise the default.
 
 **Stop here.** Phases 0–2 are the agreed scope. Report the README table to the user; Task 7 runs only if they say go.
 
@@ -2198,7 +2298,7 @@ Replace `fixtures = tfx[tfx["team_id"] == team_id]` with `fixtures = fixtures_by
 
 ```bash
 python -m pytest tests/test_xp.py -q -p no:cacheprovider
-python -m pytest -q -p no:cacheprovider        # expect 815 passed
+python -m pytest -q -p no:cacheprovider        # expect 819 passed
 python scripts/bench.py golden check           # expect golden: OK (xP within 1e-4)
 python scripts/bench.py run --label phase3-xp
 ```

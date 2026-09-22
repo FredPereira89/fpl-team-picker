@@ -40,18 +40,25 @@ therefore also taxes every request during a refresh.
    **≤ 16 s** if the optional xP phase lands. (An earlier draft said 12 s. The
    phase 3 changes remove about 3 s of the 7.8 s in `build_xp`. The rest is
    row-wise pandas that phase 3 deliberately leaves alone.)
-3. **Same outputs, with two intentional fetch changes.** (Revised after plan
-   review: the first draft claimed "no behaviour change", which retries and
-   de-duplication make false.)
+3. **Same outputs, with three intentional fetch changes.** (Revised after two
+   plan reviews: the first draft claimed "no behaviour change", which retries,
+   de-duplication and the long-Retry-After stop make false.)
    - Whenever every fetch succeeds or fails permanently (a 4xx other than 429,
      retries exhausted, or no network), `element_summaries` returns the same
      dict and leaves `fetch_failures`, `stale`, `unverified` and `sources`
-     exactly as the current code does.
+     exactly as the current code does. That includes per-player containment:
+     a corrupt snapshot, or a failed cache write, prune or fallback read, fails
+     that player only and the fetch carries on. A corrupt fresh snapshot is
+     not refetched, and a failed write is not rescued by a fallback, as today.
    - Intentional difference 1: transient failures (429, 5xx, connection errors,
      timeouts) are retried up to 3 times before counting as failures, so a blip
      that used to produce a stale fallback now produces fresh data.
    - Intentional difference 2: duplicate ids are fetched once, and `progress`
      totals count unique ids. No caller passes duplicates today.
+   - Intentional difference 3: a `Retry-After` longer than 120 s stops the
+     fetch for the rest of the run, and the players not yet fetched take the
+     stale-fallback / `fetch_failures` path. Today every later player would
+     still be attempted, against the server's explicit request.
    - The GW6 golden run gives the same squad, starting XI, bench order,
      captain, vice-captain, transfers and chip advice, with the clock frozen
      at the capture instant.
@@ -129,7 +136,10 @@ all hits; all misses; mixed; one player's request raising with a cached
 fallback (goes to `stale`, still returned); one raising with no cache (goes to
 `fetch_failures`, omitted); a pre-marker snapshot with `require_final_through`
 (goes to `unverified`); and progress-callback calls (count reaches `len(ids)`,
-`total` is constant). They must pass on both the old and the new code.
+`total` is constant). Containment is pinned too: a corrupt fresh snapshot, a
+failing `cache.put` and a corrupt fallback snapshot each fail only their own
+player, and a raising progress callback still stops the fetch. They must pass
+on both the old and the new code (verified against today's client: 28/28).
 
 `tests/test_coverage_gate.py::test_the_client_records_which_players_failed`
 calls `FplClient.element_summaries` unbound, on an object built with
@@ -259,13 +269,15 @@ Only lands if phases 1–2 are merged and the golden check still passes.
 ## Error handling
 
 - The per-player failure semantics are unchanged (see the phase 0 parity
-  tests), apart from the two intentional differences in success criterion 3.
+  tests), apart from the three intentional differences in success criterion 3.
   A retried request that finally succeeds counts as a success.
 - **Stopping.** On any exception in the calling thread (Ctrl-C, or a raising
   progress callback), the fetch:
   1. sets the cancel event;
-  2. joins the pool (`shutdown(wait=True, cancel_futures=True)`), which returns
-     within one in-flight request because every worker exits at its next check;
+  2. joins the pool (`shutdown(wait=True, cancel_futures=True)`). Every worker
+     exits at its next check, but a request already on the wire cannot be
+     interrupted, so this takes as long as the slowest one in flight: normally
+     a fraction of a second, bounded by the 30 s request timeout;
   3. only then closes the per-thread sessions;
   4. re-raises.
 
