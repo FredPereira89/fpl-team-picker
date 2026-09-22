@@ -42,6 +42,7 @@ CONCEDED_PENALTY_POSITIONS = {"GKP", "DEF"}
 # Where to stop summing the threshold tail. Ten points' worth of saves (30) or
 # conceded goals (20) in one match has probability far below rounding.
 MAX_THRESHOLDS = 10
+_THRESHOLD_STEPS = np.arange(1, MAX_THRESHOLDS + 1)
 
 
 def feasible_goal_and_assist_marginals(goal_weights, assist_weights,
@@ -174,8 +175,8 @@ def expected_thresholds(lam: float, per_point: int) -> float:
     lam = float(lam)
     if lam <= 0:
         return 0.0
-    return float(sum(poisson.sf(per_point * m - 1, lam)
-                     for m in range(1, MAX_THRESHOLDS + 1)))
+    # One vectorised call avoids paying SciPy's Python overhead ten times.
+    return float(poisson.sf(per_point * _THRESHOLD_STEPS - 1, lam).sum())
 
 
 def expected_thresholds_over_minutes(rate90: float, mins_row, per_point: int) -> float:
@@ -286,7 +287,8 @@ def team_assist_feasibility_scales(players: pd.DataFrame, rates: pd.DataFrame,
     return out
 
 
-def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> float:
+def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float,
+                   assist_feasibility_scale: float | None = None) -> float:
     e_min = float(mins_row["e_minutes"])
     if e_min <= 0:
         return 0.0
@@ -299,8 +301,9 @@ def xp_for_fixture(rate_row, mins_row, fx_row, position: str, bonus: float) -> f
     pts += (float(rate_row["xg90"]) * share * float(fx_row["att_mult"]) * goal_scale
             * GOAL_PTS[position])
     assist_scale = float(fx_row["assist_scale"]) if "assist_scale" in fx_row else 1.0
-    assist_feasibility_scale = (float(fx_row["assist_feasibility_scale"])
-                                if "assist_feasibility_scale" in fx_row else 1.0)
+    if assist_feasibility_scale is None:
+        assist_feasibility_scale = (float(fx_row["assist_feasibility_scale"])
+                                    if "assist_feasibility_scale" in fx_row else 1.0)
     pts += (float(rate_row["xa90"]) * share * float(fx_row["att_mult"])
             * assist_scale * assist_feasibility_scale * ASSIST_PTS)
     pts += p_clean_sheet_over_minutes(float(fx_row["xgc"]), mins_row) * CS_PTS[position]
@@ -337,11 +340,14 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
         tfx["assist_scale"] = [assist_scales.get((int(t), int(f)), 1.0)
                                for t, f in keys]
 
+    # Group once instead of filtering the full fixture frame for each player.
+    fixtures_by_team = {int(team): group for team, group in tfx.groupby("team_id")}
+    no_fixtures = tfx.iloc[0:0]
     rows = []
     for _, p in players.iterrows():
         pid, pos, team_id = int(p["player_id"]), p["position"], int(p["team_id"])
         rate_row, mins_row = r.loc[pid], m.loc[pid]
-        fixtures = tfx[tfx["team_id"] == team_id]
+        fixtures = fixtures_by_team.get(team_id, no_fixtures)
 
         per_event: dict[int, float] = {}
         for _, fx in fixtures.iterrows():
@@ -350,12 +356,12 @@ def build_xp(players: pd.DataFrame, rates: pd.DataFrame, minutes: pd.DataFrame,
                 continue
             bonus = expected_bonus_for(rate_row["bonus90"], mins_row["e_minutes"],
                                        att_mult=float(fx["att_mult"]))
-            fx_for_player = fx.copy()
-            if "fixture_id" in fx:
-                fx_for_player["assist_feasibility_scale"] = assist_feasibility_scales.get(
-                    (team_id, int(fx["fixture_id"]), pid), 1.0)
+            feasibility = (assist_feasibility_scales.get(
+                (team_id, int(fx["fixture_id"]), pid), 1.0)
+                if "fixture_id" in fx else None)
             per_event[event] = per_event.get(event, 0.0) + xp_for_fixture(
-                rate_row, mins_row, fx_for_player, pos, bonus
+                rate_row, mins_row, fx, pos, bonus,
+                assist_feasibility_scale=feasibility,
             )
 
         rows.append({

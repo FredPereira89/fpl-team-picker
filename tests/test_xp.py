@@ -369,3 +369,61 @@ def test_self_assist_feasibility_reaches_deterministic_xp():
     xp = build_xp(players, rates, minutes, tfx, Config(horizon_gw=1), 1).set_index("player_id")
     assert xp.loc[1, "xp_next1"] == pytest.approx(0.8 * 4 + 0.2 * 3)
     assert xp.loc[2, "xp_next1"] == pytest.approx(0.2 * 4 + 0.2 * 3)
+
+
+def test_vectorised_threshold_tail_matches_the_series_sum():
+    """Changing SciPy call shape must not change the Poisson expectation."""
+    from scipy.stats import poisson
+    from fpl.model.xp import MAX_THRESHOLDS
+
+    for per_point in (2, 3):
+        for lam in (0.01, 0.3, 1.0, 2.7, 6.0, 12.0):
+            reference = sum(poisson.sf(per_point * m - 1, lam)
+                            for m in range(1, MAX_THRESHOLDS + 1))
+            assert abs(expected_thresholds(lam, per_point) - reference) < 1e-12
+    assert expected_thresholds(0.0, 3) == 0.0
+    assert expected_thresholds(-1.0, 3) == 0.0
+
+
+def test_threshold_tail_uses_one_scipy_call(monkeypatch):
+    """The 10 scalar SciPy calls are the avoidable work in this hot loop."""
+    from fpl.model import xp
+
+    real_sf = xp.poisson.sf
+    calls = []
+
+    def counted_sf(*args, **kwargs):
+        calls.append(args[0])
+        return real_sf(*args, **kwargs)
+
+    monkeypatch.setattr(xp.poisson, "sf", counted_sf)
+    assert xp.expected_thresholds(2.7, 3) > 0
+    assert len(calls) == 1
+
+
+def test_fixture_xp_can_override_assist_feasibility_without_copying_fixture():
+    rate = pd.Series({"xg90": 0.0, "xa90": 1.0, "bonus90": 0.0, "dc90": 0.0,
+                      "saves90": 0.0, "cards90": 0.0})
+    mins = pd.Series({"e_minutes": 90.0, "p_play": 1.0, "p_60": 1.0})
+    fx = pd.Series({"att_mult": 1.0, "xgc": 0.0,
+                    "assist_feasibility_scale": 0.25})
+
+    assert xp_for_fixture(rate, mins, fx, "FWD", 0.0) == pytest.approx(2.75)
+    assert xp_for_fixture(rate, mins, fx, "FWD", 0.0,
+                          assist_feasibility_scale=0.5) == pytest.approx(3.5)
+
+
+def test_build_xp_does_not_filter_full_fixture_frame_per_player(monkeypatch):
+    """Fixture selection should scale by teams, not players × all fixtures."""
+    real_getitem = pd.DataFrame.__getitem__
+    full_frame_filters = []
+
+    def counted_getitem(frame, key):
+        if (isinstance(key, pd.Series) and key.dtype == bool
+                and {"team_id", "event", "fixture_id"}.issubset(frame.columns)):
+            full_frame_filters.append(1)
+        return real_getitem(frame, key)
+
+    monkeypatch.setattr(pd.DataFrame, "__getitem__", counted_getitem)
+    assert len(build_xp(PLAYERS, RATES, MINUTES, TFX, CFG, 1)) == 3
+    assert len(full_frame_filters) <= 1

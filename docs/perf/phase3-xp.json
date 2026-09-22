@@ -1,0 +1,20 @@
+{
+  "label": "phase3-xp",
+  "commit": "395099b",
+  "python": "3.13.1",
+  "machine": "Windows-11-10.0.26200-SP0",
+  "when": "2026-09-22T20:26:37.115124+00:00",
+  "cache_hits_s": 1.597,
+  "refresh": {
+    "n": 30,
+    "latency_s": 0.15,
+    "settings": {
+      "fetch_workers": 4,
+      "fetch_rate_per_s": 5.0
+    },
+    "seconds": 6.061,
+    "req_per_s": 4.95,
+    "extrapolated_667_s": 134.8
+  },
+  "gw6_cache_only_s": 12.0
+}

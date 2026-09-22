@@ -8,8 +8,8 @@ next to this file. The golden check is `python scripts/bench.py golden check`.
 
 | Benchmark | baseline | phase1-cache-index | phase2-concurrent-fetch | phase3-xp (optional) |
 |---|---|---|---|---|
-| cache_hits (667 lookups, synthetic cache), s | 29.11 | 1.786 | 1.607 | — |
-| refresh, extrapolated to 667 players, s | 648.4 | 648.4 | 134.5 | — |
-| refresh, requests/s | 1.03 | 1.03 | 4.96 | — |
-| GW6 Mode-2 `--no-refresh`, s | 34.26 | 14.52 | 14.79 | — |
-| Golden check | OK (captured) | OK | OK | — |
+| cache_hits (667 lookups, synthetic cache), s | 29.11 | 1.786 | 1.607 | 1.597 |
+| refresh, extrapolated to 667 players, s | 648.4 | 648.4 | 134.5 | 134.8 |
+| refresh, requests/s | 1.03 | 1.03 | 4.96 | 4.95 |
+| GW6 Mode-2 `--no-refresh`, s | 34.26 | 14.52 | 14.79 | 12.00 |
+| Golden check | OK (captured) | OK | OK | OK |

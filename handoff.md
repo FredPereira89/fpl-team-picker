@@ -1202,3 +1202,18 @@ spec's general “5xx” wording (the plan's sample code listed only selected
 against the implemented `_fetch_json` worker and `_fetch_misses` main-thread
 integration. Final whole-branch review findings are resolved. Task 7 remains optional
 and requires explicit user approval.
+
+### Task 7 continuation, 2026-09-22
+
+The user explicitly approved Task 7 after the phase-2 handoff. Implemented
+the planned xP hot-loop change in `fpl/model/xp.py`: one vectorized Poisson
+tail call, one fixture grouping by team, and no per-player fixture-row copy.
+One parity test passed on the old code; three performance/interface tests
+failed on the old code and pass after the change. The full suite passes
+(824 tests, one pre-existing statistical warning), and the offline, frozen
+GW6 golden check is OK. The three-sample benchmark measured the cache-only
+GW6 run at 12.00s, down from 14.79s after phase 2 and 34.26s at baseline.
+The simulated refresh result is 134.8s extrapolated versus 134.5s in phase
+2, effectively unchanged as expected. This work remains on the feature
+branch, not merged; the user's approval to implement now superseded the
+spec's earlier post-merge timing. A fresh final review is pending.
