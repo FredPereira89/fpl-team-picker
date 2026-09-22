@@ -328,6 +328,7 @@ def test_a_raising_progress_callback_still_stops_the_fetch(tmp_path):
 # Concurrent fetch: retries, server backoff, interruption, and duplicate IDs.
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import format_datetime
 
 import requests
@@ -465,6 +466,27 @@ def test_a_long_retry_after_stops_asking_and_falls_back(tmp_path, no_backoff):
     assert all(out[pid] == {"src": "old"} for pid in (3, 4, 5))
     assert client.fetch_failures == {1}
     assert client.stale is True
+
+
+def test_long_retry_after_stops_queued_worker_before_another_request(tmp_path):
+    """A worker must signal stop itself, before the caller inspects its future."""
+    session = ScriptedSession({
+        _es(1): [(429, {"Retry-After": "3600"})],
+        _es(2): [200],
+    })
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+    stop = threading.Event()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(client._fetch_json, _es(1), stop)
+        queued = pool.submit(client._fetch_json, _es(2), stop)
+        with pytest.raises(client_mod.ServerBackoff):
+            first.result(timeout=2)
+        with pytest.raises(client_mod.FetchCancelled):
+            queued.result(timeout=2)
+
+    assert stop.is_set()
+    assert session.calls == [_es(1)]
 
 
 class _Stop(Exception):

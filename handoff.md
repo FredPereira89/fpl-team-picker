@@ -1221,3 +1221,20 @@ Critical or Important findings. One minor provenance caveat remains:
 `phase3-xp.json` records the pre-commit HEAD (`395099b`) because the bench ran
 before the implementation commit (`bb20389`); the measured code is that
 implementation commit. Integration into `master` remains the user's choice.
+
+### Whole-branch review fixes, 2026-09-22
+
+A subsequent independent whole-branch review identified two additional
+findings. First, a `Retry-After` longer than 120 seconds raised in the worker,
+but the shared stop event was not set until the main thread consumed its
+future; queued workers could send more requests in that gap. The worker now
+sets the event before raising. A queued-worker test failed before and passed
+after this change. Second, the golden xP comparator rejected an exact
+one-tick difference such as 0.0003 to 0.0004 because float subtraction was
+slightly above 1e-4; a 1e-12 comparison margin fixes that without accepting
+a larger difference. Its boundary test likewise failed before and passed
+after. Focused tests passed 37/37, the full suite passed 826/826 (the same
+pre-existing statistical warning), and the offline GW6 golden check is OK.
+The phase-3 performance measurements were not rerun because neither normal
+fetch pacing nor xP scoring changed. The earlier benchmark JSON provenance
+caveat remains an optional documentation improvement.

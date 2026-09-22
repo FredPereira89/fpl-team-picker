@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 
+import pandas as pd
+
 from scripts import bench
 
 
@@ -30,3 +32,12 @@ def test_offline_guard_stops_a_requests_call_before_network():
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert proc.returncode != 0
     assert "offline benchmark attempted network" in proc.stderr
+
+
+def test_compare_xp_accepts_one_rounding_tick_but_not_more():
+    old = pd.DataFrame({"player_id": [1], "xp_next1": [0.0003]})
+    one_tick = pd.DataFrame({"player_id": [1], "xp_next1": [0.0004]})
+    beyond = pd.DataFrame({"player_id": [1], "xp_next1": [0.00041]})
+
+    assert bench.compare_xp(old, one_tick) == []
+    assert bench.compare_xp(old, beyond)

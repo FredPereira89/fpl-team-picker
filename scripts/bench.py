@@ -305,7 +305,10 @@ def compare_xp(old: pd.DataFrame, new: pd.DataFrame, tol: float = XP_TOL) -> lis
                 problems.append(f"{col}: NaN in different rows")
                 continue
             worst = (a.astype(float) - b.astype(float)).abs().max()
-            if pd.notna(worst) and worst > tol:
+            # Decimal xP ticks can subtract to just over `tol` in binary
+            # (0.0004 - 0.0003 is one example). The margin is far below
+            # the report's four-decimal resolution.
+            if pd.notna(worst) and worst > tol + 1e-12:
                 problems.append(f"{col}: max |diff| {worst:.2e} > {tol:.0e}")
         elif a.astype(str).tolist() != b.astype(str).tolist():
             problems.append(f"{col}: values differ")

@@ -216,6 +216,9 @@ class FplClient:
             if status == 429 or 500 <= status < 600:
                 asked = self._retry_after(response)
                 if asked is not None and asked > MAX_RETRY_AFTER_S:
+                    # A queued worker can start before the caller collects
+                    # this future, so stop the shared fetch here.
+                    stop.set()
                     raise ServerBackoff(f"{url}: Retry-After {asked:.0f}s")
                 delay = max(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)], asked or 0.0)
                 if status == 429:
