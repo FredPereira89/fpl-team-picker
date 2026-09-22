@@ -1165,3 +1165,9 @@ always a dict by that point) — cosmetic, harmless, low priority.
   - No new third-party dependencies at any point in this plan.
 - Update this handoff section (or add a new dated one below it, don't just
   silently overwrite) after each task, in case of another interruption.
+
+### Codex continuation, 2026-09-22
+
+Task 5 is complete at `f144b14`. The rate limiter was implemented after its
+eight tests failed on the missing module. All eight pass; the full suite is
+801 passed, 3 xfailed, and the GW6 golden check passes. Task 6 is next.
