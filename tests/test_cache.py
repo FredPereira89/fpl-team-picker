@@ -229,3 +229,107 @@ def test_settled_after_allows_for_fpls_own_check():
     when = settled_after(FINAL_GW3, 3)
     assert when == datetime(2026, 9, 6, 15, 30, tzinfo=timezone.utc) + timedelta(hours=FINAL_CHECK_H)
     assert settled_after(FINAL_GW3, 4) is None
+
+
+# --- the slug index ---------------------------------------------------------
+import os
+from pathlib import Path
+
+
+def test_put_after_the_index_is_built_is_visible(tmp_path):
+    c = Cache(tmp_path)
+    assert c.newest("fixtures") is None          # builds the (empty) index
+    c.put("fixtures", [1], now=NOW - timedelta(hours=2))
+    c.put("fixtures", [2], now=NOW - timedelta(hours=1))
+    assert c.newest("fixtures")[0] == [2]
+
+
+def test_prune_updates_the_index(tmp_path):
+    c = Cache(tmp_path)
+    for h in range(5):
+        c.put("bootstrap-static", {"n": h}, now=NOW - timedelta(hours=h))
+    c.prune("bootstrap-static", keep=3)
+    assert len(c._paths("bootstrap-static")) == 3
+    assert all(p.exists() for p in c._paths("bootstrap-static"))
+    c.put("bootstrap-static", {"n": -1}, now=NOW + timedelta(hours=1))
+    assert c.newest("bootstrap-static")[0] == {"n": -1}
+
+
+def test_index_ignores_files_that_are_not_snapshots(tmp_path):
+    c = Cache(tmp_path)
+    c.put("fixtures", [1], now=NOW, meta={"final_through": 3})
+    (tmp_path / "fixtures_notes.json").write_text("{}")       # no timestamp
+    (tmp_path / "fixtures_20260101T000000Z.txt").write_text("x")
+    fresh = Cache(tmp_path)                                    # index built from disk
+    assert fresh.newest("fixtures")[0] == [1]
+    assert len(fresh._paths("fixtures")) == 1
+
+
+def test_index_keeps_prefix_sharing_slugs_apart(tmp_path):
+    c = Cache(tmp_path)
+    c.put("element-summary-1", {"id": 1}, now=NOW)
+    c.put("element-summary-10", {"id": 10}, now=NOW + timedelta(hours=1))
+    fresh = Cache(tmp_path)
+    assert fresh.newest("element-summary-1")[0] == {"id": 1}
+    assert fresh.newest("element-summary-10")[0] == {"id": 10}
+
+
+def _set_dir_mtime(path, mtime_ns):
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, mtime_ns))
+
+
+def test_another_writer_is_noticed(tmp_path):
+    reader, writer = Cache(tmp_path), Cache(tmp_path)
+    assert reader.newest("fixtures") is None                   # index built
+    writer.put("fixtures", [9], now=NOW)
+    # The filesystem normally moves the directory mtime on create; pin a
+    # distinct value so the test does not depend on timestamp granularity.
+    _set_dir_mtime(tmp_path, os.stat(tmp_path).st_mtime_ns + 10**9)
+    assert reader.newest("fixtures")[0] == [9]
+
+
+def test_a_snapshot_deleted_elsewhere_heals_instead_of_crashing(tmp_path):
+    reader = Cache(tmp_path)
+    reader.put("fixtures", ["old"], now=NOW - timedelta(hours=1))
+    reader.put("fixtures", ["new"], now=NOW)
+    assert reader.newest("fixtures")[0] == ["new"]             # index current
+    known = os.stat(tmp_path).st_mtime_ns
+    reader._paths("fixtures")[0].unlink()                      # "another process" prunes it
+    # Worst case: the deletion landed inside one timestamp tick, so the
+    # directory mtime looks unchanged and only the missing file tells.
+    _set_dir_mtime(tmp_path, known)
+    assert reader.newest("fixtures")[0] == ["old"]
+
+
+def test_own_writes_do_not_trigger_rescans(tmp_path, monkeypatch):
+    c = Cache(tmp_path)
+    c.newest("fixtures")                                       # index built
+    scans = {"n": 0}
+    real_scandir, real_glob = os.scandir, Path.glob
+
+    # Both, because pathlib's glob does not list through os.scandir.
+    def counting_scandir(path=".", *a, **k):
+        scans["n"] += 1
+        return real_scandir(path, *a, **k)
+
+    def counting_glob(self, pattern, *a, **k):
+        scans["n"] += 1
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    for h in range(20):
+        c.put("fixtures", [h], now=NOW + timedelta(hours=h), meta={"final_through": 1})
+        c.prune("fixtures", keep=3)
+        c.newest("fixtures")
+    assert scans["n"] == 0
+    assert c.newest("fixtures")[0] == [19]
+
+
+def test_refresh_sees_another_writer(tmp_path):
+    reader, writer = Cache(tmp_path), Cache(tmp_path)
+    assert reader.newest("fixtures") is None
+    writer.put("fixtures", [9], now=NOW)
+    reader.refresh()
+    assert reader.newest("fixtures")[0] == [9]

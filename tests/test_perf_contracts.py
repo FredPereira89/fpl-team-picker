@@ -93,7 +93,6 @@ def _count_scans(monkeypatch, root: Path) -> dict:
     return calls
 
 
-@pytest.mark.xfail(strict=True, reason="phase 1: cache index not built yet")
 def test_cache_scans_directory_once(tmp_path, monkeypatch):
     ids = _seed(tmp_path)
     client = FplClient(Cache(tmp_path), rate_limit_s=0, session=NoNetwork())

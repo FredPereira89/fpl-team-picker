@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
+import os
 
 TS_FMT = "%Y%m%dT%H%M%SZ"
 # Kickoff to the point a finished match's returns are on record. A match runs
@@ -114,35 +115,114 @@ def settled_after(fixtures: list[dict], gw: int) -> datetime | None:
 
 
 class Cache:
+    """Timestamped JSON snapshots, one directory, one writer at a time.
+
+    Lookups read an index of the directory instead of listing it: globbing per
+    lookup listed the whole cache for every call, and a weekly run makes ~2,700
+    of them against ~4,000 files -- 22 of its 40 seconds. The index is checked
+    against the directory's mtime on every lookup, so a snapshot written by
+    another process is normally noticed; because filesystem timestamps are
+    tick-granular that check is best-effort, and a snapshot deleted elsewhere
+    is caught when reading it fails (see `newest`).
+    """
+
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # slug -> snapshot paths, newest first.
+        self._index: dict[str, list[Path]] | None = None
+        # The directory mtime at which the index was last known to be current.
+        self._index_mtime: int | None = None
+
+    def refresh(self) -> None:
+        """Forget the index so the next lookup rescans the directory."""
+        self._index = None
+
+    def _dir_mtime(self) -> int:
+        return os.stat(self.root).st_mtime_ns
+
+    @staticmethod
+    def _slug_of(name: str) -> str | None:
+        """The slug a snapshot filename belongs to, or None if it is not one.
+
+        Stricter than the glob it replaces: `fixtures_notes.json` matched
+        `fixtures_*.json`, sorted above every real snapshot and crashed
+        `newest` on the timestamp parse.
+        """
+        if not name.endswith(".json"):
+            return None
+        slug, sep, stamp = name[:-len(".json")].rpartition("_")
+        if not sep or not slug:
+            return None
+        try:
+            datetime.strptime(stamp, TS_FMT)
+        except ValueError:
+            return None
+        return slug
+
+    def _current_index(self) -> dict[str, list[Path]]:
+        mtime = self._dir_mtime()
+        if self._index is None or mtime != self._index_mtime:
+            # mtime is read BEFORE the scan: a write that lands during it moves
+            # the mtime again and forces another rebuild, never a missed file.
+            self._index_mtime = mtime
+            index: dict[str, list[Path]] = {}
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    slug = self._slug_of(entry.name)
+                    if slug is not None and entry.is_file():
+                        index.setdefault(slug, []).append(self.root / entry.name)
+            for paths in index.values():
+                paths.sort(reverse=True)
+            self._index = index
+        return self._index
 
     def _paths(self, slug: str) -> list[Path]:
-        return sorted(self.root.glob(f"{slug}_*.json"), reverse=True)
+        return list(self._current_index().get(slug, ()))
 
     def put(self, slug: str, payload, now: datetime | None = None,
             meta: dict | None = None) -> Path:
         """Write a snapshot, and beside it what was true of the data when it was
         taken (`meta`), which no later reader can work out from the timestamp.
 
-        The sidecar deliberately does not end in `.json`: `_paths` globs for
-        snapshots and would otherwise try to read it as one.
+        The sidecar deliberately does not end in `.json`: the index only takes
+        `*.json` snapshots and would otherwise try to read it as one.
         """
+        # Was the index current just before this write? Only then can our own
+        # write be folded in; otherwise someone else wrote too, so rebuild.
+        current = self._index is not None and self._dir_mtime() == self._index_mtime
         ts = _as_utc(now or _now())
         p = self.root / f"{slug}_{ts.strftime(TS_FMT)}.json"
         p.write_text(json.dumps(payload))
         if meta:
             p.with_suffix(META_SUFFIX).write_text(json.dumps(meta))
+        if current:
+            paths = self._index.setdefault(slug, [])
+            if p not in paths:
+                paths.append(p)
+                paths.sort(reverse=True)
+            self._index_mtime = self._dir_mtime()
+        else:
+            self._index = None
         return p
 
     def newest(self, slug: str):
-        paths = self._paths(slug)
-        if not paths:
-            return None
-        p = paths[0]
-        ts = datetime.strptime(p.stem.rsplit("_", 1)[1], TS_FMT).replace(tzinfo=timezone.utc)
-        return json.loads(p.read_text()), ts
+        for retried in (False, True):
+            paths = self._paths(slug)
+            if not paths:
+                return None
+            p = paths[0]
+            try:
+                text = p.read_text()
+            except FileNotFoundError:
+                # Pruned by another process inside one mtime tick, so the index
+                # still lists it. Rescan once rather than crash the run.
+                if retried:
+                    raise
+                self.refresh()
+                continue
+            ts = datetime.strptime(p.stem.rsplit("_", 1)[1], TS_FMT).replace(tzinfo=timezone.utc)
+            return json.loads(text), ts
 
     def newest_stamp(self, slug: str) -> datetime | None:
         """When the newest snapshot was taken, without reading it.
@@ -198,10 +278,14 @@ class Cache:
         return payload if age_h < ttl_hours else None
 
     def prune(self, slug: str, keep: int = 3) -> int:
-        paths = self._paths(slug)
+        paths = self._paths(slug)          # validates the index against the mtime
         removed = 0
         for p in paths[keep:]:
-            p.unlink()
+            # missing_ok: another process may have pruned the same snapshot.
+            p.unlink(missing_ok=True)
             p.with_suffix(META_SUFFIX).unlink(missing_ok=True)
             removed += 1
+        if removed and self._index is not None:
+            self._index[slug] = paths[:keep]
+            self._index_mtime = self._dir_mtime()
         return removed

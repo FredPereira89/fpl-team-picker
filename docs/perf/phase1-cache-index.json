@@ -1,0 +1,17 @@
+{
+  "label": "phase1-cache-index",
+  "commit": "be90460",
+  "python": "3.13.1",
+  "machine": "Windows-11-10.0.26200-SP0",
+  "when": "2026-09-22T19:39:41.376534+00:00",
+  "cache_hits_s": 1.786,
+  "refresh": {
+    "n": 30,
+    "latency_s": 0.15,
+    "settings": "sequential, 1 s throttle",
+    "seconds": 29.165,
+    "req_per_s": 1.03,
+    "extrapolated_667_s": 648.4
+  },
+  "gw6_cache_only_s": 14.52
+}
