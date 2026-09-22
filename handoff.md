@@ -1011,8 +1011,15 @@ superpowers:subagent-driven-development. SDD workspace:
 `.superpowers/sdd/2026-09-22-fetch-and-cache-perf/` (ledger:
 `progress.md` inside it — check there first for exact task status).
 
-**Status:** setup in progress as of this entry. Update the line below after
-each task completes; do not re-derive progress from memory — read the SDD
-ledger.
+**Status:** executing via SDD, task-by-task with review after each. Read the
+SDD ledger (`.superpowers/sdd/2026-09-22-fetch-and-cache-perf-plans/progress.md`,
+NOTE: workspace dir has a `-plans` suffix due to a path-resolution quirk hit
+during setup — see ledger's "Tooling note") for exact status; do not
+re-derive progress from memory.
 
-**Latest:** (updated as tasks land)
+**Latest:** Task 1/6 (bench harness, GW6 golden capture, baseline numbers)
+implemented and committed (8fa9182); golden capture→check round-trip clean
+(`golden: OK`), 774 tests still pass. Task review in progress. Tasks 2-6
+remain (complexity-contract tests, parity tests, cache index, rate limiter,
+concurrent fetch). Task 7 (optional xP vectorization) is explicitly gated on
+user go-ahead after Task 6, per the plan.
