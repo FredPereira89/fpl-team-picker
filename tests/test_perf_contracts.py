@@ -105,7 +105,6 @@ def test_cache_scans_directory_once(tmp_path, monkeypatch):
     assert scans["n"] <= 1
 
 
-@pytest.mark.xfail(strict=True, reason="phase 2: concurrent fetch not built yet")
 def test_refresh_is_concurrent(tmp_path):
     s = RecordingSession(latency_s=0.15)
     c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s,
@@ -120,7 +119,6 @@ def test_refresh_is_concurrent(tmp_path):
     assert elapsed < 3.0
 
 
-@pytest.mark.xfail(strict=True, reason="phase 2: concurrent fetch not built yet")
 def test_refresh_respects_worker_bound(tmp_path):
     s = RecordingSession(latency_s=0.05)
     c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s,
@@ -132,7 +130,6 @@ def test_refresh_respects_worker_bound(tmp_path):
     assert 2 <= s.peak <= 3
 
 
-@pytest.mark.xfail(strict=True, reason="phase 2: concurrent fetch not built yet")
 def test_refresh_respects_rate_cap(tmp_path):
     s = RecordingSession(latency_s=0.01)
     c = FplClient(Cache(tmp_path), rate_limit_s=0, session=s,

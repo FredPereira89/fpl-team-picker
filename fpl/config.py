@@ -43,6 +43,9 @@ class Config:
     odds_provider: str | None = None
     cache_ttl_hours: int = 6
     cache_ttl_matchday_hours: int = 1
+    # Element-summary refresh: concurrency and the shared request-start cap.
+    fetch_workers: int = 4
+    fetch_rate_per_s: float = 5.0
     entry_id: int | None = None
     free_transfers: int = 1
     # The distributional layer (model.simulate + optimize.rank). Squads are
@@ -118,6 +121,8 @@ def load_config(path: Path) -> Config:
         odds_provider=odds.get("provider", d.odds_provider),
         cache_ttl_hours=int(data.get("cache_ttl_hours", d.cache_ttl_hours)),
         cache_ttl_matchday_hours=int(data.get("cache_ttl_matchday_hours", d.cache_ttl_matchday_hours)),
+        fetch_workers=int(data.get("fetch_workers", d.fetch_workers)),
+        fetch_rate_per_s=float(data.get("fetch_rate_per_s", d.fetch_rate_per_s)),
         entry_id=raw.get("entry_id", d.entry_id),
         rank_sims=int(opt.get("rank_sims", d.rank_sims)),
         rank_candidates=int(opt.get("rank_candidates", d.rank_candidates)),
@@ -203,6 +208,10 @@ def load_config(path: Path) -> Config:
         )
     if cfg.budget <= 0:
         raise ValueError(f"budget must be positive, got {cfg.budget}")
+    if cfg.fetch_workers < 1:
+        raise ValueError(f"data.fetch_workers must be at least 1, got {cfg.fetch_workers}")
+    if cfg.fetch_rate_per_s < 0:
+        raise ValueError(f"data.fetch_rate_per_s cannot be negative, got {cfg.fetch_rate_per_s}")
     if len(cfg.bench_weight) != 4:
         raise ValueError(f"optimizer.bench_weight needs exactly 4 values, got {len(cfg.bench_weight)}")
     if cfg.bench_floor_xp < 0:

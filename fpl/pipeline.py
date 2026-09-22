@@ -574,7 +574,9 @@ def run(cfg: Config, mode: int, from_event: int, root: Path, client=None,
         progress=None, purchase_prices: dict[int, float] | None = None,
         chip_events: list[dict] | None = None, first_event: int = 1):
     root = Path(root)
-    client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours)
+    client = client or FplClient(Cache(root / "cache"), ttl_hours=cfg.cache_ttl_hours,
+                                 fetch_workers=cfg.fetch_workers,
+                                 fetch_rate_per_s=cfg.fetch_rate_per_s)
 
     # Fixtures first, because whether today is a matchday decides how long
     # everything else may be cached. On a matchday prices, news and status

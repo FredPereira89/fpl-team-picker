@@ -190,3 +190,19 @@ def test_one_week_rank_and_multi_period_cannot_both_decide(tmp_path):
     )
     with pytest.raises(ValueError, match="cannot both decide"):
         load_config(p)
+
+
+def test_fetch_settings_load_from_the_data_block(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("data:\n  fetch_workers: 2\n  fetch_rate_per_s: 3.5\n")
+    cfg = load_config(path)
+    assert cfg.fetch_workers == 2
+    assert cfg.fetch_rate_per_s == 3.5
+
+
+def test_fetch_settings_default_when_absent(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("budget: 100.0\n")
+    cfg = load_config(path)
+    assert cfg.fetch_workers == 4
+    assert cfg.fetch_rate_per_s == 5.0

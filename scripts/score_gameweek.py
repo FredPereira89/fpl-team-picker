@@ -57,7 +57,9 @@ def main() -> int:
 
     cfg = load_config(args.config)
     ttl = 24 * 365 if args.no_refresh else cfg.cache_ttl_hours
-    client = FplClient(Cache(DATA_ROOT / "cache"), ttl_hours=ttl)
+    client = FplClient(Cache(DATA_ROOT / "cache"), ttl_hours=ttl,
+                       fetch_workers=cfg.fetch_workers,
+                       fetch_rate_per_s=cfg.fetch_rate_per_s)
 
     pred = load_predictions(gw, DATA_ROOT)
     player_ids = [int(i) for i in pred["player_id"]]

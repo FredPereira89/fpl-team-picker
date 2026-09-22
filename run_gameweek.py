@@ -93,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
     first_event = 1
 
     if args.mode == 2:
-        client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours)
+        client = FplClient(Cache(data_root / "cache"), ttl_hours=cfg.cache_ttl_hours,
+                           fetch_workers=cfg.fetch_workers,
+                           fetch_rate_per_s=cfg.fetch_rate_per_s)
         live, errors = resolve_current_squad(cfg, args.gw, state_path, client)
         if live is None:
             for msg in errors:
@@ -107,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
             chip_events, first_event = live.chip_events, live.first_event
 
     def progress(done: int, total: int) -> None:
-        # Player history is fetched one request per second on a cold cache, so a
-        # first run takes minutes. Say so rather than looking hung.
+        # Player history is fetched a few requests at a time on a cold cache,
+        # so a first run still takes a couple of minutes.
         if done == 1 or done == total or done % 100 == 0:
             print(f"Fetching player history... {done}/{total}", flush=True)
 

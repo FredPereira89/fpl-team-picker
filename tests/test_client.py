@@ -323,3 +323,210 @@ def test_a_raising_progress_callback_still_stops_the_fetch(tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         c.element_summaries([1, 2, 3], progress=progress)
+
+
+# Concurrent fetch: retries, server backoff, interruption, and duplicate IDs.
+import threading
+import time
+from email.utils import format_datetime
+
+import requests
+
+import fpl.data.client as client_mod
+
+
+class ScriptedResponse:
+    def __init__(self, payload, status=200, headers=None):
+        self._p, self.status_code, self.headers = payload, status, headers or {}
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+class ScriptedSession:
+    """Give each URL its own sequence of responses, safely across threads."""
+
+    def __init__(self, scripts, latency_s: float = 0.0):
+        self.scripts = {url: list(steps) for url, steps in scripts.items()}
+        self.latency_s = latency_s
+        self.calls: list[str] = []
+        self.lock = threading.Lock()
+
+    def get(self, url, timeout=None):
+        with self.lock:
+            self.calls.append(url)
+            steps = self.scripts[url]
+            step = steps.pop(0) if len(steps) > 1 else steps[0]
+        if self.latency_s:
+            time.sleep(self.latency_s)
+        if isinstance(step, type) and issubclass(step, Exception):
+            raise step("scripted")
+        status, headers = step if isinstance(step, tuple) else (step, {})
+        return ScriptedResponse({"url": url}, status, headers)
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(client_mod, "BACKOFF_S", (0.0, 0.0, 0.0))
+
+
+def test_transient_503_is_retried_until_it_succeeds(tmp_path, no_backoff):
+    session = ScriptedSession({_es(1): [503, 503, 200]})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+
+    assert client.element_summaries([1]) == {1: {"url": _es(1)}}
+    assert len(session.calls) == 3
+    assert client.fetch_failures == set() and client.stale is False
+
+
+def test_429_pauses_the_limiter_and_retries(tmp_path, no_backoff, monkeypatch):
+    session = ScriptedSession({_es(1): [(429, {"Retry-After": "0"}), 200]})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+    pauses = []
+    real = client._limiter.pause_for
+    monkeypatch.setattr(client._limiter, "pause_for",
+                        lambda seconds: (pauses.append(seconds), real(seconds)))
+
+    assert 1 in client.element_summaries([1])
+    assert len(session.calls) == 2
+    assert pauses == [0.0]
+
+
+def test_connection_errors_are_retried(tmp_path, no_backoff):
+    session = ScriptedSession({_es(1): [requests.ConnectionError, 200]})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+
+    assert 1 in client.element_summaries([1])
+    assert len(session.calls) == 2
+
+
+def test_404_is_not_retried(tmp_path, no_backoff):
+    session = ScriptedSession({_es(1): [404]})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+
+    assert client.element_summaries([1]) == {}
+    assert len(session.calls) == 1
+    assert client.fetch_failures == {1}
+
+
+def test_persistent_503_gives_up_after_bounded_retries(tmp_path, no_backoff):
+    cache = Cache(tmp_path)
+    cache.put("element-summary-2", {"src": "old"}, now=now() - timedelta(days=11))
+    session = ScriptedSession({_es(1): [503], _es(2): [503]})
+    client = FplClient(cache, rate_limit_s=0, session=session)
+
+    assert client.element_summaries([1, 2], not_before=now() - timedelta(days=2)) == {
+        2: {"src": "old"}}
+    assert client.fetch_failures == {1}
+    assert session.calls.count(_es(1)) == 4
+
+
+def test_an_unexpected_error_is_not_retried(tmp_path, no_backoff):
+    session = ScriptedSession({_es(1): [RuntimeError]})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+
+    assert client.element_summaries([1]) == {}
+    assert len(session.calls) == 1
+
+
+def test_retry_after_accepts_seconds_and_http_dates():
+    parse = FplClient._retry_after
+    assert parse(ScriptedResponse({}, 429, {"Retry-After": "7"})) == 7.0
+    soon = datetime.now(timezone.utc) + timedelta(seconds=90)
+    got = parse(ScriptedResponse({}, 429,
+                                 {"Retry-After": format_datetime(soon, usegmt=True)}))
+    assert 85 <= got <= 91
+    past = datetime.now(timezone.utc) - timedelta(seconds=30)
+    assert parse(ScriptedResponse({}, 429,
+                                  {"Retry-After": format_datetime(past, usegmt=True)})) == 0.0
+    assert parse(ScriptedResponse({}, 429, {"Retry-After": "soon"})) is None
+    assert parse(ScriptedResponse({}, 429, {})) is None
+
+
+def test_a_long_retry_after_stops_asking_and_falls_back(tmp_path, no_backoff):
+    cache = Cache(tmp_path)
+    for pid in (2, 3, 4, 5):
+        cache.put(f"element-summary-{pid}", {"src": "old"},
+                  now=now() - timedelta(days=11))
+    scripts = {_es(1): [(429, {"Retry-After": "3600"})]}
+    scripts.update({_es(pid): [200] for pid in (2, 3, 4, 5)})
+    session = ScriptedSession(scripts)
+    client = FplClient(cache, rate_limit_s=0, session=session, fetch_workers=1)
+
+    out = client.element_summaries([1, 2, 3, 4, 5],
+                                   not_before=now() - timedelta(days=2))
+    assert session.calls.count(_es(1)) == 1
+    assert len(session.calls) <= 2
+    assert set(out) == {2, 3, 4, 5}
+    assert all(out[pid] == {"src": "old"} for pid in (3, 4, 5))
+    assert client.fetch_failures == {1}
+    assert client.stale is True
+
+
+class _Stop(Exception):
+    pass
+
+
+def _stop_at(n):
+    def progress(done, total):
+        if done == n:
+            raise _Stop
+    return progress
+
+
+def test_an_interrupted_refresh_stops_its_workers(tmp_path):
+    session = ScriptedSession({_es(pid): [200] for pid in range(1, 41)}, latency_s=0.1)
+    cache = Cache(tmp_path)
+    client = FplClient(cache, rate_limit_s=0, session=session,
+                       fetch_workers=2, fetch_rate_per_s=0)
+
+    started = time.monotonic()
+    with pytest.raises(_Stop):
+        client.element_summaries(range(1, 41), progress=_stop_at(3))
+    elapsed = time.monotonic() - started
+    calls_at_return = len(session.calls)
+    time.sleep(0.3)
+
+    assert elapsed < 1.0
+    assert len(session.calls) == calls_at_return
+    assert calls_at_return <= 7
+    assert sum(bool(cache.newest(f"element-summary-{pid}")) for pid in range(1, 41)) >= 3
+
+
+def test_an_interrupt_cuts_a_retry_backoff_short(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_mod, "BACKOFF_S", (5.0, 5.0, 5.0))
+    scripts = {_es(1): [503, 200]}
+    scripts.update({_es(pid): [200] for pid in range(2, 9)})
+    session = ScriptedSession(scripts, latency_s=0.02)
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session,
+                       fetch_workers=2, fetch_rate_per_s=0)
+
+    started = time.monotonic()
+    with pytest.raises(_Stop):
+        client.element_summaries(range(1, 9), progress=_stop_at(3))
+    assert time.monotonic() - started < 1.0
+    assert session.calls.count(_es(1)) == 1
+
+
+def test_duplicate_ids_are_fetched_once(tmp_path):
+    session = PerUrlSession({_es(1): {"id": 1}, _es(2): {"id": 2}})
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=session)
+    seen = []
+
+    out = client.element_summaries([1, 2, 1],
+                                   progress=lambda done, total: seen.append((done, total)))
+    assert list(out) == [1, 2]
+    assert sorted(session.calls) == [_es(1), _es(2)]
+    assert seen[-1] == (2, 2)
+
+
+def test_rate_limit_zero_leaves_the_fetch_uncapped(tmp_path):
+    client = FplClient(Cache(tmp_path), rate_limit_s=0, session=PerUrlSession({}))
+    assert client._limiter.rate == 0.0
+    assert FplClient(Cache(tmp_path), session=PerUrlSession({}))._limiter.rate == 5.0
+    assert FplClient(Cache(tmp_path), rate_limit_s=0, session=PerUrlSession({}),
+                     fetch_rate_per_s=2)._limiter.rate == 2.0

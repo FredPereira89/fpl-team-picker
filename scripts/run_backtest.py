@@ -173,7 +173,9 @@ def tier2(cache: Cache, cfg) -> dict:
 def main():
     cfg = load_config(ROOT / "config.yaml")
     cache = Cache(DATA_ROOT / "cache")
-    client = FplClient(cache, ttl_hours=cfg.cache_ttl_hours)
+    client = FplClient(cache, ttl_hours=cfg.cache_ttl_hours,
+                       fetch_workers=cfg.fetch_workers,
+                       fetch_rate_per_s=cfg.fetch_rate_per_s)
 
     t1 = tier1(client, cache)
     t2 = tier2(cache, cfg)
