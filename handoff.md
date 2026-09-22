@@ -988,3 +988,31 @@ The re-review's missing caller-level cases, each now with a named test:
 Codex's earlier passes were review-only. Review 7 changed production rank,
 simulation, pipeline and report code, added regressions, and reconciled this
 handoff.
+
+## Performance refactor: fetch and cache (2026-09-22, in progress)
+
+Separate initiative, isolated in worktree `.claude/worktrees/perf-fetch-and-cache`
+(branch `worktree-perf-fetch-and-cache`, off `master` @ `c3a5c8c`). Not yet
+merged; this section tracks it in case the session is interrupted.
+
+**Why:** GW6 profiling found a weekly run is slow two ways — a post-gameweek
+refresh crawls ~667 element-summaries one at a time behind a 1 s throttle
+(11+ min), and every run's cache lookups `glob()` the whole cache directory
+per call (22s/40.6s of a cache-only GW6 run). Spec:
+`docs/superpowers/specs/2026-09-22-fetch-and-cache-perf-design.md` (2 review
+rounds, both addressed — see its Problem/Goals sections). Plan:
+`docs/superpowers/plans/2026-09-22-fetch-and-cache-perf.md`.
+
+**Approach:** cache slug→paths index (mtime-validated, self-healing) +
+concurrent element-summary fetch (bounded thread pool, shared token-bucket
+limiter, 429/5xx retry with Retry-After, per-player failure containment,
+cancellable) + optional xP vectorization. Executing via
+superpowers:subagent-driven-development. SDD workspace:
+`.superpowers/sdd/2026-09-22-fetch-and-cache-perf/` (ledger:
+`progress.md` inside it — check there first for exact task status).
+
+**Status:** setup in progress as of this entry. Update the line below after
+each task completes; do not re-derive progress from memory — read the SDD
+ledger.
+
+**Latest:** (updated as tasks land)
