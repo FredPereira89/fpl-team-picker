@@ -1017,12 +1017,13 @@ NOTE: workspace dir has a `-plans` suffix due to a path-resolution quirk hit
 during setup — see ledger's "Tooling note") for exact status; do not
 re-derive progress from memory.
 
-**Latest:** Tasks 1-2 complete, reviews clean. Task 3 implemented (commit
-4629607, parity/containment tests for element_summaries, 784 passed/4
-xfailed), review in progress. Tasks 4-6 remain (cache index, rate limiter,
-concurrent fetch — the production code changes). Task 7 (optional xP
-vectorization) is explicitly gated on user go-ahead after Task 6, per the
-plan. No Critical/Important findings in any review so far; one setup-time
-tooling gotcha recorded in the SDD ledger (sdd-workspace script's
-`git rev-parse --show-toplevel` path-style instability — see ledger's
-"Tooling note" — worked around by managing the workspace dir by hand).
+**Latest:** Tasks 1-3 complete. Task 3 needed one fix round (a containment
+test didn't reach the branch it claimed to — see ledger's "plan-text defect"
+ruling; fixed and re-reviewed clean, edaf677). Task 4 (cache slug index,
+first production-code change) dispatched and in progress. Tasks 5-6 remain
+(rate limiter, concurrent fetch). Task 7 (optional xP vectorization) is
+explicitly gated on user go-ahead after Task 6, per the plan. No other
+Critical/Important findings so far; one setup-time tooling gotcha recorded
+in the SDD ledger (sdd-workspace script's `git rev-parse --show-toplevel`
+path-style instability — see ledger's "Tooling note" — worked around by
+managing the workspace dir by hand).
