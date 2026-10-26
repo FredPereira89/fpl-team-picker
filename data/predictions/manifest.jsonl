@@ -6,3 +6,13 @@
 {"actioned_at": "2026-09-21T08:53:17.167062+00:00", "gw": 6, "kind": "actioned", "version": "20260921T083241485768Z"}
 {"config_hash": "effb83032b27", "created_at": "2026-09-21T09:22:38.527998+00:00", "deadline": "2026-10-10T10:00:00Z", "gw": 6, "kind": "version", "model_version": "962d9c2-dirty", "origin": "live", "snapshot": "20260921T092238506644Z", "version": "20260921T092238527998Z"}
 {"actioned_at": "2026-09-21T09:22:40.375441+00:00", "gw": 6, "kind": "actioned", "version": "20260921T083241485768Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-13T08:47:00.450166+00:00", "deadline": "2026-10-17T10:00:00Z", "gw": 7, "kind": "version", "model_version": "74c75b3", "origin": "live", "snapshot": "20261013T084700425071Z", "version": "20261013T084700450166Z"}
+{"config_hash": "cbaf021a01dd", "created_at": "2026-10-13T08:58:30.452789+00:00", "deadline": "2026-10-17T10:00:00Z", "gw": 7, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261013T085830430488Z", "version": "20261013T085830452789Z"}
+{"actioned_at": "2026-10-13T08:58:32.717214+00:00", "gw": 7, "kind": "actioned", "version": "20261013T084700450166Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-13T15:48:05.714775+00:00", "deadline": "2026-10-17T10:00:00Z", "gw": 7, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261013T154805692319Z", "version": "20261013T154805714775Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-20T17:15:57.393074+00:00", "deadline": "2026-10-23T17:30:00Z", "gw": 8, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261020T171557369291Z", "version": "20261020T171557393074Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-20T17:42:13.143722+00:00", "deadline": "2026-10-23T17:30:00Z", "gw": 8, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261020T174213120732Z", "version": "20261020T174213143722Z"}
+{"actioned_at": "2026-10-20T17:42:15.525822+00:00", "gw": 8, "kind": "actioned", "version": "20261020T171557393074Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-26T11:25:34.846339+00:00", "deadline": "2026-10-31T11:00:00Z", "gw": 9, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261026T112534816916Z", "version": "20261026T112534846339Z"}
+{"config_hash": "e8a3764d09ee", "created_at": "2026-10-26T11:45:00.472993+00:00", "deadline": "2026-10-31T11:00:00Z", "gw": 9, "kind": "version", "model_version": "74c75b3-dirty", "origin": "live", "snapshot": "20261026T114500450735Z", "version": "20261026T114500472993Z"}
+{"actioned_at": "2026-10-26T11:45:02.672874+00:00", "gw": 9, "kind": "actioned", "version": "20261026T112534846339Z"}
